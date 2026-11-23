@@ -50014,7 +50014,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		});
 		let inset, insetSection;
 		for (const section of article.sections.slice(1)) {
-			inset = photos.slice(1).find((photo) => section.paragraphs.some((p) => p.sourceIds.includes(photo.sourceId)));
+			inset = photos.slice(1).find((photo) => photo.alt && topicFilterKey(photo.alt) !== topicFilterKey(photos[0].alt) &&
+				section.paragraphs.some((p) => p.sourceIds.includes(photo.sourceId)));
 			if (inset) { insetSection = section; break; }
 		}
 		const lead = photos.filter((photo) => photo !== inset);

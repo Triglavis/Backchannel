@@ -852,3 +852,44 @@ test("a public share query preserves the canonical article's access and snippet 
   assert(limited.article.sources[0].excerpt.length <= 32);
   assert.deepEqual(limited.article.sections, []);
 });
+
+test("supplementing an acquisition story preserves named actors when another company was the subject in the source passage", async () => {
+  const subject = { id: "story:sale", label: "Maple buys Cedar Maps" };
+  const deal = "Cedar agreed to sell Cedar Maps to Maple for $3 billion pending regulatory approval.";
+  const history = "Cedar paid $8 billion for its mapping division in 2020.";
+  const named = "Maple filed the proposed agreement with regulators in October.";
+  const prior = "Maple previously invested in smaller software businesses. ";
+  const page = (parts) => "<title>" + subject.label + "</title><article>" + parts.map((p) => "<p>" + p + "</p>").join("") + "</article>";
+  const answer = { sections: [{ heading: "Sale terms", paragraphs: [
+    { sentences: [point("Cedar agreed to sell Cedar Maps to Maple for $3 billion.", "s1", deal)] },
+    { sentences: [point("Cedar paid $8 billion for its mapping division in 2020.", "s2", history)] },
+  ] }], events: [] };
+  for (const opener of ["The company", "In September, the firm", "Last September the company", "The startup"]) {
+    const orphan = opener + " bought Seaport Software for 10% of its former value.";
+    const result = await buildTopicArticle(subject, [bridge, ferry], { now, ai: { run: () => ({ response: answer }) },
+      fetcher: async (url) => html(url === bridge.url ? page([deal, prior + orphan, named]) : page([history])) });
+    assert.equal(result.method, "synthesis");
+    const details = result.sections.slice(1).flatMap(({ paragraphs }) => paragraphs);
+    assert(details.every(({ text }) => !text.includes("Seaport Software")), opener);
+    assert(details.some(({ text, citations }) => text.includes(named) && citations[0].excerpt === named));
+  }
+});
+
+test("supplementary reporting on a release chooses concrete features ahead of the publisher's celebration", async () => {
+  const subject = { id: "story:bird", label: "Ladybird is now in alpha" };
+  const lead = "Alpha builds of Ladybird are available today for macOS and Linux.";
+  const praise = "There’s still a mountain of work ahead of us, but I’m very happy that you can finally try Ladybird for yourself!";
+  const updates = "The alpha is a rolling channel, and we’ll be pushing out automatic updates regularly.";
+  const crashes = "After a crash, users can inspect the crash report and decide whether to send it.";
+  const testing = "Ladybird supports WebDriver for automated testing and the Firefox DevTools protocol.";
+  const source = '<meta property="og:site_name" content="Ladybird"><title>' + subject.label + "</title><article>" +
+    [lead, praise, updates, testing, crashes].map((p) => "<p>" + p + "</p>").join("") + "</article>";
+  const answer = { sections: [{ heading: "Alpha release", paragraphs: [
+    { sentences: [point("Ladybird released alpha builds for Linux and macOS.", "s1", lead)] },
+  ] }], events: [] };
+  const article = await buildTopicArticle(subject, [bridge], { now, fetcher: async () => html(source), ai: { run: () => ({ response: answer }) } });
+  assert.equal(article.method, "synthesis");
+  const details = article.sections.slice(1).flatMap(({ paragraphs }) => paragraphs);
+  assert(details.every(({ text }) => !text.includes("very happy")));
+  assert.deepEqual(new Set(details.map(({ citations }) => citations[0].excerpt)), new Set([updates, testing, crashes]));
+});

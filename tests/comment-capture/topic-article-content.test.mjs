@@ -205,6 +205,24 @@ test("a missing publisher photo falls back to attributed topic artwork without l
 	assert(!seen.includes(hiddenImage));
 });
 
+test("uncaptioned alternatives replace a failed lead without repeating it in the brief", async (t) => {
+	const images = ["s1", "s2"].map((sourceId) => ({ sourceId, alt: "", url: "https://pictures.example.org/" + sourceId + ".jpg" }));
+	const app = await openReader({ responses: [{ match: (url) => url === articleURL, json: { ...issue, images, sections: [
+		issue.sections[0], { heading: "Schedule changes", paragraphs: [{ text: "Operators revised the schedule.", sourceIds: ["s2"] }] },
+	] } }] });
+	t.after(() => app.browser.close());
+	await app.context.route(images[0].url, (route) => route.fulfill({ status: 404 }));
+	await app.context.route(images[1].url, (route) => route.fulfill({ contentType: "image/webp", path: testPhoto }));
+	await app.page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const narrative = app.page.locator("#app-article-body .app-topic-narrative");
+	await narrative.getByRole("heading", { name: "Schedule changes" }).waitFor();
+	assert(await waitFor(() => narrative.evaluate((el) => {
+		const photo = el.querySelector(":scope > figure img");
+		return photo?.complete && photo.naturalWidth > 0 && photo.src.endsWith("/s2.jpg");
+	}), 2500));
+	assert.equal(await narrative.locator("figure").count(), 1);
+});
+
 test("thin coverage keeps titles in Sources and quotes only complete publisher descriptions", async () => {
 	const listed = "The public listing describes this link as “Some trains used the old signals until Tuesday.”";
 	const byline = issue.sources[1].title + " Sam Tracks, Transit DeskSun, November 22, 2026 at 3:33 PM UTC Rail...";
