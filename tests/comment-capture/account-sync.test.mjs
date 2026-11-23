@@ -1089,8 +1089,10 @@ test('a passkey timeout cannot appear on sign-in after the account session is re
   const app = await launchApp({sharedStore:true, values:{[storage]: session}});
   try {
     await app.page.clock.install();
-    await mockAccount(app, {email:'birb@example.com',capabilities:{emailAvailable:true}}).start;
-    const panel = await settings(app);
+    await mockAccount(app, {revision:0,ciphertext:null,email:'birb@example.com',capabilities:{emailAvailable:true}}).start;
+    const panel = await settings(app, appURL, {
+      beforeOpen: async () => assert(await waitFor(() => app.store.get(storage)?.base, 5000), 'the initial account sync completes'),
+    });
     await app.page.evaluate(() => {
       Object.defineProperty(Object.getPrototypeOf(navigator.credentials),'get',{value: () => {
         window.confirmingDeletion = true;
