@@ -1,0 +1,371 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { launchApp, waitFor } from "./harness.mjs";
+
+const catalogURL = "https://topics.backchnnl.app/api/topics";
+const topic = { id: "topic:railway-signals", label: "Railway signal upgrades", kind: "topic" };
+const articleURL = catalogURL + "/article?id=topic%3Arailway-signals";
+const issue = {
+	version: 1, topic: { id: topic.id, label: topic.label },
+	generatedAt: "2026-11-20T12:00:00Z", method: "synthesis",
+	sources: [
+		{
+			id: "s1", publisher: "Signal Journal", title: 'An upgrade for the "blue line"',
+			url: "https://framed.example.com/post/260", excerpt: "Crews tested the interlocking at both ends of the line.",
+			publishedAt: "2026-11-18T12:00:00Z", sharedAt: "2026-11-19T12:00:00Z",
+			discussions: [{ url: "https://news.ycombinator.com/item?id=9410", title: "What changes for operators?", source: "hn", comments: 3 }],
+		},
+		{
+			id: "s2", publisher: "Transit Desk", title: "The <signal> moved", url: "https://plain.example.org/post",
+			excerpt: "The advisory keeps the old timetable until the new signals enter service.",
+			publishedAt: null, sharedAt: "2026-11-20T07:00:00Z", discussions: [],
+		},
+	],
+	sections: [{ heading: "Commissioning the line", paragraphs: [
+		{ text: "The operators tested the interlocking before changing the schedule.", sourceIds: ["s1", "s2"] },
+		{ text: "One of the source headlines contains a literal <signal> tag.", sourceIds: ["s2"] },
+	] }],
+	timeline: [
+		{ date: "2026-11-20T07:00:00Z", kind: "shared", text: "The timetable advisory was shared.", sourceIds: ["s2"] },
+		{ date: "2026-11-18T12:00:00Z", kind: "published", text: "Signal Journal published its test report.", sourceIds: ["s1"] },
+		{ date: "2026-11-17", kind: "event", text: "Crews completed the evening tests.", sourceIds: ["s2"] },
+		{ date: "2026-11-16", kind: "event", text: "Crews began testing the control room.", sourceIds: ["s1"] },
+	],
+};
+
+function openReader({ catalogPages = [], responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
+	const now = Date.now();
+	const index = {
+		version: 1, generatedAt: new Date(now).toISOString(), topics: [topic],
+		pages: [{ key: "framed.example.com/post/260", topicIds: [topic.id] }, { key: "plain.example.org/post", topicIds: [topic.id] }, ...catalogPages],
+	};
+	const stories = issue.sources.map((source, i) => ({
+		url: source.url, title: source.title, id: 9410 + i, source: "hn", time: Math.floor(now / 1000) - 60 * (i + 1),
+		descendants: 3, topic: "technology",
+	}));
+	return launchApp({
+		sharedStore: true,
+		settings: { updateCheck: false, sourceRefreshMinutes: 0, sources: { hn: true }, frontPageMode: "topics", frontPageTopics: ["technology"] },
+		values: { "HNewhere:app_panes": { list: true, discussion: true }, "HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now, stories } },
+		responses: [{ match: (url) => url === catalogURL, json: index }, ...responses],
+		...options,
+	});
+}
+
+for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
+	test(`a topic shows its cited brief, milestones, open discussion list and originals together at ${width}px in ${scheme}`, async () => {
+		let requests = 0;
+		const additionalThreads = [null, 0, 3, 3, 1].map((comments, index) => ({
+			url: "https://news.ycombinator.com/item?id=" + (9450 + index),
+			title: "Operator report " + (index + 1), source: "hn", comments,
+		}));
+		const busiest = { url: "https://news.ycombinator.com/item?id=9460", title: "Control room handover", source: "hn", comments: 11 };
+		const edition = { ...issue, sources: [
+			{ ...issue.sources[0], discussions: [...issue.sources[0].discussions, ...additionalThreads] },
+			{ ...issue.sources[1], discussions: [busiest] },
+		], sections: [{ ...issue.sections[0], heading: "agreement terms for the EU and NASA" }] };
+		const app = await openReader({ viewport: { width, height: 740 }, colorScheme: scheme, responses: [
+			{ match: (url) => url === articleURL && requests++ === 0, status: 202, headers: "Retry-After: 1" },
+			{ match: (url) => url === articleURL, json: edition },
+		] });
+		try {
+			const { page, context } = app;
+			page.setDefaultTimeout(7000);
+			await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+			const article = page.locator("#app-article-body article");
+			await article.getByRole("heading", { name: "Agreement terms for the EU and NASA", exact: true }).waitFor();
+			await article.getByRole("heading", { name: topic.label, level: 1 }).waitFor();
+			assert.match(await article.locator(".bc-reader-byline").innerText(), /^AI-generated brief · 2 sources · Updated Nov 20, 2026$/);
+			assert.equal(await article.getByRole("button", { name: /^(Brief|Timeline|Sources)$/ }).count(), 0);
+			const paragraph = article.getByText(issue.sections[0].paragraphs[0].text, { exact: false }).and(article.locator("p"));
+			assert.deepEqual(await paragraph.getByRole("button").allTextContents(), ["1", "2"]);
+			const citation = paragraph.getByRole("button", { name: "Source 2, Transit Desk" });
+			await citation.click();
+			const dialog = page.getByRole("dialog", { name: issue.sources[1].title });
+			await dialog.getByText(issue.sources[1].excerpt).waitFor();
+			assert.match(await dialog.innerText(), /Shared.*Nov 20, 2026/);
+			assert.equal(await article.locator("signal").count(), 0);
+			const original = dialog.getByRole("link", { name: /Open original/ });
+			assert.equal(await original.getAttribute("href"), issue.sources[1].url);
+			const [tab] = await Promise.all([context.waitForEvent("page"), original.click()]);
+			await tab.waitForURL(issue.sources[1].url);
+			assert.equal(await tab.evaluate(() => window.opener === null), true);
+			await tab.close();
+			await page.bringToFront();
+			await page.keyboard.press("Escape");
+			await dialog.waitFor({ state: "hidden" });
+			assert.equal(await citation.evaluate((el) => el === el.getRootNode().activeElement), true);
+
+			const events = article.getByRole("list", { name: "Timeline" }).getByRole("listitem");
+			assert.deepEqual(await events.locator("time").evaluateAll((nodes) => nodes.map((el) => el.dateTime.slice(0, 10))), ["2026-11-16", "2026-11-17"]);
+			const originals = article.getByRole("list", { name: "Sources" });
+			assert.equal(await originals.getByRole("link", { name: issue.sources[0].title }).getAttribute("href"), issue.sources[0].url);
+			assert.match(await originals.innerText(), /Published Nov 18, 2026.*Shared Nov 19, 2026/);
+			assert.match(await originals.innerText(), /Shared Nov 20, 2026/);
+			const discussion = article.getByRole("complementary", { name: "Discussions", exact: true });
+			const thread = discussion.getByRole("link", { name: /What changes for operators/ });
+			await thread.waitFor();
+			assert.equal(await thread.getAttribute("href"), issue.sources[0].discussions[0].url);
+			const external = thread.locator("xpath=ancestor::li[1]").locator(".app-topic-thread-original");
+			assert.equal(await external.getAttribute("href"), issue.sources[0].discussions[0].url);
+			assert.equal(await external.getAttribute("target"), "_blank");
+			assert.match(await discussion.innerText(), /3 comments/);
+			const rows = await discussion.locator("li > [data-topic-thread]").evaluateAll((links) =>
+				links.map((anchor) => [anchor.href, Number(anchor.nextElementSibling.textContent.match(/(\d+) comments?/)?.[1] ?? -1)]));
+			assert.equal(rows[0][0], busiest.url);
+			assert.deepEqual(rows.map((row) => row[1]), rows.map((row) => row[1]).sort((a, b) => b - a));
+			assert.deepEqual(rows.filter(([url]) => additionalThreads.some((thread) => thread.url === url)).map(([url]) => url),
+				[2, 3, 4, 1, 0].map((index) => additionalThreads[index].url), "every thread appears and ties preserve source order");
+			assert(await article.evaluate((el, wide) => {
+				const narrative = el.querySelector(".app-topic-narrative").getBoundingClientRect();
+				const discussion = el.querySelector(".app-topic-discussions").getBoundingClientRect();
+				const sources = el.querySelector(".app-topic-sources").getBoundingClientRect();
+				return wide ? discussion.left >= narrative.right && discussion.top < narrative.bottom && sources.top >= narrative.bottom :
+					discussion.top >= narrative.bottom && sources.top >= discussion.bottom;
+			}, width > 700), "the wide layout has a right column and the compact layout flows from brief to discussions to sources");
+			assert.deepEqual(await article.evaluate((el) => {
+				const host = el.getRootNode().host;
+				const before = getComputedStyle(el).fontSize;
+				host.style.setProperty("--app-text-zoom", "1.4");
+				return [parseFloat(getComputedStyle(el).fontSize) > parseFloat(before), el.scrollWidth <= el.clientWidth + 1, getComputedStyle(el).color];
+			}), [true, true, scheme === "dark" ? "rgb(216, 216, 216)" : "rgb(31, 31, 28)"]);
+			assert.equal(app.requests.filter((r) => r.url === articleURL).every((r) => r.anonymous && r.method === "GET" && !r.hasBody), true);
+			assert.deepEqual(app.errors, []);
+		} finally {
+			await app.browser.close();
+		}
+	});
+}
+
+test("thin coverage keeps titles in Sources and quotes only complete publisher descriptions", async () => {
+	const listed = "The public listing describes this link as “Some trains used the old signals until Tuesday.”";
+	const byline = issue.sources[1].title + " Sam Tracks, Transit DeskSun, November 22, 2026 at 3:33 PM UTC Rail...";
+	const full = "A U.S. operator and Rep. Jo Fox reviewed the signal tests with the station manager.";
+	const thin = { ...issue, method: "coverage", sections: [], timeline: issue.timeline.slice(0, 2),
+		sources: [{ ...issue.sources[0], excerpt: listed }, { ...issue.sources[1], excerpt: byline }] };
+	const earlier = { ...thin, sections: [{ heading: "Coverage", paragraphs: [{ text: "A public listing shared a timetable.", sourceIds: ["s1"] }] }],
+		sources: [thin.sources[0], { ...issue.sources[1], excerpt: full }] };
+	let limited = true;
+	const app = await openReader({ responses: [
+		{ match: (url) => url === articleURL && limited, json: thin },
+		{ match: (url) => url === articleURL, json: earlier },
+	] });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(7000);
+		await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+		const article = page.locator("#app-article-body article");
+		const narrative = article.locator(".app-topic-narrative");
+		await article.getByRole("list", { name: "Sources" }).getByText(/^Signal Journal/).waitFor();
+		assert.match(await narrative.getByRole("status").innerText(), /original sources/i);
+		assert.equal(await narrative.locator("p").count(), 1);
+		assert.equal(await narrative.locator(".bc-reader-byline, .app-topic-timeline").count(), 0);
+		assert.equal(await article.getByRole("list", { name: "Sources" }).getByRole("link").count(), 2);
+		await article.getByRole("complementary", { name: "Discussions" }).locator("[data-topic-thread]").first().waitFor();
+		for (const publisher of issue.sources.map((s) => s.publisher)) {
+			await article.getByRole("list", { name: "Sources" }).getByRole("button", { name: new RegExp(publisher) }).click();
+			assert.equal(await page.getByRole("dialog").locator(".app-topic-source-excerpt").count(), 0);
+			await page.keyboard.press("Escape");
+		}
+		limited = false;
+		await page.reload();
+		const paragraph = narrative.locator(".app-topic-brief-section p");
+		await paragraph.waitFor();
+		assert((await paragraph.innerText()).includes(full));
+		assert.doesNotMatch(await narrative.innerText(), /public listing|AI-generated brief/);
+		await paragraph.getByRole("button", { name: "Source 2, Transit Desk" }).click();
+		await page.getByRole("dialog").getByText(full, { exact: true }).waitFor();
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("two claims citing the same article open their respective supporting passages, including after a repaint", async () => {
+	const first = { text: "Drivers checked the west signal first.", sourceIds: ["s1"],
+		citations: [{ sourceId: "s1", excerpt: "Testing started at the west signal." }] };
+	const second = { text: "The east signal passed its test later.", sourceIds: ["s1"],
+		citations: [{ sourceId: "s1", excerpt: "Later that morning the east <signal> passed inspection." }] };
+	const event = { ...issue.timeline[3], citations: [{ sourceId: "s1", excerpt: "The first shift entered the control room on November 16." }] };
+	const extraURL = "https://plain.example.org/engineering-notes";
+	const app = await openReader({
+		catalogPages: [{ key: "plain.example.org/engineering-notes", topicIds: [topic.id] }],
+		responses: [
+			{ match: (url) => url === articleURL, json: { ...issue, sections: [{ heading: "Commissioning the line", paragraphs: [first, second] }], timeline: [event] } },
+			{ match: (url) => url.startsWith(catalogURL + "/coverage?"), delay: 1200, json: {
+				version: 1, generatedAt: issue.generatedAt, topic, links: [{ url: extraURL, title: "Maintenance log", posts: [] }],
+			} },
+		],
+	});
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(7000);
+		await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+		const article = page.locator("#app-article-body article");
+		const dialog = page.getByRole("dialog", { name: issue.sources[0].title });
+		const original = dialog.getByRole("link", { name: /Open original/ });
+		const citation = (text) => article.locator("p").filter({ hasText: text }).getByRole("button", { name: "Source 1, Signal Journal" });
+		await citation(first.text).click();
+		await dialog.getByText(first.citations[0].excerpt, { exact: true }).waitFor();
+		assert.equal(await original.getAttribute("href"), issue.sources[0].url);
+		await page.keyboard.press("Escape");
+		await page.getByRole("button", { name: "Load hidden links about this topic" }).click();
+		const secondButton = citation(second.text);
+		await secondButton.click();
+		await dialog.getByText(second.citations[0].excerpt, { exact: true }).waitFor();
+		await original.focus();
+		await article.locator(".bc-reader-byline").filter({ hasText: "3 sources" }).waitFor({ state: "attached" });
+		await dialog.getByText(second.citations[0].excerpt, { exact: true }).waitFor();
+		assert.equal(await dialog.locator("signal").count(), 0);
+		assert(await original.evaluate((el) => el === el.getRootNode().activeElement));
+		await original.press("Escape");
+		await dialog.waitFor({ state: "hidden" });
+		assert(await secondButton.evaluate((el) => el === el.getRootNode().activeElement));
+		await citation(event.text).click();
+		await dialog.getByText(event.citations[0].excerpt, { exact: true }).waitFor();
+		await page.keyboard.press("Escape");
+		await article.getByRole("list", { name: "Sources" }).getByRole("button", { name: "Source 1, Signal Journal" }).click();
+		await dialog.getByText(issue.sources[0].excerpt, { exact: true }).waitFor();
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("background synthesis keeps keyboard focus on the same source and action", async () => {
+	let ready = false;
+	const longerBrief = { ...issue, sections: [
+		{ heading: "During the signal tests", paragraphs: [{ text: "The advisory keeps the old timetable during testing. ".repeat(65), sourceIds: ["s2"] }] },
+		...issue.sections,
+	] };
+	const app = await openReader({ responses: [
+		{ match: (url) => url === articleURL && !ready, status: 202, headers: "Retry-After: 1" },
+		{ match: (url) => url === articleURL, json: longerBrief },
+	] });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(7000);
+		for (const inspecting of [false, true]) {
+			ready = false;
+			await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+			const article = page.locator("#app-article-body article");
+			const source = article.locator(".app-topic-sources").getByTitle(issue.sources[0].title).first();
+			await source.focus();
+			assert.equal(await article.locator(".app-topic-brief-section").count(), 0, "pending headline-only coverage has no headline narration");
+			assert.equal(await article.getByRole("list", { name: "Timeline" }).count(), 0);
+			assert.equal(await article.getByRole("status").count(), 1);
+			const dialog = page.getByRole("dialog", { name: issue.sources[0].title });
+			const original = dialog.getByRole("link", { name: /Open original/ });
+			if (inspecting) {
+				await source.press("Enter");
+				await original.focus();
+			}
+			ready = true;
+			await article.locator("h2").filter({ hasText: "Commissioning the line" }).waitFor({ state: "attached" });
+			if (inspecting) {
+				assert(await original.evaluate((el) => el === el.getRootNode().activeElement));
+				assert(await dialog.evaluate((el) => {
+					const { top, bottom } = el.getBoundingClientRect();
+					return top >= 0 && bottom <= innerHeight;
+				}), "the inspector remains visible when the shared brief moves its citation outside the viewport");
+				await original.press("Escape");
+				await dialog.waitFor({ state: "hidden" });
+				assert(await source.evaluate((el) => {
+					const { top, bottom } = el.getBoundingClientRect();
+					return top >= 0 && bottom <= innerHeight;
+				}), "closing a refreshed inspector returns the reader to the cited passage");
+			}
+			assert(await source.evaluate((el) => el === el.getRootNode().activeElement), "focus follows the cited source when its shared ID arrives");
+		}
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("malformed citations and unsupported origins cannot replace local coverage or send private identifiers", async () => {
+	const source = await readFile(new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const seam = "\tfunction appTopicVisitIds(";
+	assert(source.includes(seam));
+	const instrumented = source.replace(seam, `	window.__topicContent = () => ({
+		parse: typeof parseAppTopicArticle === "function" && parseAppTopicArticle,
+		request: typeof requestAppTopicArticle === "function" && requestAppTopicArticle,
+		local: typeof appTopicSourceArticle === "function" && appTopicSourceArticle,
+	});
+${seam}`);
+	const coldId = "story:signal-commissioning";
+	const coldURL = catalogURL + "/article?id=" + encodeURIComponent(coldId);
+	const app = await openReader({ source: instrumented, responses: [
+		{ match: (url) => url === articleURL, status: 202, headers: "Retry-After: 2" },
+		{ match: (url) => url === coldURL, delay: 500, json: { ...issue, topic: { ...topic, id: coldId } } },
+	] });
+	try {
+		const { page } = app;
+		await page.goto("https://backchnnl.app/");
+		await page.locator("#app-list-body").waitFor();
+		assert(await page.evaluate(() => typeof window.__topicContent?.().parse === "function"), "the article parser is available");
+		const results = await page.evaluate((fixture) => {
+			const { parse, local } = window.__topicContent();
+			const altered = (edit) => {
+				const copy = structuredClone(fixture);
+				edit(copy);
+				return parse(copy, [fixture.topic.id]);
+			};
+			const sourceOnly = local("Upgraded line", "reader-story:local", [
+				{ ...fixture.sources[0], excerpt: "" }, { ...fixture.sources[1], sharedAt: null },
+			]);
+			const withUnsafeThread = altered((item) => item.sources[0].discussions[0].url = "javascript:noop()");
+			const localSources = Array.from({ length: 170 }, (_, index) => ({
+				...fixture.sources[0], id: "local" + index, url: "https://tracks.example.com/story/" + index,
+			}));
+			return {
+				rejected: [
+					parse(fixture, new Set(["story:unrelated"])),
+					altered((item) => item.sections[0].paragraphs[1].sourceIds = ["missing"]),
+					altered((item) => item.timeline[0].sourceIds = []),
+					altered((item) => item.sources[0].url = "data:text/plain,invalid"),
+					altered((item) => item.sources[0].url = "https://user:secret@public.example.org/"),
+					altered((item) => item.sources[0].id = "s2"),
+					altered((item) => item.sources[0].title = "x".repeat(300000)),
+					altered((item) => item.sections[0].paragraphs[1].citations = [{ sourceId: "s1", excerpt: "An unrelated article." }]),
+					altered((item) => item.timeline[0].citations = [{ sourceId: "s2", excerpt: "x".repeat(2500) }]),
+					altered((item) => item.sections[0].paragraphs[0].citations = Array(2).fill({ sourceId: "s1", excerpt: "Duplicated." })),
+				],
+				discussions: withUnsafeThread.sources[0].discussions,
+				fallback: sourceOnly, headlineOnly: local("Empty material", "local", fixture.sources.map((s) => ({ ...s, excerpt: "" }))),
+				localCount: local("Railway history", "local", localSources).sources.length,
+			};
+		}, issue);
+		assert.deepEqual(results.rejected, Array(10).fill(null));
+		assert.deepEqual(results.discussions, []);
+		assert.equal(results.fallback.method, "coverage");
+		const paragraphs = results.fallback.sections.flatMap(({ paragraphs }) => paragraphs);
+		assert(!paragraphs.some(({ text }) => text.includes(issue.sources[0].title)));
+		assert(paragraphs.some(({ text, sourceIds }) => text.includes(issue.sources[1].excerpt) && sourceIds.includes("s2")));
+		assert.deepEqual(results.fallback.timeline, []);
+		assert.deepEqual(results.headlineOnly.sections, []);
+		assert.equal(results.localCount, 170);
+		const invalid = await page.evaluate(async () => {
+			const { request } = window.__topicContent();
+			return Promise.all(["reader-story:private/article", "https://private.example.org/article", "topic:https://private.example.org/article"].map((id) => request(id)));
+		});
+		assert.deepEqual(invalid, Array(3).fill({ status: "missing" }));
+		await page.evaluate((id) => {
+			window.__topicAbort = new AbortController();
+			window.__topicPending = window.__topicContent().request(id, window.__topicAbort.signal);
+		}, topic.id);
+		assert(await waitFor(() => app.requests.some(({ url }) => url === articleURL)));
+		assert.equal(await page.evaluate(async () => { window.__topicAbort.abort(); return await window.__topicPending; }), null);
+		await page.waitForTimeout(2100);
+		assert.deepEqual(app.requests.filter(({ url }) => url.startsWith(catalogURL + "/article")).map((r) => r.url), [articleURL]);
+		await page.clock.install();
+		await page.evaluate((id) => { window.__topicPending = window.__topicContent().request(id); }, coldId);
+		assert(await waitFor(() => app.requests.some(({ url }) => url === coldURL)));
+		await page.clock.fastForward(28_000);
+		assert.equal(await page.evaluate(async () => (await window.__topicPending)?.article?.topic.id), coldId);
+		assert.equal(app.requests.filter(({ url }) => url === coldURL).length, 1, "a cold generation can use its full response window");
+	} finally {
+		await app.browser.close();
+	}
+});

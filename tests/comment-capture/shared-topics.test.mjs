@@ -3,6 +3,8 @@ import test from "node:test";
 import { frontPageHTML, launchApp, waitFor } from "./harness.mjs";
 
 const catalogURL = "https://topics.backchnnl.app/api/topics";
+const fallbackCatalogURL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
+const topicHosts = new Set([new URL(catalogURL).hostname, new URL(fallbackCatalogURL).hostname]);
 const topicReportURL = "https://topics.backchnnl.app/api/topic-reports";
 const catalogKey = "HNewhere:shared_topic_index";
 const now = Math.floor(Date.now() / 1000);
@@ -77,6 +79,26 @@ function rail(page, view) {
 
 function topic(list, label) {
 	return list.locator(".app-topic-row").filter({ hasText: label });
+}
+
+function topicArticleURL(id) {
+	return catalogURL + "/article?id=" + encodeURIComponent(id);
+}
+
+function expectTopicRequests(app, urls) {
+	const requests = app.requests.filter(({ url }) => topicHosts.has(new URL(url).hostname));
+	assert.deepEqual(requests.map(({ url, method, anonymous, hasBody }) => [url, method, anonymous, hasBody]),
+		urls.map((url) => [url, "GET", true, undefined]));
+}
+
+function requestsContaining(app, values) {
+	return app.requests.filter(({ url }) => values.some((value) => decodeURIComponent(url).includes(value)));
+}
+
+async function returnToTopicLinksOnPhone(page) {
+	await page.locator('#app[data-stage="article"]:not([data-moving]) .app-topic-article').waitFor();
+	await page.locator("#app-bar-back").click();
+	await page.locator('#app[data-stage="list"]:not([data-moving])').waitFor();
 }
 
 async function expectLinkTitles(list, titles) {
@@ -806,11 +828,12 @@ test("a long topic byline stays inside its pane above the links on desktop and p
 	try {
 		const { page } = app;
 		await page.goto("https://backchnnl.app/");
-		await page.locator('[data-shared-topic="story:long-heading"]').click();
 		const header = page.locator("#app-list-topic");
-		await header.getByText(/in 32 links$/).waitFor();
 		for (const viewport of [{ width: 1100, height: 680 }, { width: 320, height: 580 }]) {
 			await page.setViewportSize(viewport);
+			await page.locator('[data-shared-topic="story:long-heading"]').click();
+			if (viewport.width === 320) await returnToTopicLinksOnPhone(page);
+			await header.getByText(/in 32 links$/).waitFor();
 			const geometry = await header.evaluate((bar) => {
 				const rect = bar.getBoundingClientRect();
 				const title = bar.querySelector("strong");
@@ -826,6 +849,7 @@ test("a long topic byline stays inside its pane above the links on desktop and p
 			assert(geometry.linksBelow && geometry.listHeight > 100 && geometry.height <= 105, JSON.stringify(geometry));
 			assert.equal(geometry.label, "#" + label);
 			assert.equal(geometry.hint, geometry.label);
+			await header.getByRole("button", { name: "Back to topics", exact: true }).click();
 		}
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -854,6 +878,7 @@ test("public Topics scopes normal link rows and preserves their discussions and 
 		assert.equal(await topicsTab.getAttribute("aria-selected"), "true");
 		assert(await topicsTab.evaluate((button) => button.getRootNode().activeElement === button));
 		await permissions.click();
+		await page.locator("#app-article-body .app-topic-article").waitFor();
 		await guideLink.waitFor();
 		await reportLink.waitFor();
 		await guideLink.click();
@@ -882,12 +907,7 @@ test("public Topics scopes normal link rows and preserves their discussions and 
 		await page.getByRole("button", { name: "Close selection" }).click();
 		assert.equal(await page.locator("#app-selection-bar").isVisible(), false);
 
-		const requests = app.requests.filter(({ url }) => url.startsWith("https://topics.backchnnl.app"));
-		assert.equal(requests.length, 1);
-		assert.equal(requests[0].url, catalogURL);
-		assert.equal(requests[0].method, "GET");
-		assert.equal(requests[0].anonymous, true);
-		assert.equal(requests[0].hasBody, undefined);
+		expectTopicRequests(app, [catalogURL, topicArticleURL("topic:permissions")]);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1202,11 +1222,6 @@ test("right-clicking a topic row opens its menu and can select its links", async
 		await menu.waitFor({ state: "hidden" });
 		assert(await group.evaluate((row) => row.getRootNode().activeElement === row));
 
-		await group.press("Shift+F10");
-		await menu.getByRole("menuitem", { name: "Open", exact: true }).click();
-		await expectLinkTitles(list, [guide.title, report.title]);
-		await page.getByRole("button", { name: "Back to topics" }).click();
-		assert(await waitFor(() => group.evaluate((row) => row.getRootNode().activeElement === row)));
 		await group.locator(".app-topic-meta").click({ button: "right" });
 		await menu.getByRole("menuitem", { name: "Select links" }).click();
 		await page.locator("#app-selection-bar").waitFor();
@@ -1214,6 +1229,21 @@ test("right-clicking a topic row opens its menu and can select its links", async
 		assert(await list.getByRole("checkbox", { name: `Select ${guide.title}`, exact: true }).isChecked());
 		assert(await list.getByRole("checkbox", { name: `Select ${report.title}`, exact: true }).isChecked());
 		assert.equal(await otherLink.count(), 0);
+		assert.equal(await page.locator(".app-topic-article").count(), 0);
+		expectTopicRequests(app, [catalogURL]);
+		await page.getByRole("button", { name: "Close selection" }).click();
+		const back = page.getByRole("button", { name: "Back to topics", exact: true });
+		await back.click();
+		await expectTopicStatus(group, "Read");
+		assert(await waitFor(() => group.evaluate((row) => row.getRootNode().activeElement === row)));
+
+		await group.press("Shift+F10");
+		await menu.getByRole("menuitem", { name: "Open", exact: true }).click();
+		await page.locator("#app-article-body .app-topic-article").waitFor();
+		await expectLinkTitles(list, [guide.title, report.title]);
+		assert(await waitFor(() => back.evaluate((button) => button.getRootNode().activeElement === button)));
+		await back.click();
+		assert(await waitFor(() => group.evaluate((row) => row.getRootNode().activeElement === row)));
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1266,11 +1296,12 @@ function coverageResponse(id, options = { json: coverageFixture }, offset = null
 
 const loadHiddenLinks = (page) => page.getByRole("button", { name: "Load hidden links about this topic", exact: true });
 
-async function openPermissionsTopic(page) {
+async function openPermissionsTopic(page, { phone = false } = {}) {
 	await page.goto("https://backchnnl.app/");
 	await page.getByRole("tab", { name: "By topic", exact: true }).click();
 	const list = page.locator("#app-list-body");
 	await topic(list, coverageTopic.label).click();
+	if (phone) await returnToTopicLinksOnPhone(page);
 	await list.getByRole("link", { name: report.title, exact: true }).waitFor();
 	return list;
 }
@@ -1397,7 +1428,8 @@ test("loading a filtered Collection topic reveals its private saved link locally
 	const saved = ["Firing ceramic glazes without defects", "Ceramic glazes for beginners", "Drying ceramic glazes in the studio"]
 		.map((title, i) => {
 			const key = "private" + i + ".example.org/notes?draft=" + i;
-			return { title, key, url: "https://" + key, addedAt: now * 1000, checkedAt: now * 1000, ...(i < 2 ? { foundAt: now * 1000 } : {}) };
+			return { title, key, url: "https://" + key, previewOnOpen: true, addedAt: now * 1000, checkedAt: now * 1000,
+				...(i < 2 ? { foundAt: now * 1000 } : {}) };
 		});
 	const app = await launchTopics({ stored: { "HNewhere:collected": saved } });
 	try {
@@ -1411,14 +1443,19 @@ test("loading a filtered Collection topic reveals its private saved link locally
 		await page.getByRole("menuitemradio", { name: "New discussions" }).click();
 		await list.getByRole("link", { name: saved[2].title, exact: true }).waitFor({ state: "hidden" });
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
-		await topic(list, /ceramic glazes/i).click();
+		const group = topic(list, /ceramic glazes/i);
+		const localId = await group.getAttribute("data-shared-topic");
+		assert(localId);
+		await group.click();
+		await page.locator("#app-article-body .app-topic-article").waitFor();
+		assert.equal(new URL(page.url()).searchParams.has("topic"), false);
 		await loadHiddenLinks(page).press("Enter");
 		const revealed = list.locator("[data-topic-extra] .browse-title-link");
 		await revealed.waitFor();
 		assert.equal(await revealed.getAttribute("href"), saved[2].url);
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(saved.map(({ title }) => title)));
-		assert.deepEqual(app.requests.filter(({ url }) => url.startsWith("https://topics.backchnnl.app/")).map(({ method, url, hasBody }) =>
-			[method, url, Boolean(hasBody)]), [["GET", catalogURL, false]]);
+		expectTopicRequests(app, [catalogURL]);
+		assert.deepEqual(requestsContaining(app, [localId, ...saved.map(({ url }) => new URL(url).hostname)]), []);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1481,6 +1518,8 @@ test("Reader loads additional topic links after the current rows without navigat
 		const visible = await titles.allTextContents();
 		const load = loadHiddenLinks(page);
 		await load.waitFor();
+		await page.waitForURL((url) => url.searchParams.get("topic") === coverageTopic.id);
+		const topicAddress = page.url();
 		assert(await list.locator(":scope > :last-child").getByRole("button", { name: "Load hidden links about this topic" }).isVisible());
 		assert.deepEqual(new Set(visible), new Set([guide.title, report.title]));
 		assert.equal(await page.locator("#app-list-topic").getByRole("link", { name: /image credit/i }).count(), 0);
@@ -1491,7 +1530,7 @@ test("Reader loads additional topic links after the current rows without navigat
 		await additional.waitFor();
 		assert.deepEqual(await titles.allTextContents(), [...visible, furtherLink.title]);
 		assert.equal(await load.count(), 0);
-		assert.equal(new URL(page.url()).searchParams.has("topic"), false);
+		assert.equal(page.url(), topicAddress);
 		assert.equal(await page.getByRole("button", { name: "Back to links", exact: true }).count(), 0);
 		await page.locator("#app-list-topic").getByText(/in 3 links$/).waitFor();
 		assert(await additional.locator("xpath=ancestor::*[@data-topic-extra]").isVisible());
@@ -1590,7 +1629,7 @@ test("a topic keeps an explicitly hidden link out of the additional rows", async
 	}
 });
 
-test("a narrow phone shows the additional links row without topic header actions", async () => {
+test("a narrow phone returns from the topic article to its byline and additional links", async () => {
 	const app = await launchTopics({ viewport: { width: 320, height: 740 }, hasTouch: true, responses: [
 		{ match: (url) => url === catalogURL, json: coverageIndexWithImage },
 		coverageResponse(coverageTopic.id, { json: coverageWithImage }),
@@ -1598,8 +1637,11 @@ test("a narrow phone shows the additional links row without topic header actions
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
-		assert.deepEqual(await page.locator("#app-list-topic").getByRole("button").allTextContents(), [""]);
+		const list = await openPermissionsTopic(page, { phone: true });
+		const header = page.locator("#app-list-topic");
+		await header.getByRole("button", { name: "Read topic article", exact: true }).waitFor();
+		await header.getByRole("button", { name: "Back to topics", exact: true }).waitFor();
+		assert.equal(await header.getByRole("button").count(), 2);
 		const load = loadHiddenLinks(page);
 		await load.waitFor();
 		const box = await load.boundingBox();
@@ -1665,8 +1707,9 @@ test("a direct topic link opens its group in the current view", async () => {
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/?topic=" + coverageTopic.id);
 		await page.locator("#app-list-topic-title").getByText("#" + coverageTopic.label).waitFor();
+		await page.locator("#app-article-body .app-topic-article").getByRole("heading", { name: coverageTopic.label, exact: true }).waitFor();
 		await loadHiddenLinks(page).waitFor();
-		assert.equal(app.requests.some(({ url }) => url.startsWith(coverageURL)), false);
+		expectTopicRequests(app, [catalogURL, topicArticleURL(coverageTopic.id)]);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1836,6 +1879,7 @@ test("right-clicking a link in a topic reports the link and the displayed assign
 		const list = page.locator("#app-list-body");
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(list, "Extension permissions").click();
+		await returnToTopicLinksOnPhone(page);
 		const row = list.locator(".browse-row").filter({ hasText: guide.title });
 		await row.click({ button: "right" });
 		const menu = page.locator("#app-row-menu");
@@ -1944,12 +1988,14 @@ test("universal search opens multi-link topics and opens single links directly",
 			await link.waitFor();
 			if (scope === "Front Pages") {
 				await page.locator("#app-list-topic-title").getByText("#Extension permissions", { exact: true }).waitFor();
+				await page.locator("#app-article-body .app-topic-article").waitFor();
 			} else {
 				await page.locator("#app-list-topic").waitFor({ state: "hidden" });
 				const openedURL = await link.getAttribute("href");
 				const original = page.locator("#app-article-open");
 				assert(await waitFor(async () => await original.getAttribute("href") === openedURL),
 					scope + " opened " + await original.getAttribute("href") + " instead of " + openedURL);
+				assert.equal(await page.locator(".app-topic-article").count(), 0);
 			}
 			await reportLink.waitFor({ state: scope === "Collection" ? "detached" : "visible" });
 			const topics = page.getByRole("tab", { name: "By topic", exact: true });
@@ -1957,9 +2003,7 @@ test("universal search opens multi-link topics and opens single links directly",
 			else assert.equal(await topics.count(), 0);
 			assert.equal(await page.locator("#app-search-page").isVisible(), false);
 		}
-		const requests = app.requests.filter(({ url }) => url === catalogURL);
-		assert.equal(requests.length, 1);
-		assert(requests.every(({ method, anonymous, hasBody }) => method === "GET" && anonymous && hasBody === undefined));
+		expectTopicRequests(app, [catalogURL, topicArticleURL("topic:permissions")]);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1980,15 +2024,19 @@ test("universal search can find a local Collection topic with the public index u
 		await page.locator("#app-search-input").fill("ceramic glazes");
 		const result = page.getByRole("button", { name: "#Ceramic Glazes Collection · 2 links", exact: true });
 		await result.waitFor();
-		assert.deepEqual(app.requests.filter(({ url }) => url.includes("pottery.example") || url.includes("studio.example")), []);
-		const calls = app.requests.filter(({ url }) => url.startsWith("https://topics.backchnnl.app"));
-		assert.deepEqual(calls.map(({ url, method, anonymous, hasBody }) => ({ url, method, anonymous, hasBody })), [
-			{ url: catalogURL, method: "GET", anonymous: true, hasBody: undefined },
-		]);
+		const privateHosts = bookmarks.map(({ url }) => new URL(url).hostname);
+		assert.deepEqual(requestsContaining(app, privateHosts), []);
+		expectTopicRequests(app, [catalogURL]);
 		await result.click();
 		await page.locator("#app-list-topic-title").getByText("#Ceramic Glazes", { exact: true }).waitFor();
+		await page.locator("#app-article-body .app-topic-article").waitFor();
 		for (const { title } of bookmarks) {
 			await page.locator("#app-list-body").getByRole("link", { name: title, exact: true }).waitFor();
+		}
+		expectTopicRequests(app, [catalogURL]);
+		for (const { url, method, anonymous, hasBody } of requestsContaining(app, privateHosts)) {
+			assert(bookmarks.some((bookmark) => bookmark.url === url), url);
+			assert.deepEqual([method, anonymous, hasBody], ["GET", true, undefined]);
 		}
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -2198,11 +2246,10 @@ test("an empty source on a phone leaves the other filter chips tappable", async 
 });
 
 test("Topics can use the same public index when the custom domain is unreachable", async () => {
-	const fallbackURL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
 	const app = await launchTopics({
 		responses: [
 			{ match: (url) => url === catalogURL, status: 0 },
-			{ match: (url) => url === fallbackURL, json: catalog },
+			{ match: (url) => url === fallbackCatalogURL, json: catalog },
 		],
 	});
 	try {
@@ -2211,9 +2258,7 @@ test("Topics can use the same public index when the custom domain is unreachable
 		await page.goto("https://backchnnl.app/");
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(page.locator("#app-list-body"), "Extension permissions").waitFor();
-		const requests = app.requests.filter(({ url }) => [catalogURL, fallbackURL].includes(url));
-		assert.deepEqual(requests.map(({ url }) => url), [catalogURL, fallbackURL]);
-		assert(requests.every(({ method, anonymous, hasBody }) => method === "GET" && anonymous === true && hasBody === undefined));
+		expectTopicRequests(app, [catalogURL, fallbackCatalogURL]);
 	} finally {
 		await app.browser.close();
 	}
@@ -2252,10 +2297,7 @@ test("Collection finds subjects in unindexed bookmark titles and URL paths witho
 		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set([
 			bookmarks[0].title, bookmarks[1].title,
 		]));
-		const calls = app.requests.filter(({ url }) => url.startsWith("https://topics.backchnnl.app"));
-		assert.deepEqual(calls.map(({ url, method, anonymous, hasBody }) => ({ url, method, anonymous, hasBody })), [
-			{ url: catalogURL, method: "GET", anonymous: true, hasBody: undefined },
-		]);
+		expectTopicRequests(app, [catalogURL]);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -2271,7 +2313,7 @@ test("Collection matches a saved headline to the exact public topic before alias
 	const app = await launchTopics({
 		stored: {
 			"HNewhere:collected": [imported, additional].map(({ url, title }) => ({
-				key: new URL(url).host + new URL(url).pathname + new URL(url).search, url, title, addedAt: now * 1000,
+				key: new URL(url).host + new URL(url).pathname + new URL(url).search, url, title, addedAt: now * 1000, previewOnOpen: true,
 			})),
 		},
 		responses: [{ match: (url) => url === catalogURL, json: fixture }],
@@ -2288,8 +2330,11 @@ test("Collection matches a saved headline to the exact public topic before alias
 		await privacy.getByText(/in 2 links$/).waitFor();
 		assert.equal(await privacy.count(), 1);
 		await privacy.click();
+		await page.locator("#app-article-body .app-topic-article").waitFor();
 		await list.getByRole("link", { name: additional.title }).waitFor();
 		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set([imported.title, additional.title]));
+		expectTopicRequests(app, [catalogURL, topicArticleURL("topic:privacy")]);
+		assert.deepEqual(requestsContaining(app, [new URL(additional.url).hostname, "utm_source=bookmark-export"]), []);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -2329,8 +2374,7 @@ test("Collection groups different wording with cached page metadata and specific
 		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		await expectTopicMembers(list, authentication, bookmarks.slice(0, 2).map(({ title }) => title));
 		await expectTopicMembers(list, urbanPlanning, bookmarks.slice(2, 4).map(({ title }) => title));
-		const requests = app.requests.filter(({ url }) => url === catalogURL);
-		assert(requests.every(({ anonymous, method, hasBody }) => anonymous && method === "GET" && hasBody === undefined));
+		expectTopicRequests(app, [catalogURL]);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -3324,6 +3368,8 @@ test("overlapping topic visits from two Reader tabs preserve both read indicator
 		await topic(secondList, observatory.label).click();
 		await firstList.getByRole("link", { name: guide.title, exact: true }).waitFor();
 		await secondList.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+		await first.getByRole("button", { name: "Back to topics", exact: true }).click();
+		await first.waitForURL((url) => !url.searchParams.has("topic"));
 		await first.reload();
 		await expectTopicStatus(topic(firstList, "Extension permissions"), "Read");
 		await expectTopicStatus(topic(firstList, observatory.label), "Read");

@@ -58,16 +58,29 @@ The sources you enable determine where Backchannel looks for discussions.
 Optional Account sync uses Cloudflare to store an encrypted snapshot and
 related account metadata.
 
-The Topics view in Reader groups links that cover the same development under
-a headline drawn from the coverage. A public discussion can supply the headline
-when the publisher title is missing. Links with too little evidence stay in the
-list individually. Backchannel matches the shared index to your links and uses titles,
-URL paths, and saved page metadata to group more links on your device. Topics
-show the known counts for comments, distinct discussions, and links. The Topics
-Worker finds credited Wikipedia and Wikimedia Commons images for public subjects.
-Reader can look up a short subject name
-directly on Wikipedia when it needs a thumbnail, and caches the result on your
-device. The Commons file page gives the image credit and license.
+In Reader, **By link** lists individual links. **By topic** groups links about
+the same development under a headline drawn from their coverage. Each topic
+shows how many comments, discussions, and links it includes. Open a topic to
+read its brief, followed by a timeline when the reporting dates a development.
+Discussions appear beside the story on wide screens and inline on phones.
+Reader can preview a comment from an active public thread. Select a discussion
+to read replies in place or follow its original link.
+Source links are collected at the end. Select a number beside a passage to
+inspect the supporting text or open the publisher’s page in a new tab.
+Opening a topic marks the topic as read. Each link keeps its own read status.
+
+For a published topic, Reader requests the brief by public topic ID. The Topics
+Worker uses available publisher evidence to write a cited brief and caches it
+across readers. When there's too little reporting for a brief, the original
+sources and their discussions are still available. You can share a published
+topic by copying the Reader address. Reader also groups
+links using titles, URL paths, and saved page metadata on your device. Articles
+for device-only groups use the sources available there.
+
+The Topics Worker finds credited Wikipedia and Wikimedia Commons images for
+public subjects. Reader can look up a short subject name directly on Wikipedia
+when it needs a thumbnail, and caches the result on your device. The Commons
+file page gives the image credit and license.
 
 - Hacker News talks to the HN API, Algolia search, and news.ycombinator.com, with
 no persistent identifier attached.

@@ -140,6 +140,11 @@ for (const [width, hasTouch] of [[1600, false], [320, true]]) {
       await page.goto('https://backchnnl.app/');
       await page.getByRole('tab', {name: 'By topic', exact: true}).click();
       await page.locator('.app-topic-row').filter({hasText: topic.label}).click();
+      if (hasTouch) {
+        await page.locator('#app[data-stage="article"]:not([data-moving]) .app-topic-article').waitFor();
+        await page.locator('#app-bar-back').tap();
+        await page.locator('#app[data-stage="list"]:not([data-moving])').waitFor();
+      }
       const backSize = await size(page.getByRole('button', {name: 'Back to topics', exact: true}));
       await page.locator('#app-list-body').getByRole('link', {name: STORIES[0].title, exact: true}).click();
       if (hasTouch) {

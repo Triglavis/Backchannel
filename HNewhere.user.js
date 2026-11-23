@@ -3554,7 +3554,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 		});
 	}
 
-	function requestWithMeta(url, headers) {
+	function requestWithMeta(url, headers, { anonymous = false } = {}) {
 		return new Promise((resolve) => {
 			const failure = { ok: false, status: 0, json: null, rateLimit: null };
 			let settled = false;
@@ -3566,6 +3566,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 				method: "GET",
 				url,
 				headers,
+				...(anonymous && { anonymous: true }),
 				timeout: NETWORK_REQUEST_TIMEOUT_MS,
 				onload: function (response) {
 					let json = null;
@@ -4290,7 +4291,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 	const displayAgeCache = new Map();
 	const itemActionRequests = new Map();
 
-	async function getItem(id, { strict = false } = {}) {
+	async function getItem(id, { strict = false, anonymous = false } = {}) {
 		const key = String(id);
 
 		if (itemCache.has(key)) {
@@ -4301,7 +4302,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 		if (!load) {
 			load = {};
 			itemLoads.set(key, load);
-			load.promise = requestWithMeta("https://hacker-news.firebaseio.com/v0/item/" + id + ".json").then((response) => {
+			load.promise = requestWithMeta("https://hacker-news.firebaseio.com/v0/item/" + id + ".json", undefined, { anonymous }).then((response) => {
 				if (response.ok && response.json && itemLoads.get(key) === load) itemCache.set(key, response.json);
 				return response;
 			}).finally(() => { if (itemLoads.get(key) === load) itemLoads.delete(key); });
@@ -6496,10 +6497,10 @@ ${
 			return (await loadStories([{ objectID: String(story.id) }], { strict: true })).map(hnDiscussion);
 		},
 
-		async loadThread(discussion) {
+		async loadThread(discussion, { anonymous = false } = {}) {
 			const roots = discussion.rootKeys.length
 				? discussion.rootKeys
-				: ((await getItem(discussion.id, { strict: true }))?.kids || []).map((id) =>
+				: ((await getItem(discussion.id, { strict: true, anonymous }))?.kids || []).map((id) =>
 						sourceKey("hn", id),
 					);
 
@@ -6507,7 +6508,7 @@ ${
 				roots.map((key) => {
 					const parsed = parseSourceKey(key);
 
-					return parsed ? getItem(Number(parsed.id)) : null;
+					return parsed ? getItem(Number(parsed.id), { anonymous }) : null;
 				}),
 			);
 
@@ -6526,7 +6527,7 @@ ${
 						return null;
 					}
 
-					const item = await getItem(Number(parsed.id));
+					const item = await getItem(Number(parsed.id), { anonymous });
 
 					return item ? hnComment(item, discussion) : null;
 				},
@@ -8941,10 +8942,11 @@ ${
 			return item?.short_id ? [lobstersDiscussion(item)] : [];
 		},
 
-		async loadThread(discussion) {
+		async loadThread(discussion, { anonymous = false } = {}) {
 			const story = await checkedSourceJSON(
 				`https://lobste.rs/s/${encodeURIComponent(discussion.id)}.json`,
 				(value) => Array.isArray(value?.comments),
+				undefined, { anonymous },
 			);
 			const index = lobstersThreadIndex(story || { comments: [] }, discussion);
 
@@ -10446,10 +10448,11 @@ button {
 			return res?.post_view?.post ? [lemmyDiscussion(res.post_view)] : [];
 		},
 
-		async loadThread(discussion) {
+		async loadThread(discussion, { anonymous = false } = {}) {
 			const res = await checkedSourceJSON(
 				`https://lemmy.world/api/v3/comment/list?post_id=${encodeURIComponent(discussion.id)}&type_=All&sort=Top&max_depth=8&limit=300`,
 				(value) => Array.isArray(value?.comments),
+				undefined, { anonymous },
 			);
 			const index = lemmyThreadIndex(res?.comments || [], discussion);
 
@@ -10501,8 +10504,8 @@ button {
 		return Object.assign(new Error("Source response unavailable"), { readStatus: status, retryAt: seconds ? Date.now() + seconds * 1000 : 0 });
 	}
 
-	async function checkedSourceJSON(url, valid, headers) {
-		const response = await requestWithMeta(url, headers);
+	async function checkedSourceJSON(url, valid, headers, options) {
+		const response = await requestWithMeta(url, headers, options);
 		if (!response.ok || !valid(response.json)) throw sourceResponseError(response);
 		return response.json;
 	}
@@ -24036,7 +24039,7 @@ ${
           <li>If you set up Account sync, Backchannel uploads an encrypted copy of your settings, reading queue, saved items and notes to Cloudflare. The service stores your passkey's public credential, session records, and browser and platform labels for linked devices. Backchannel stores your verified recovery email, uses it to label new passkeys, and sends verification and recovery codes through Cloudflare. Your recovery key stays on your devices.</li>
           <li>To find discussions, it asks each source you have turned on about the page you are on. Most are told its address; Lobsters and Mastodon's search are told only its domain. A link you open in the reader from Mastodon's front page is looked up on mastodon.social by its address. A source you have turned off is asked nothing.</li>
           <li>It checks the pages in your Collection for new discussion, each at most once an hour, by sending their addresses to Hacker News, Bluesky's link index and, when Reddit answers through its archive, that archive. A page with new discussion is then looked up like the page you are on. Remove a page from Collection to stop checking it.</li>
-          <li>Reader downloads a public topic index and matches links on your device. To find topic images, Reader can send short subject names to Wikipedia and look up the resulting image credits on Wikimedia Commons. Reader loads the images without a referrer. If you send a topic report while signed in, Backchannel stores the link, the displayed topic, any suggestion, and a hashed account identifier for internal review. The identifier keeps the same account from counting twice for a link.</li>
+          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics Worker uses public publisher material for the brief. Topics based only on your own links are assembled on your device. To find topic images, Reader can send short subject names to Wikipedia and look up the resulting image credits on Wikimedia Commons. Reader loads the images without a referrer. If you send a topic report while signed in, Backchannel stores the link, the displayed topic, any suggestion, and a hashed account identifier for internal review. The identifier keeps the same account from counting twice for a link.</li>
           <li><strong>Reddit</strong>, <strong>Wikipedia</strong> and <strong>Hacker News</strong> can tell who you are. Signed in to one, its requests can arrive as your account. Signed out, Reddit and Wikipedia still send a device identifier.</li>
           <li>Voting and replying happen in a window on that source's own site, using the session you already have there.</li>
           <li>An article opened in the reader loads from the site that published it, with no referrer. If the page does not respond inside that frame, the script fetches it once, without cookies, to see whether it can be shown there and, if not, to show its text.</li>
@@ -39120,6 +39123,153 @@ ${SETTINGS_MODAL_CSS}
 	cursor:pointer;
 }
 
+.app-topic-article-scroll { container:topic-article / inline-size; }
+.app-topic-article.bc-reader {
+	--topic-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	--topic-secondary:color-mix(in srgb, var(--reader-meta) 78%, var(--reader-ink));
+	--topic-tint:color-mix(in srgb, var(--reader-link) 10%, var(--reader-page));
+	box-sizing:border-box;
+	width:100%;
+	max-width:38em;
+	padding:56px clamp(18px, 5%, 32px) max(80px, env(safe-area-inset-bottom));
+	overflow-wrap:anywhere;
+}
+.app-topic-article .bc-reader-head { display:block; margin-bottom:1.35em; padding:0 0 1em; background:none; color:inherit; font-weight:inherit; }
+.app-topic-article .bc-reader-title { margin:.15em 0 .32em; font-size:2.36em; line-height:1.07; letter-spacing:-.035em; text-wrap:pretty; }
+.app-topic-article .bc-reader-title:focus-visible { position:relative; outline:none; }
+.app-topic-article .bc-reader-title:focus-visible::before { content:""; position:absolute; inset-block:.12em; inset-inline-start:-.32em; border-inline-start:3px solid var(--reader-link); }
+.app-topic-narrative, .app-topic-discussions, .app-topic-sources { min-width:0; }
+.app-topic-article .bc-reader-byline, .app-topic-credit, .app-topic-request-status {
+	color:var(--topic-secondary);
+	font:normal .77em/1.45 var(--topic-sans);
+}
+.app-topic-article .bc-reader-byline { margin:.55em 0 0; }
+.app-topic-article :is(button, a):focus-visible { outline:2px solid var(--reader-link); outline-offset:2px; }
+.app-topic-request-status { margin:.6em 0 0; }
+.app-topic-request-status button { border:0; background:none; padding:.25em 0; font:inherit; color:var(--reader-link); text-decoration:underline; cursor:pointer; }
+.app-topic-brief-section + .app-topic-brief-section { margin-top:1.5em; }
+.app-topic-article :is(.app-topic-brief-section, .app-topic-timeline) h2 {
+	margin:0 0 .35em;
+	font:700 1.3em/1.23 var(--reader-face);
+	letter-spacing:-.018em;
+}
+.app-topic-brief-section p, .app-topic-event p, .app-topic-sources p { margin:0 0 .9em; }
+.app-topic-brief-section p:last-child, .app-topic-event p:last-child, .app-topic-sources p:last-child { margin-bottom:0; }
+.app-topic-brief-section:first-of-type > p:first-of-type { font-size:1.08em; line-height:1.5; }
+.app-topic-cited-end { white-space:nowrap; }
+.app-topic-cite {
+	position:relative;
+	top:-.38em;
+	padding:.22em .4em;
+	margin:0 0 0 .2em;
+	border:0;
+	border-radius:4px;
+	background:var(--topic-tint);
+	color:var(--reader-link);
+	font:650 .68em/1 var(--topic-sans);
+	font-variant-numeric:tabular-nums;
+	cursor:pointer;
+	vertical-align:baseline;
+}
+.app-topic-cite:hover { background:var(--reader-link); color:var(--reader-page); }
+.app-topic-timeline { margin-top:1.6em; padding-top:1em; border-top:1px solid var(--reader-rule); }
+.app-topic-article .app-topic-timeline h2 { margin-bottom:.8em; }
+.app-topic-chronology, .app-topic-sources ol, .app-topic-discussion-list { margin:0; padding:0; list-style:none; }
+.app-topic-chronology li { display:grid; grid-template-columns:3.05em minmax(0,1fr); column-gap:.9em; }
+.app-topic-chronology time { padding-top:.15em; color:var(--topic-secondary); font:600 .75em/1.25 var(--topic-sans); font-variant-numeric:tabular-nums; }
+.app-topic-chronology time b { display:block; color:var(--reader-ink); font-size:1.85em; }
+.app-topic-chronology time span { display:block; font-weight:400; }
+.app-topic-event { position:relative; padding:0 0 1.3em 1.1em; border-inline-start:1px solid var(--reader-rule); }
+.app-topic-event::before {
+	content:"";
+	position:absolute;
+	top:.28em;
+	inset-inline-start:-4px;
+	width:7px;
+	height:7px;
+	border-radius:50%;
+	background:var(--reader-link);
+	box-shadow:0 0 0 3px var(--reader-page);
+}
+.app-topic-chronology li:last-child .app-topic-event { border-color:transparent; padding-bottom:0; }
+.app-topic-event .app-topic-credit { margin-bottom:.35em; color:var(--reader-link); font-weight:600; }
+.app-topic-sources { margin-top:2em; padding-top:.64em; border-top:2px solid var(--reader-ink); }
+.app-topic-sources > h2, .app-topic-discussions > h2 { margin:0 0 .35em; color:var(--reader-ink); font:650 .95em/1.45 var(--topic-sans); }
+.app-topic-sources li { display:grid; grid-template-columns:1.7em minmax(0,1fr); gap:.5em; padding:.64em 0; border-bottom:1px solid var(--reader-rule); }
+.app-topic-sources .app-topic-cite { top:0; align-self:start; min-width:24px; min-height:24px; margin:0; }
+.app-topic-source-title { color:var(--reader-ink); text-decoration:none; }
+.app-topic-source-title:hover, .app-topic-discussions a:hover { color:var(--reader-link); text-decoration:underline; }
+.app-topic-source-title { display:block; font:580 .85em/1.45 var(--topic-sans); }
+.app-topic-discussions { margin-top:1.6em; padding-top:.8em; border-top:1px solid var(--reader-rule); }
+.app-topic-discussion-list > li { padding:.6em 0; border-bottom:1px solid var(--reader-rule); }
+.app-topic-discussion-list > li:last-child { border-bottom:0; }
+.app-topic-discussions a { color:var(--reader-ink); text-underline-offset:2px; }
+.app-topic-thread-title { display:block; color:var(--reader-ink); font:600 .86em/1.4 var(--topic-sans); text-decoration:none; }
+.app-topic-thread-meta { display:flex; flex-wrap:wrap; gap:.2em .8em; align-items:baseline; margin-top:.22em; color:var(--topic-secondary); font:normal .73em/1.45 var(--topic-sans); }
+.app-topic-discussions .app-topic-thread-original, .app-topic-discussions .app-topic-thread-source { color:var(--reader-link); }
+.app-topic-thread-detail { min-width:0; padding:.45em 0 .8em; border-bottom:1px solid var(--reader-rule); overflow-wrap:anywhere; }
+.app-topic-thread-detail h3 { margin:0 0 .45em; font:650 .95em/1.4 var(--topic-sans); }
+.app-topic-thread-back, .app-topic-thread-source { font:600 .75em/1.45 var(--topic-sans); }
+.app-topic-thread-back { margin:0 0 .6em; padding:.35em 0; border:0; background:none; color:var(--reader-link); cursor:pointer; }
+.app-topic-comments { margin:0; padding:0; list-style:none; }
+.app-topic-comments > li { margin:.55em 0; }
+.app-topic-comments > li[data-depth]:not([data-depth="0"]) { padding-inline-start:.65em; border-inline-start:1px solid var(--reader-rule); }
+.app-topic-comment-author { color:var(--topic-secondary); font:600 .73em/1.45 var(--topic-sans); }
+.app-topic-comment-body { margin:.2em 0 0; color:var(--reader-ink); font:.91em/1.48 var(--reader-face); overflow-wrap:anywhere; }
+.app-topic-comment-body :is(p, blockquote, pre) { margin:.35em 0; }
+.app-topic-comment-body pre { white-space:pre-wrap; }
+.app-topic-comment-body :is(img, video, table) { max-width:100%; height:auto; }
+@container topic-article (min-width:720px) {
+	.app-topic-article.bc-reader:has(> .app-topic-discussions) {
+		display:grid;
+		grid-template-columns:minmax(0, 2.25fr) minmax(190px, 1fr);
+		grid-template-rows:auto 1fr;
+		column-gap:clamp(24px, 4%, 48px);
+		align-items:start;
+		max-width:58em;
+	}
+	.app-topic-narrative { grid-column:1; grid-row:1; }
+	.app-topic-sources { grid-column:1; grid-row:2; }
+	.app-topic-discussions { grid-column:2; grid-row:1 / span 2; margin:0; padding:.18em 0 0 1.1em; border-top:0; border-inline-start:1px solid var(--reader-rule); }
+}
+.app-topic-source-dialog {
+	position:fixed;
+	box-sizing:border-box;
+	width:min(365px, calc(100vw - 24px));
+	max-height:calc(100vh - 24px);
+	max-height:calc(100dvh - 24px);
+	margin:auto;
+	padding:18px;
+	border:1px solid var(--reader-rule);
+	border-radius:12px;
+	background:var(--reader-page);
+	color:var(--reader-ink);
+	box-shadow:0 10px 40px #0004;
+	font:1em/1.5 var(--reader-face);
+	overflow:auto;
+	overflow-wrap:anywhere;
+	overscroll-behavior:contain;
+}
+.app-topic-source-dialog::backdrop { background:#17231a45; }
+.app-topic-dialog-top { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:.4em; color:var(--reader-link); font:650 .75em/1.4 var(--topic-sans); }
+.app-topic-dialog-close { width:32px; height:32px; padding:0; border:0; border-radius:50%; color:var(--reader-ink); background:var(--reader-code); font:normal 22px/1 var(--topic-sans); cursor:pointer; }
+.app-topic-source-dialog h2 { margin:0 0 .28em; font:700 1.4em/1.2 var(--reader-face); letter-spacing:-.02em; }
+.app-topic-source-dialog .app-topic-credit { margin:0; }
+.app-topic-source-excerpt { margin:.8em 0 0; }
+.app-topic-source-dialog blockquote { padding-inline-start:.8em; border-inline-start:2px solid var(--reader-rule); }
+.app-topic-open-original { display:inline-block; padding:.5em 0; margin-top:.6em; color:var(--reader-link); font:650 .85em/1.4 var(--topic-sans); text-underline-offset:2px; }
+.app-topic-open-original::after { content:" ↗"; }
+@media (min-width:701px) {
+	.app-topic-source-dialog[data-anchored] { inset:var(--topic-dialog-y) auto auto var(--topic-dialog-x); margin:0; }
+}
+@media (max-width:700px) {
+	.app-topic-article.bc-reader { padding-top:24px; }
+	.app-topic-cite::after { content:""; position:absolute; inset:-4px -1px; }
+}
+@container topic-article (max-width:380px) {
+	.app-topic-article .bc-reader-title { font-size:2em; }
+}
+
 .app-topic-header {
 	display:flex;
 	flex:none;
@@ -39131,7 +39281,12 @@ ${SETTINGS_MODAL_CSS}
 	font-size:12px;
 }
 
-.app-topic-summary { min-width:0; flex:1 1 96px; overflow-wrap:anywhere; }
+.app-topic-summary {
+	min-width:0; flex:1 1 96px; padding:0; border:0; background:none; color:inherit;
+	font:inherit; text-align:start; overflow-wrap:anywhere; cursor:pointer;
+}
+.app-topic-summary:hover > strong { text-decoration:underline; }
+.app-topic-summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .app-topic-summary > strong {
 	display:-webkit-box;
 	-webkit-box-orient:vertical;
@@ -44219,7 +44374,7 @@ ${listViewControls}
 <div id="app-list-tags" class="app-list-tags" role="group" aria-label="Filters" hidden></div>
 <div id="app-list-topic" class="app-topic-header" hidden>
 <button id="app-list-topic-back" class="app-head-icon app-byline-icon" type="button" aria-label="Back to topics" title="Back to topics">${APP_ICON('<path d="m9.6 3-5 5 5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>')}</button>
-<span class="app-topic-summary"><strong id="app-list-topic-title"></strong><span id="app-list-topic-count" class="app-topic-meta"></span></span>
+<button type="button" class="app-topic-summary" id="app-list-topic-article" aria-label="Read topic article"><strong id="app-list-topic-title"></strong><span id="app-list-topic-count" class="app-topic-meta"></span></button>
 </div>
 <div id="app-list-body" class="reader-list" role="region" aria-label="Articles"></div>
 <div id="app-list-resize" class="app-list-resize" aria-hidden="true"></div>
@@ -44274,6 +44429,8 @@ ${readingListShareHTML()}
 			collectionCoverageStories: [],
 			topicsMode: false,
 			listTopic: null,
+			topicArticle: null,
+			topicArticleIntent: null,
 			listTopicPhotos: null,
 			topicExtra: null,
 			topicExtraRows: null,
@@ -44311,6 +44468,7 @@ ${readingListShareHTML()}
 		const linkedTopic = new URLSearchParams(location.search).get("topic");
 		if (isSharedTopicId(linkedTopic)) {
 			appState.listTopic = linkedTopic;
+			appState.topicArticleIntent = linkedTopic;
 			appState.topicsMode = true;
 		}
 		paintAppDiscussionTheme();
@@ -44326,6 +44484,15 @@ ${readingListShareHTML()}
 		renderAppDiscussionEmpty();
 		watchNoteSelection(await loadSettings());
 		await refreshAppSources();
+		if (linkedTopic && appState.topicArticleIntent === linkedTopic) {
+			const index = await loadSharedTopicIndex();
+			const topic = index?.topics.get(linkedTopic) || index?.topics.get(index.redirects?.get(linkedTopic));
+			if (topic && appState.topicArticleIntent === linkedTopic) {
+				const group = { ...topic, rows: [], extraRows: [] };
+				openAppTopicArticle(group, { standalone: true });
+				await applyAppTopicVisits({ active: group }, () => appState.topicArticle?.group === group);
+			}
+		}
 		scheduleCollectedChecks();
 		scheduleRedditReadNotice();
 	}
@@ -44353,6 +44520,9 @@ ${readingListShareHTML()}
 			tab.click();
 		});
 		shadow.getElementById("app-list-topic-back").onclick = () => openAppListTopic(null).catch(console.error);
+		shadow.getElementById("app-list-topic-article").onclick = () => {
+			if (appState.activeListTopic) openAppListTopic(appState.activeListTopic.id).catch(console.error);
+		};
 		const composeBar = shadow.getElementById("app-discussion-compose");
 		const app = shadow.getElementById("app");
 		new ResizeObserver(() => app.style.setProperty("--app-compose-height", `${composeBar.offsetHeight}px`)).observe(composeBar);
@@ -44949,7 +45119,14 @@ ${readingListShareHTML()}
 		};
 		original.onauxclick = (event) => { if (event.button === 1) original.onclick(); };
 
-		shadow.querySelector("#app-bar-back").onclick = () => setAppStage("list");
+		shadow.querySelector("#app-bar-back").onclick = () => {
+			if (appState.topicArticle && closeAppTopicDiscussion(appState.topicArticle)) return;
+			if (appState.topicArticle?.standalone) closeAppTopicArticle();
+			setAppStage("list");
+		};
+		shadow.getElementById("app-rail-welcome").onclick = () => {
+			if (appState.topicArticle?.standalone) closeAppTopicArticle();
+		};
 		shadow.querySelector("#app-bar-discussion").onclick = () => {
 			if (appIsPhone()) {
 				setAppStage(appRoot.dataset.stage === "discussion" ? "article" : "discussion");
@@ -46303,17 +46480,17 @@ ${readingListShareHTML()}
 
 		const preview = !appIsPhone() && state.previewList?.(fromSearch ? null : railEvent);
 
-		if (view === state.view && !topicId) {
+		if (view === state.view && !topicId && !state.topicArticle?.standalone) {
 			if (preview) renderAppList().catch(console.error);
 			return;
 		}
 
 		const collectionChanged = state.view === "collection" || view === "collection";
 		clearAppTopicExtra();
+		closeAppTopicArticle();
 		state.view = view;
 		state.listTopic = null;
 		if (topicId) {
-			if (appIsPhone()) setAppStage("list");
 			openAppListTopic(topicId).catch(console.error);
 		} else {
 			paintAppRail();
@@ -46437,9 +46614,11 @@ ${readingListShareHTML()}
 
 		const was = app.dataset.stage || "list";
 
-		if (was === stage || appState.moving) {
+		if (appState.moving) {
+			appState.nextStage = stage;
 			return;
 		}
+		if (was === stage) return;
 
 		closeAppRowMenu();
 
@@ -46514,6 +46693,12 @@ ${readingListShareHTML()}
 		noteAppStageScroll(was);
 		appState.moving = true;
 		setAppViewMenuOpen(false);
+		const finish = () => {
+			appState.moving = false;
+			const next = appState.nextStage;
+			appState.nextStage = null;
+			if (next) setAppStage(next);
+		};
 
 		const raiseSheet = () => {
 			const comments = shadow.querySelector("#comments");
@@ -46528,9 +46713,7 @@ ${readingListShareHTML()}
 		if (was === "article" && stage === "discussion") {
 			app.dataset.stage = "discussion";
 			paintAppChrome();
-			raiseSheet().then(() => {
-				appState.moving = false;
-			});
+			raiseSheet().then(finish);
 			return;
 		}
 
@@ -46538,7 +46721,7 @@ ${readingListShareHTML()}
 			settle([panel.animate(frames(false, "100%"), timing(false))]).then(() => {
 				app.dataset.stage = "article";
 				paintAppChrome();
-				appState.moving = false;
+				finish();
 			});
 			return;
 		}
@@ -46566,9 +46749,7 @@ ${readingListShareHTML()}
 				}
 
 				return null;
-			}).then(() => {
-				appState.moving = false;
-			});
+			}).then(finish);
 			return;
 		}
 
@@ -46596,7 +46777,7 @@ ${readingListShareHTML()}
 			article.scrollTop = 0;
 			paintAppChrome();
 			window.scrollTo(0, appState.scrolls.list || 0);
-			appState.moving = false;
+			finish();
 			if (appState.view === "unread") refreshAppSeen({ returnedToList: true }).catch(console.error);
 		});
 	}
@@ -47972,7 +48153,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 					Number.isSafeInteger(post[1]) && post[1] >= 0));
 			}
 		}
-		return { topics, pages, posts, topicPages, reviewedPages, imagesBySubject, generatedAt: Date.parse(data.generatedAt) };
+		const redirects = new Map(Object.entries(data.redirects || {}).filter(([from, to]) => isSharedTopicId(from) && topics.has(to)));
+		return { topics, pages, posts, topicPages, reviewedPages, imagesBySubject, redirects, generatedAt: Date.parse(data.generatedAt) };
 	}
 
 	function loadSharedTopicIndex() {
@@ -48193,6 +48375,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				const counts = appTopicDiscussionTotals([...state.activeTopicThreads.values(),
 					...[...entries.values()].map((row) => appTopicRowThreads(row, extraCoverage, index))]);
 				paintAppTopicCounts(state.ui.shadow.getElementById("app-list-topic-count"), { rows: [...group.rows, ...entries.values()], counts });
+				if (state.topicArticle?.group.id === group.id) refreshAppTopicArticle(state.topicArticle, group).catch(console.error);
 				refreshSaveControls().catch(console.error);
 			}
 		}
@@ -49178,6 +49361,466 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 	}
 
+	function appTopicArticlePublicId(id) {
+		return isSharedTopicId(id) && /^(?:topic|story|coverage):[\p{L}\p{N}][\p{L}\p{M}\p{N}_.-]*$/u.test(id);
+	}
+
+	function appTopicArticleText(value, limit) {
+		return typeof value === "string" && value.length <= limit ? value.trim().replace(/\s+/gu, " ") : "";
+	}
+
+	function appTopicArticleDate(value) {
+		if (typeof value !== "string" || value.length > 40 || !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?$/i.test(value) ||
+			!Number.isFinite(Date.parse(value))) return null;
+		const day = value.slice(0, 10);
+		return new Date(day + "T00:00:00Z").toISOString().startsWith(day + "T") ? value : null;
+	}
+
+	function appTopicArticleURL(value) {
+		const url = typeof value === "string" && value.length <= 4096 && readerURL(value);
+		return url && !url.username && !url.password ? url.href : "";
+	}
+
+	function appTopicArticleSource(entry) {
+		const url = appTopicArticleURL(entry?.url);
+		const title = appTopicArticleText(entry?.title, 1024);
+		const id = entry?.id;
+		if (!url || !title || typeof id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,47}$/i.test(id)) return null;
+		const publisher = appTopicArticleText(entry.publisher, 256) || hostLabel(url);
+		const suppliedExcerpt = appTopicArticleText(entry.excerpt, 4000);
+		const publishedAt = appTopicArticleDate(entry.publishedAt);
+		const sharedAt = appTopicArticleDate(entry.sharedAt);
+		if ((entry.excerpt && !suppliedExcerpt) || (entry.publishedAt != null && !publishedAt) || (entry.sharedAt != null && !sharedAt)) return null;
+		const repeatedTitle = topicFilterKey(title).replace(/[.!?…]+$/u, "");
+		const excerptKey = topicFilterKey(suppliedExcerpt);
+		const listing = /^(?:the public listing describes this link as|a public listing shared)\b/u.test(excerptKey);
+		const headline = excerptKey.replace(/[.!?…]+$/u, "") === repeatedTitle || (repeatedTitle.length >= 12 && excerptKey.startsWith(repeatedTitle + " "));
+		const excerpt = listing || headline ? "" : suppliedExcerpt;
+		const discussions = new Map();
+		if (entry.discussions != null && (!Array.isArray(entry.discussions) || entry.discussions.length > 64)) return null;
+		for (const thread of entry.discussions || []) {
+			const address = appTopicArticleURL(thread?.url);
+			if (!address) continue;
+			const comments = Number.isSafeInteger(thread.comments) && thread.comments >= 0 ? thread.comments : null;
+			const existing = discussions.get(address);
+			if (existing && (existing.comments ?? -1) >= (comments ?? -1)) continue;
+			discussions.set(address, {
+				url: address, title: appTopicArticleText(thread.title, 1024) || title,
+				source: appTopicArticleText(thread.source, 100), comments,
+			});
+		}
+		return { id, url, title, publisher, excerpt, publishedAt, sharedAt, discussions: [...discussions.values()] };
+	}
+
+	function appTopicCoverageSections(sources) {
+		for (const source of sources) {
+			const excerpt = source.excerpt;
+			if (!excerpt || excerpt.length > 240 || excerpt.split(" ").length < 5 ||
+				!/[.!?][”’"')\]]?$/u.test(excerpt) || /(?:\.{2,}|…)[”’"')\]]?$/u.test(excerpt)) continue;
+			const paragraph = { text: "“" + excerpt + "” — " + source.publisher, sourceIds: [source.id], citations: [{ sourceId: source.id, excerpt }] };
+			return [{ heading: "", paragraphs: [paragraph] }];
+		}
+		return [];
+	}
+
+	function appTopicSourceArticle(label, id, entries) {
+		const sources = [], ids = new Set(), urls = new Set();
+		for (const [index, entry] of entries.entries()) {
+			const source = appTopicArticleSource({ ...entry, id: entry?.id || "l" + (index + 1) });
+			if (!source || urls.has(source.url) || ids.has(source.id)) continue;
+			sources.push(source);
+			urls.add(source.url);
+			ids.add(source.id);
+		}
+		return { version: 1, topic: { id, label }, method: "coverage", generatedAt: null,
+			sources, sections: appTopicCoverageSections(sources), timeline: [] };
+	}
+
+	function parseAppTopicArticle(data, allowedTopicIds) {
+		const id = data?.topic?.id;
+		const label = appTopicArticleText(data?.topic?.label, 512);
+		const generatedAt = appTopicArticleDate(data?.generatedAt);
+		if (data?.version !== 1 || !appTopicArticlePublicId(id) || !label || !generatedAt || !["coverage", "synthesis"].includes(data.method) ||
+			!Array.isArray(data.sources) || !data.sources.length || data.sources.length > 32 ||
+			!Array.isArray(data.sections) || data.sections.length > 16 || !Array.isArray(data.timeline) || data.timeline.length > 128) return null;
+		if (allowedTopicIds != null) {
+			const allowed = typeof allowedTopicIds === "string" ? [allowedTopicIds] : allowedTopicIds;
+			if (!new Set(allowed).has(id)) return null;
+		}
+		const sources = data.sources.map(appTopicArticleSource);
+		if (sources.some((source) => !source)) return null;
+		const ids = new Set(sources.map((source) => source.id));
+		if (ids.size !== sources.length || new Set(sources.map((source) => source.url)).size !== sources.length) return null;
+		const statement = (entry) => {
+			const text = appTopicArticleText(entry?.text, 4000);
+			const refs = entry?.sourceIds;
+			if (!text || !Array.isArray(refs) || !refs.length || refs.length > sources.length || !refs.every((ref) => ids.has(ref))) return null;
+			const sourceIds = [...new Set(refs)];
+			const result = { text, sourceIds };
+			if (entry.citations != null) {
+				if (!Array.isArray(entry.citations) || entry.citations.length > sourceIds.length) return null;
+				const passages = new Map();
+				for (const citation of entry.citations) {
+					const excerpt = appTopicArticleText(citation?.excerpt, 240);
+					const sourceId = citation?.sourceId;
+					if (!excerpt || !sourceIds.includes(sourceId) || passages.has(sourceId)) return null;
+					passages.set(sourceId, { sourceId, excerpt });
+				}
+				if (passages.size) result.citations = [...passages.values()];
+			}
+			return result;
+		};
+		const sections = [];
+		for (const section of data.sections) {
+			const heading = appTopicArticleText(section?.heading, 256);
+			if (!heading || !Array.isArray(section.paragraphs) || !section.paragraphs.length || section.paragraphs.length > 16) return null;
+			const paragraphs = section.paragraphs.map(statement);
+			if (paragraphs.some((p) => !p)) return null;
+			const supported = data.method === "coverage" ? paragraphs.filter((p) => p.citations?.length) : paragraphs;
+			if (supported.length) sections.push({ heading, paragraphs: supported });
+		}
+		if (!sections.length && data.method === "synthesis") return null;
+		const timeline = [];
+		for (const event of data.timeline) {
+			const copy = statement(event);
+			const date = appTopicArticleDate(event?.date);
+			if (!copy || !date || !["shared", "published", "event"].includes(event.kind)) return null;
+			if (event.kind === "event") timeline.push({ date, kind: event.kind, ...copy });
+		}
+		const article = { version: 1, topic: { id, label }, generatedAt, method: data.method, sources, sections,
+			timeline: timeline.sort((a, b) => Date.parse(a.date) - Date.parse(b.date)) };
+		return JSON.stringify(article).length <= 262144 ? article : null;
+	}
+
+	function waitAppTopicArticle(ms, signal) {
+		return new Promise((resolve) => {
+			const finish = () => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", finish);
+				resolve();
+			};
+			const timer = setTimeout(finish, ms);
+			signal?.addEventListener("abort", finish, { once: true });
+			if (signal?.aborted) finish();
+		});
+	}
+
+	async function requestAppTopicArticle(id, signal, allowedTopicIds = [id]) {
+		if (signal?.aborted) return null;
+		if (!appTopicArticlePublicId(id)) return { status: "missing" };
+		const url = new URL(SHARED_TOPIC_INDEX_URL + "/article");
+		url.searchParams.set("id", id);
+		const deadline = Date.now() + 32000;
+		for (let attempt = 0; ; attempt++) {
+			const response = await requestResource({ url: url.href, method: "GET", anonymous: true, headers: { Accept: "application/json" } },
+				Math.max(1, Math.min(attempt ? 7000 : 30000, deadline - Date.now())), signal);
+			if (signal?.aborted) return null;
+			const retryAfter = parseRetryAfter(response?.responseHeaders) * 1000;
+			if (response?.status === 200) {
+				if (response.responseText && response.responseText.length <= 262144) {
+					try {
+						const article = parseAppTopicArticle(JSON.parse(response.responseText), allowedTopicIds);
+						if (article) return { article, ...(retryAfter ? { retryAt: Date.now() + retryAfter } : {}) };
+					} catch {}
+				}
+				return { status: "unavailable" };
+			}
+			if (response?.status === 404 || response?.status === 410) return { status: "missing" };
+			const pending = response?.status === 202;
+			const retryable = pending || !response || [429, 502, 503, 504].includes(response.status);
+			const delay = retryAfter || (pending ? 2000 : 1000);
+			if (!retryable || attempt >= (pending ? 15 : 1) || Date.now() + delay >= deadline) return { status: pending ? "pending" : "unavailable" };
+			await waitAppTopicArticle(delay, signal);
+			if (signal?.aborted) return null;
+		}
+	}
+
+	function appTopicArticleNode(tag, className = "", text = "") {
+		const node = document.createElement(tag);
+		if (className) node.className = className;
+		if (text) node.textContent = text;
+		if (tag === "button") node.type = "button";
+		return node;
+	}
+
+	function appTopicOriginalLink(url, label) {
+		const link = appTopicArticleNode("a", "", label);
+		link.href = url;
+		link.target = "_blank";
+		link.rel = "noopener noreferrer";
+		return link;
+	}
+
+	function appTopicSourceDateText(source, both = false) {
+		const dates = [];
+		if (source.publishedAt) dates.push("Published " + readerDateText(source.publishedAt));
+		if (source.sharedAt && (both || !dates.length)) dates.push("Shared " + readerDateText(source.sharedAt));
+		return dates.join(" · ");
+	}
+
+	function inspectAppTopicSource(story, source, number, total, trigger) {
+		const dialog = appTopicArticleNode("dialog", "app-topic-source-dialog");
+		dialog.id = "app-topic-source-inspector";
+		dialog.dataset.url = source.url;
+		dialog.toggleAttribute("data-source-list", Boolean(trigger.closest(".app-topic-sources")));
+		dialog.setAttribute("aria-labelledby", "app-topic-source-name");
+		const top = appTopicArticleNode("div", "app-topic-dialog-top");
+		const close = appTopicArticleNode("button", "app-topic-dialog-close", "×");
+		close.setAttribute("aria-label", "Close source");
+		close.autofocus = true;
+		close.onclick = () => dialog.close();
+		top.append(appTopicArticleNode("span", "", "Source " + number + " of " + total), close);
+		const title = appTopicArticleNode("h2", "", source.title);
+		title.id = "app-topic-source-name";
+		const attribution = [source.publisher, appTopicSourceDateText(source, true)].filter(Boolean).join(" · ");
+		dialog.append(top, title, appTopicArticleNode("p", "app-topic-credit", attribution));
+		const passage = trigger.dataset.topicPassage;
+		if (passage || source.excerpt) {
+			const excerpt = appTopicArticleNode(passage ? "blockquote" : "p", "app-topic-source-excerpt", passage || source.excerpt);
+			excerpt.dir = "auto";
+			if (passage) excerpt.cite = source.url;
+			dialog.append(excerpt);
+		}
+		const open = appTopicOriginalLink(source.url, "Open original");
+		open.setAttribute("aria-label", "Open original in a new tab");
+		open.className = "app-topic-open-original";
+		dialog.append(open);
+		dialog.onclose = () => {
+			dialog.remove();
+			if (trigger.isConnected) trigger.focus();
+		};
+		dialog.onclick = (event) => {
+			if (event.target !== dialog) return;
+			const rect = dialog.getBoundingClientRect();
+			if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+		};
+		story.append(dialog);
+		dialog.showModal();
+		const anchor = trigger.getBoundingClientRect();
+		if (window.innerWidth > 700 && anchor.bottom >= 0 && anchor.top < window.innerHeight) {
+			const rect = dialog.getBoundingClientRect();
+			const x = Math.max(8, Math.min(window.innerWidth - rect.width - 8, anchor.left - 12));
+			const y = anchor.bottom + 8 + rect.height <= window.innerHeight - 8 ? anchor.bottom + 8 : Math.max(8, anchor.top - rect.height - 8);
+			dialog.style.setProperty("--topic-dialog-x", x + "px");
+			dialog.style.setProperty("--topic-dialog-y", y + "px");
+			dialog.dataset.anchored = "";
+		}
+		return dialog;
+	}
+
+	function appTopicCitation(ref, passage) {
+		const citation = appTopicArticleNode("button", "app-topic-cite", String(ref.number));
+		citation.dataset.topicCitation = ref.source.id;
+		if (passage) citation.dataset.topicPassage = passage;
+		citation.value = ref.source.url;
+		citation.setAttribute("aria-label", "Source " + ref.number + ", " + ref.source.publisher);
+		citation.setAttribute("aria-haspopup", "dialog");
+		citation.title = ref.source.title;
+		return citation;
+	}
+
+	function appTopicCitedParagraph(statement, references) {
+		const paragraph = appTopicArticleNode("p");
+		paragraph.dir = "auto";
+		const citations = statement.sourceIds.map((id) => references.get(id)).filter(Boolean).map((ref) =>
+			appTopicCitation(ref, statement.citations?.find((entry) => entry.sourceId === ref.source.id)?.excerpt));
+		const end = statement.text.match(/(?:^|\s)(\S{1,24})$/u);
+		if (end && citations.length) {
+			const word = end[1];
+			const attached = appTopicArticleNode("span", "app-topic-cited-end", word);
+			attached.append(citations.shift());
+			paragraph.append(statement.text.slice(0, -word.length), attached);
+		} else {
+			paragraph.append(statement.text);
+		}
+		paragraph.append(...citations);
+		return paragraph;
+	}
+
+	function appTopicArticleTimeline(events, references) {
+		const section = appTopicArticleNode("section", "app-topic-timeline");
+		section.append(appTopicArticleNode("h2", "", "Timeline"));
+		const list = appTopicArticleNode("ol", "app-topic-chronology");
+		list.setAttribute("role", "list");
+		list.setAttribute("aria-label", "Timeline");
+		for (const event of events) {
+			const item = appTopicArticleNode("li");
+			const date = appTopicArticleNode("time");
+			date.dateTime = event.date;
+			const day = event.date.slice(0, 10);
+			const month = new Date(day + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
+			date.setAttribute("aria-label", readerDateText(event.date));
+			date.append(month, appTopicArticleNode("b", "", String(Number(day.slice(-2)))), appTopicArticleNode("span", "", day.slice(0, 4)));
+			const copy = appTopicArticleNode("div", "app-topic-event");
+			const publishers = new Set(event.sourceIds.map((id) => references.get(id)?.source.publisher).filter(Boolean));
+			copy.append(appTopicArticleNode("div", "app-topic-credit", [...publishers].join(" · ")), appTopicCitedParagraph(event, references));
+			item.append(date, copy);
+			list.append(item);
+		}
+		section.append(list);
+		return section;
+	}
+
+	function appTopicArticleSources(references) {
+		const section = appTopicArticleNode("section", "app-topic-sources");
+		section.append(appTopicArticleNode("h2", "", "Sources"));
+		const list = appTopicArticleNode("ol");
+		list.setAttribute("role", "list");
+		list.setAttribute("aria-label", "Sources");
+		for (const ref of references.values()) {
+			const { source } = ref;
+			const item = appTopicArticleNode("li");
+			const text = appTopicArticleNode("div");
+			const credit = [source.publisher, appTopicSourceDateText(source, true)].filter(Boolean).join(" · ");
+			const title = appTopicOriginalLink(source.url, source.title);
+			title.className = "app-topic-source-title";
+			title.dir = "auto";
+			text.append(title, appTopicArticleNode("div", "app-topic-credit", credit));
+			item.append(appTopicCitation(ref), text);
+			list.append(item);
+		}
+		section.append(list);
+		return section;
+	}
+
+	function appTopicArticleDiscussions(sources, onOpenDiscussion, previous) {
+		const threads = new Map();
+		for (const source of sources) {
+			for (const thread of source.discussions) {
+				const existing = threads.get(thread.url);
+				if (!existing || (thread.comments ?? -1) > (existing.thread.comments ?? -1)) threads.set(thread.url, { source, thread });
+			}
+		}
+		if (!threads.size) return null;
+		const aside = previous || appTopicArticleNode("aside", "app-topic-discussions");
+		let list = aside.querySelector(".app-topic-discussion-list");
+		if (!list) {
+			const heading = appTopicArticleNode("h2", "", "Discussions");
+			heading.id = "app-topic-discussions-heading";
+			aside.setAttribute("aria-labelledby", heading.id);
+			list = appTopicArticleNode("ul", "app-topic-discussion-list");
+			list.setAttribute("role", "list");
+			aside.append(heading, list);
+		}
+		const rows = [];
+		const ranked = [...threads.values()].sort((a, b) => (b.thread.comments ?? -1) - (a.thread.comments ?? -1));
+		for (const entry of ranked) {
+			const { thread } = entry;
+			const item = appTopicArticleNode("li");
+			const site = getSource(thread.source)?.label || thread.source || hostLabel(thread.url);
+			const meta = appTopicArticleNode("div", "app-topic-thread-meta");
+			const count = thread.comments == null ? "" : pluralize(thread.comments, "comment");
+			const title = appTopicOriginalLink(thread.url, thread.title);
+			title.className = "app-topic-thread-title";
+			title.dataset.topicThread = thread.url;
+			title.dir = "auto";
+			title.onclick = (event) => {
+				if (!onOpenDiscussion || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+				if (onOpenDiscussion(entry, title) !== false) event.preventDefault();
+			};
+			const original = appTopicOriginalLink(thread.url, "Original ↗");
+			original.className = "app-topic-thread-original";
+			original.setAttribute("aria-label", "Open original discussion on " + site + " in a new tab");
+			meta.append(appTopicArticleNode("span", "", [site, count].filter(Boolean).join(" · ")), original);
+			item.append(title, meta);
+			rows.push(item);
+		}
+		list.replaceChildren(...rows);
+		return aside;
+	}
+
+	function paintAppTopicArticle(body, article, { pending = false, retry, onOpenDiscussion } = {}) {
+		const root = body.getRootNode();
+		if (!root.getElementById("app-topic-reader-style")) {
+			const style = appTopicArticleNode("style");
+			style.id = "app-topic-reader-style";
+			style.textContent = READER_CSS;
+			root.append(style);
+		}
+		const previous = body.querySelector(".app-topic-article");
+		const sameTopic = previous?.dataset.topicId === article.topic.id;
+		const focus = sameTopic && previous.contains(root.activeElement) ? root.activeElement : null;
+		const oldDialog = previous?.querySelector("dialog[open]");
+		const sourceURL = sameTopic && (oldDialog?.dataset.url || (focus?.matches("[data-topic-citation]") && focus.value));
+		const passage = oldDialog?.querySelector("blockquote")?.textContent || focus?.dataset.topicPassage;
+		const fromList = oldDialog ? oldDialog.hasAttribute("data-source-list") : Boolean(focus?.closest(".app-topic-sources"));
+		const scrollTop = sameTopic ? previous.parentElement.scrollTop : 0;
+		oldDialog?.close();
+		const scroller = appTopicArticleNode("div", "app-reader-scroll app-topic-article-scroll");
+		const story = appTopicArticleNode("article", "bc-reader app-topic-article");
+		story.dataset.topicId = article.topic.id;
+		story.setAttribute("aria-labelledby", "app-topic-article-heading");
+		const narrative = appTopicArticleNode("div", "app-topic-narrative");
+		const head = appTopicArticleNode("header", "bc-reader-head");
+		const title = appTopicArticleNode("h1", "bc-reader-title", article.topic.label);
+		title.dir = "auto";
+		title.tabIndex = -1;
+		title.id = "app-topic-article-heading";
+		head.append(title);
+		narrative.append(head);
+		const references = new Map(article.sources.map((source, index) => [source.id, { source, number: index + 1 }]));
+		if (article.sections.length) {
+			const meta = [pluralize(references.size, "source")];
+			if (article.method === "synthesis") meta.unshift("AI-generated brief");
+			if (article.generatedAt) meta.push("Updated " + readerDateText(article.generatedAt));
+			head.append(appTopicArticleNode("p", "bc-reader-byline", meta.join(" · ")));
+			for (const { heading, paragraphs } of article.sections) {
+				const section = appTopicArticleNode("section", "app-topic-brief-section");
+				if (article.method === "synthesis" && heading && !/^(?:brief|summary|overview|topic brief)$/i.test(heading)) {
+					section.append(appTopicArticleNode("h2", "", heading.replace(/\p{L}/u, (letter) => letter.toUpperCase())));
+				}
+				for (const p of paragraphs) section.append(appTopicCitedParagraph(p, references));
+				narrative.append(section);
+			}
+		}
+		if (!article.sections.length || retry) {
+			const message = article.sections.length ? "" : pending ? "Loading the brief…" :
+				references.size ? "The original sources are available below." : "Source links are unavailable for this topic.";
+			const status = appTopicArticleNode("p", "app-topic-request-status", message);
+			status.setAttribute("role", "status");
+			if (retry && !pending) {
+				const button = appTopicArticleNode("button", "", "Retry brief");
+				button.onclick = retry;
+				status.append(message ? " " : "", button);
+			}
+			narrative.append(status);
+		}
+		if (article.timeline.length) narrative.append(appTopicArticleTimeline(article.timeline, references));
+		story.append(narrative);
+		const discussions = appTopicArticleDiscussions(article.sources, onOpenDiscussion, sameTopic && previous.querySelector(".app-topic-discussions"));
+		if (discussions) story.append(discussions);
+		if (references.size) story.append(appTopicArticleSources(references));
+		const inspect = (button) => {
+			const ref = references.get(button?.dataset.topicCitation);
+			if (ref) return inspectAppTopicSource(story, ref.source, ref.number, references.size, button);
+		};
+		story.onclick = (event) => inspect(event.target.closest("button[data-topic-citation]"));
+		scroller.append(story);
+		body.replaceChildren(scroller);
+		scroller.scrollTop = scrollTop;
+		let replacement;
+		if (sourceURL) {
+			const key = sharedTopicURLKey(sourceURL);
+			const ref = [...references.values()].find(({ source }) => sharedTopicURLKey(source.url) === key);
+			if (ref) {
+				const selector = '[data-topic-citation="' + CSS.escape(ref.source.id) + '"]';
+				if (passage) replacement = [...story.querySelectorAll(selector)].find((button) => button.dataset.topicPassage === passage);
+				replacement ||= ((fromList || passage) && story.querySelector(".app-topic-sources " + selector)) || story.querySelector(selector);
+			}
+		} else if (focus?.isConnected) {
+			replacement = focus;
+		} else if (focus?.matches("a")) {
+			replacement = [...story.querySelectorAll("a")].find((link) => link.href === focus.href && link.className === focus.className);
+		}
+		if (oldDialog && replacement) {
+			const dialog = inspect(replacement);
+			if (focus?.matches(".app-topic-open-original")) dialog?.querySelector("a")?.focus({ preventScroll: true });
+		} else if (focus || sourceURL) {
+			(replacement || title).focus({ preventScroll: true });
+		}
+		return scroller;
+	}
+
 	function appTopicVisitIds(group) {
 		const ids = [group.id, ...(group.equivalentIds || [])];
 		if (!group.curated) {
@@ -49226,6 +49869,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			return [normalizeURL(url) || url, threads?.get(row)];
 		}));
 		if (active) {
+			const openArticle = state.topicArticleIntent && (state.topicArticleIntent === state.listTopic ||
+				state.topicArticleIntent === active.id || active.equivalentIds?.includes(state.topicArticleIntent));
 			state.listTopic = active.id;
 			bar.dataset.topicId = active.id;
 			bar.dataset.topicLabel = active.label;
@@ -49242,8 +49887,12 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			bar.querySelector(":scope > .app-topic-media")?.remove();
 			title.parentElement.before(media);
 			if (!selection.verified.has(active.id)) hydrateAppTopicPhotos([{ group: active, media }], selection.photos, selection.used);
+			if (openArticle || (state.topicArticle && !state.topicArticle.standalone && state.topicArticle.group.id !== active.id)) openAppTopicArticle(active);
+			else if (state.topicArticle?.group.id === active.id) refreshAppTopicArticle(state.topicArticle, active);
 			return;
 		}
+		if (state.topicArticle?.standalone) refreshAppTopicArticle(state.topicArticle, state.topicArticle.group).catch(console.error);
+		else if (state.topicArticle) closeAppTopicArticle();
 		delete bar.dataset.topicId;
 		delete bar.dataset.topicLabel;
 		if (state.listTopic !== null) {
@@ -49295,10 +49944,249 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		hydrateAppTopicPhotos(pendingPhotos, photos, used);
 	}
 
+	function topicArticleLinkKey(value) {
+		const url = canonicalSharedTopicURL(value);
+		if (!url) return "";
+		if (/(^|\.)theguardian\.com$/i.test(url.hostname)) {
+			for (const key of new Set(url.searchParams.keys())) {
+				if (key.toLowerCase() === "cmp" && url.searchParams.getAll(key).every((v) => /^share[_-]/i.test(v))) url.searchParams.delete(key);
+			}
+		}
+		return normalizeURL(url.href);
+	}
+
+	function appTopicReadingSources(rows, looks) {
+		const sources = new Map();
+		for (const row of rows) {
+			const url = appTopicRowURL(row);
+			const key = topicArticleLinkKey(url);
+			if (!key) continue;
+			const story = row.story || row;
+			const look = row.look || lookFor(looks, normalizeURL(url));
+			let source = sources.get(key);
+			if (!source) {
+				source = { id: "l" + (sources.size + 1), url, title: look?.title || story.title || hostLabel(url),
+					publisher: hostLabel(url), excerpt: look?.description || "", sharedAt: null, publishedAt: null, discussions: [] };
+				sources.set(key, source);
+			}
+			for (const post of [story, ...(row.also || []), ...(row.discussions || [])]) {
+				if (!post.source || !post.id || (post.kind && post.kind !== "discussion")) continue;
+				const address = canonicalSharedTopicURL(post.permalink || (post.source === "hn" && /^\d+$/.test(String(post.id)) ? commentURL(post.id) : ""));
+				if (!address || topicArticleLinkKey(address.href) === key) continue;
+				const seconds = Number(post.time || post.createdAt);
+				if (seconds > 0 && seconds < 1e11) {
+					const date = new Date(seconds * 1000).toISOString();
+					if (!source.sharedAt || source.sharedAt > date) source.sharedAt = date;
+				}
+				if (source.discussions.length < 64 && !source.discussions.some((entry) => entry.url === address.href)) {
+					source.discussions.push({ url: address.href, title: post.title || source.title, source: post.source,
+						comments: post.descendants ?? post.commentCount ?? null });
+				}
+			}
+		}
+		return [...sources.values()];
+	}
+
+	function publicTopicForReading(group, index) {
+		if (!index) return null;
+		const ids = [group.id, ...(group.equivalentIds || [])];
+		const votes = new Map();
+		const members = group.rows.length ? group.rows : group.extraRows || [];
+		for (const row of members) {
+			for (const id of index.pages.get(sharedTopicURLKey(appTopicRowURL(row))) || []) {
+				votes.set(id, (votes.get(id) || 0) + 1);
+			}
+		}
+		const assigned = ids.find((id) => votes.has(id) && index.topics.has(id));
+		if (assigned) return assigned;
+		const matches = [...votes].filter(([id, n]) => {
+			const topic = index.topics.get(id);
+			return topic && topic.kind !== "topic" && (n >= 2 && n > members.length / 2 ||
+				topicFilterKey(topic.label) === topicFilterKey(group.label));
+		}).sort((a, b) => b[1] - a[1]);
+		return matches.length && matches[0][1] > (matches[1]?.[1] || 0) ? matches[0][0] : null;
+	}
+
+	function setAppTopicAddress(publicId) {
+		const url = new URL(location.href);
+		if (url.searchParams.get("topic") === publicId) return;
+		if (publicId) url.searchParams.set("topic", publicId);
+		else url.searchParams.delete("topic");
+		history.replaceState(history.state, "", url);
+	}
+
+	function visibleAppTopicArticle(reading) {
+		const { group, remote, local, hidden, settings } = reading;
+		const index = sharedTopicCache?.index;
+		const enabled = new Set(enabledSourceIds(settings, registeredSourceIds()));
+		const muted = new Set(settings.hiddenTopics.map(topicFilterKey));
+		const matchesMuted = muted.size ? readerHiddenTopicMatcher(settings.hiddenTopics, muted) : null;
+		const excluded = new Set([...hidden, ...(group.assignedElsewhere || [])].map((key) => topicArticleLinkKey("https://" + key)));
+		if (muted.size && index) {
+			for (const [id, pages] of index.topicPages) {
+				if (readerTopicLabels(index.topics.get(id)).some((label) => muted.has(topicFilterKey(label)))) {
+					for (const key of pages) excluded.add(topicArticleLinkKey("https://" + key));
+				}
+			}
+		}
+		const sources = new Map();
+		for (const original of [...(remote?.sources || []), ...local.sources]) {
+			const key = topicArticleLinkKey(original.url);
+			if (excluded.has(key) || matchesMuted?.({ story: { ...original, description: original.excerpt } })) continue;
+			const existing = sources.get(key);
+			const discussions = new Map((existing?.discussions || []).map((thread) => [thread.url, thread]));
+			for (const thread of original.discussions) {
+				if (!enabled.has(thread.source)) continue;
+				const old = discussions.get(thread.url);
+				if (!old || (thread.comments ?? -1) > (old.comments ?? -1)) discussions.set(thread.url, thread);
+			}
+			sources.set(key, { ...(existing || original), excerpt: existing?.excerpt || original.excerpt,
+				sharedAt: existing?.sharedAt || original.sharedAt, discussions: [...discussions.values()].slice(0, 64) });
+		}
+		const combined = appTopicSourceArticle(group.label, group.id, [...sources.values()]);
+		if (!remote) return combined;
+		const refs = new Set(combined.sources.map((source) => source.id));
+		const visible = (entry) => entry.sourceIds.every((id) => refs.has(id));
+		const sections = remote.sections.map((s) => ({ ...s, paragraphs: s.paragraphs.filter(visible) })).filter((s) => s.paragraphs.length);
+		if (remote.method === "coverage" && sections.length) {
+			const covered = new Set(remote.sources.map((source) => topicArticleLinkKey(source.url)));
+			const additional = combined.sources.filter((source) => source.excerpt && !covered.has(topicArticleLinkKey(source.url)));
+			sections.push(...appTopicCoverageSections(additional));
+		}
+		return {
+			...combined,
+			generatedAt: remote.generatedAt,
+			method: sections.length ? remote.method : "coverage",
+			sections: sections.length ? sections : combined.sections,
+			timeline: remote.timeline.filter((event) => event.kind === "event" && visible(event)),
+		};
+	}
+
+	function showAppTopicArticle(reading) {
+		if (appState.topicArticle !== reading || !reading.local) return;
+		const body = appState.ui.shadow.getElementById("app-article-body");
+		const article = visibleAppTopicArticle(reading);
+		const signature = JSON.stringify([article, reading.pending, reading.retry]);
+		if (signature === reading.painted) return;
+		reading.painted = signature;
+		const scrollTop = body.querySelector(".app-reader-scroll")?.scrollTop || 0;
+		const scroller = paintAppTopicArticle(body, article, {
+			pending: reading.pending,
+			retry: reading.retry ? () => fetchAppTopicArticle(reading) : null,
+			onOpenDiscussion: (entry, anchor) => openAppTopicDiscussion(reading, entry, anchor),
+		});
+		syncAppTopicDiscussions(reading, scroller, article);
+		scroller.scrollTop = scrollTop;
+		if (reading.focusHeading) {
+			const heading = body.querySelector("h1");
+			heading.tabIndex = -1;
+			heading.focus({ preventScroll: true });
+			reading.focusHeading = false;
+		}
+	}
+
+	async function fetchAppTopicArticle(reading) {
+		if (appState.topicArticle !== reading || !reading.publicId || reading.pending) return;
+		reading.pending = true;
+		reading.retry = false;
+		showAppTopicArticle(reading);
+		const controller = reading.abort;
+		let result;
+		try { result = await requestAppTopicArticle(reading.publicId, controller.signal); }
+		catch { result = { status: "unavailable" }; }
+		if (appState.topicArticle !== reading || reading.abort !== controller) return;
+		reading.pending = false;
+		reading.remote = result?.article || reading.remote;
+		reading.retryAt = result?.retryAt || null;
+		reading.retry = ["unavailable", "pending"].includes(result?.status);
+		showAppTopicArticle(reading);
+	}
+
+	async function refreshAppTopicArticle(reading, group) {
+		const revision = ++reading.revision;
+		reading.group = group;
+		const [settings, hidden, looks] = await Promise.all([loadSettings(), loadHiddenStories(), loadLooks()]);
+		if (appState.topicArticle !== reading || revision !== reading.revision) return;
+		reading.settings = settings;
+		reading.hidden = new Set(hidden.flatMap((entry) => [entry.key, normalizeURL(entry.url)]).filter(Boolean));
+		const rows = [...group.rows, ...(appState.topicExtraRows?.values() || [])];
+		reading.local = appTopicSourceArticle(group.label, group.id, appTopicReadingSources(rows, looks));
+		const index = sharedTopicCache?.index;
+		const id = reading.standalone ? group.id : publicTopicForReading(group, index) || (index?.topics.has(reading.addressId) ? reading.addressId : null);
+		if (id !== reading.publicId || (id && reading.edition !== index?.generatedAt)) {
+			reading.abort?.abort();
+			reading.abort = new AbortController();
+			reading.publicId = id;
+			reading.edition = index?.generatedAt;
+			reading.remote = null;
+			reading.retryAt = null;
+			reading.retry = reading.pending = false;
+			setAppTopicAddress(id);
+			if (id) return fetchAppTopicArticle(reading);
+		}
+		if (id && reading.retryAt && reading.retryAt <= Date.now()) return fetchAppTopicArticle(reading);
+		showAppTopicArticle(reading);
+	}
+
+	function closeAppTopicArticle() {
+		const state = appState;
+		state.topicArticleIntent = null;
+		if (!state.topicArticle) return;
+		const { standalone } = state.topicArticle;
+		disposeAppTopicDiscussions(state.topicArticle);
+		state.topicArticle.abort?.abort();
+		state.topicArticle = null;
+		setAppTopicAddress(null);
+		teardownAppArticle();
+		const shadow = state.ui.shadow;
+		const body = shadow.getElementById("app-article-body");
+		body.dataset.mode = "empty";
+		body.append(appTopicArticleNode("div", "app-article-note", "Pick an article to read it here, with what people said about it beside it."));
+		shadow.getElementById("app-bar-discussion").hidden = false;
+		paintAppArticleHead("", "");
+		paintReaderMenu();
+		paintAppChrome();
+		if (standalone && state.noSources) paintAppOnboarding().catch(console.error);
+	}
+
+	function openAppTopicArticle(group, { standalone = false } = {}) {
+		const state = appState;
+		const shadow = state.ui.shadow;
+		state.topicArticleIntent = null;
+		if (state.topicArticle?.group.id !== group.id) {
+			const index = sharedTopicCache?.index;
+			const linked = new URLSearchParams(location.search).get("topic");
+			const published = index?.topics.has(linked) ? linked : index?.redirects?.get(linked);
+			const addressId = published && (group.id === published || group.equivalentIds?.includes(published)) ? published : null;
+			closeAppTopicArticle();
+			if (state.open?.key) cancelDiscussionOperations(state.open.key);
+			state.open = null;
+			state.openTotal = 0;
+			setAppSubject(null);
+			teardownAppArticle();
+			clearAppDiscussion();
+			renderAppDiscussionEmpty();
+			shadow.getElementById("app-article-coverage").hidden = true;
+			shadow.getElementById("app").classList.remove("has-story", "discussion-entering");
+			shadow.getElementById("app-toggle-discussion").disabled = true;
+			shadow.getElementById("app-bar-discussion").hidden = true;
+			state.topicArticle = { group, standalone, addressId, publicId: null, revision: 0, focusHeading: appIsPhone() || standalone };
+			if (standalone) shadow.getElementById("app-onboarding").hidden = true;
+			shadow.getElementById("app-article-body").dataset.mode = "reader";
+			paintAppArticleHead("", "");
+			paintReaderMenu();
+			state.scrolls.article = 0;
+		}
+		refreshAppTopicArticle(state.topicArticle, group).catch(console.error);
+		if (appIsPhone()) setAppStage("article");
+		paintAppChrome();
+	}
+
 	function setAppTopicsMode(topicsMode) {
 		const state = appState;
 		if (state.topicsMode === topicsMode && !state.listTopic) return;
 		clearAppTopicExtra();
+		closeAppTopicArticle();
 		state.topicsMode = topicsMode;
 		state.listTopic = null;
 		endAppSelection();
@@ -49307,10 +50195,12 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		renderAppList().catch(console.error);
 	}
 
-	async function openAppListTopic(id) {
+	async function openAppListTopic(id, { readArticle = true } = {}) {
 		const state = appState;
 		const previous = state.listTopic;
 		if (previous !== id) clearAppTopicExtra();
+		if (!id || previous !== id || !readArticle) closeAppTopicArticle();
+		state.topicArticleIntent = readArticle ? id : null;
 		const view = state.view;
 		if (id && !state.topicsMode) {
 			state.topicsMode = true;
@@ -49321,8 +50211,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		endAppSelection();
 		resetAppListScroll();
 		await renderAppList();
-		if (!state.topicsMode || state.view !== view || Boolean(state.listTopic) !== Boolean(id)) return;
+		if (!state.topicsMode || state.view !== view || (state.listTopic !== id && !state.activeListTopic?.equivalentIds?.includes(id))) return;
 		const shadow = state.ui.shadow;
+		if (id && readArticle && appIsPhone()) return;
 		const target = id ? shadow.getElementById("app-list-topic-back") :
 			[...shadow.querySelectorAll(".app-topic-row")].find((button) => button.dataset.sharedTopic === previous);
 		target?.focus({ preventScroll: Boolean(id) });
@@ -49332,7 +50223,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const state = appState;
 		const { view, ui: { shadow } } = state;
 		if (state.bulk?.busy) return;
-		await openAppListTopic(group.id);
+		await openAppListTopic(group.id, { readArticle: false });
 		const header = shadow.getElementById("app-list-topic");
 		if (state.view !== view || state.listTopic !== group.id || state.bulk || header.hidden || header.dataset.topicId !== group.id) return;
 		const entries = group.rows.map((row) => {
@@ -49415,7 +50306,7 @@ ${frontPageChooserHTML()}
 			welcome.hidden = !state.noSources;
 		}
 
-		if (!state.noSources || state.view === "collection" || state.view === "queue") {
+		if (!state.noSources || state.view === "collection" || state.view === "queue" || state.topicArticle?.standalone) {
 			panel.hidden = true;
 			panel.replaceChildren();
 			return;
@@ -49838,6 +50729,7 @@ ${frontPageChooserHTML()}
 		if (!state || !/^https?:/i.test(url)) {
 			return;
 		}
+		closeAppTopicArticle();
 
 		const key = normalizeURL(url) || url;
 		const entry = row || state.topicExtraRows?.get(key) || state.rowsByURL.get(key) || { story, also: [] };
@@ -49971,6 +50863,216 @@ ${frontPageChooserHTML()}
 		if (emptySync) emptySync.hidden = true;
 		appState.ui.shadow.querySelector("#app-discussion-meta")?.replaceChildren();
 		appState.ui.shadow.querySelector("#app-discussion-sort")?.replaceChildren();
+	}
+
+	function appTopicKnownThread(reading, { source, thread }) {
+		if (!reading.settings?.sources?.[thread.source]) return null;
+		const url = readerURL(thread.url);
+		if (!url || url.protocol !== "https:" || url.username || url.password || url.port) return null;
+		let id;
+		if (thread.source === "hn" && url.origin === HN_ORIGIN && url.pathname === "/item") id = url.searchParams.get("id");
+		if (thread.source === "lobsters" && url.origin === "https://lobste.rs") id = /^\/s\/([a-z0-9]+)(?:\/[^/]+)?\/?$/i.exec(url.pathname)?.[1];
+		if (thread.source === "lemmy" && url.origin === "https://lemmy.world") id = /^\/post\/(\d+)\/?$/.exec(url.pathname)?.[1];
+		if (thread.source === "reddit" && /^(?:www\.|old\.)?reddit\.com$/.test(url.hostname)) {
+			id = /^\/(?:r\/[a-z0-9_]+\/)?comments\/([a-z0-9]+)(?:\/[^/]+)?\/?$/i.exec(url.pathname)?.[1];
+			if (id) return redditDiscussionFromFeed({ id, title: thread.title, url: source.url, descendants: thread.comments,
+				permalink: "https://www.reddit.com" + url.pathname });
+		}
+		if (thread.source === "bsky" && url.origin === "https://bsky.app") {
+			const post = /^\/profile\/(did:[a-z0-9:.%-]+|[a-z0-9-]+(?:\.[a-z0-9-]+)+)\/post\/([a-z0-9_-]+)\/?$/i.exec(url.pathname);
+			if (!post) return null;
+			const uri = "at://" + post[1] + "/app.bsky.feed.post/" + post[2];
+			return { source: "bsky", key: sourceKey("bsky", uri), id: uri, actor: post[1], rkey: post[2], permalink: url.href, articleURL: source.url,
+				rootKeys: [bskyKeyFromURI(uri)], rootTimes: [], title: thread.title };
+		}
+		return id ? knownDiscussionFromFeed({ source: thread.source, id, url: source.url, title: thread.title, descendants: thread.comments }) : null;
+	}
+
+	async function readAppTopicComments(discussion, preview, current, signal) {
+		const limit = preview ? 2 : 12;
+		const live = preview && discussion.source === "hn" ? null : cachedThread(threadCache, discussion.key, Date.now());
+		const cached = live || await sharedThread(discussion);
+		if (!current()) return null;
+		let reader = cached?.reader;
+		if (!reader?.rootKeys?.length || reader.empty) {
+			const result = await sourceReadJob(discussion.source, "thread", ["topic", discussion.key, limit], async ({ signal }) => {
+				if (signal.aborted || !current()) return emptyThreadReader();
+				let request = discussion;
+				if (discussion.source === "hn") {
+					const item = await getItem(discussion.id, { strict: true, anonymous: preview });
+					if (!item || item.deleted || item.dead) return emptyThreadReader();
+					if (!item.kids?.length) return { rootKeys: [], getComment: async () => null };
+					request = { ...discussion, rootKeys: item.kids.slice(0, limit).map((id) => sourceKey("hn", id)) };
+				} else if (discussion.source === "bsky" && !discussion.actor.startsWith("did:")) {
+					const { did } = await checkedSourceJSON(BSKY_APPVIEW + "/com.atproto.identity.resolveHandle?handle=" + encodeURIComponent(discussion.actor),
+						(value) => typeof value?.did === "string" && /^did:[a-z0-9]+:[a-z0-9._:%-]+$/i.test(value.did));
+					request = { ...discussion, rootKeys: [sourceKey("bsky", did + "/" + discussion.rkey)] };
+				}
+				if (signal.aborted || !current()) return emptyThreadReader();
+				return getSource(discussion.source).loadThread(request, { anonymous: preview });
+			}, { timeout: THREAD_CEILING_MS, operation: {
+				attach(cancel) {
+					signal.addEventListener("abort", cancel, { once: true });
+					return () => signal.removeEventListener("abort", cancel);
+				},
+				record() {},
+			} });
+			reader = result.value;
+		}
+		if (!current() || !reader || reader.empty || !Array.isArray(reader.rootKeys)) return null;
+		const pending = reader.rootKeys.slice(0, limit).map((key) => ({ key, depth: 0 }));
+		const seen = new Set(), comments = [];
+		while (pending.length && comments.length < limit && seen.size < limit * 2 && current()) {
+			const { key, depth } = pending.shift();
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const comment = await reader.getComment(key);
+			if (!comment) continue;
+			if (depth < 2) pending.unshift(...(comment.replyKeys || []).slice(0, limit).map((child) => ({ key: child, depth: depth + 1 })));
+			if (!comment.deleted && comment.bodyHTML) comments.push({ comment, depth });
+		}
+		return !comments.length && (reader.incomplete || reader.rootKeys.length) ? null : comments;
+	}
+
+	function paintAppTopicComments(reading) {
+		const panel = reading.discussionPanel;
+		const url = panel.selected || panel.preview;
+		const entry = panel.entries.get(url);
+		const aside = panel.scroller.querySelector(".app-topic-discussions");
+		if (!aside || !entry || !panel.selected && panel.emptyPreview === url) {
+			panel.mount?.remove();
+			panel.mount = null;
+			return;
+		}
+		const preview = !panel.selected;
+		const key = (preview ? "preview:" : "thread:") + url;
+		if (panel.mount?.parentElement === aside && panel.mount.dataset.key === key) return;
+		panel.mount?.remove();
+		const region = appTopicArticleNode("section", "app-topic-thread-detail" + (preview ? " is-preview" : ""));
+		panel.mount = region;
+		region.hidden = preview;
+		region.dataset.key = key;
+		region.setAttribute("role", "region");
+		region.setAttribute("aria-label", preview ? "Discussion preview" : "Thread comments");
+		if (!preview) {
+			const back = appTopicArticleNode("button", "app-topic-thread-back", "Back to discussions");
+			back.type = "button";
+			back.onclick = () => closeAppTopicDiscussion(reading);
+			region.onkeydown = (event) => {
+				if (event.key === "Escape" && closeAppTopicDiscussion(reading)) {
+					event.preventDefault();
+					event.stopPropagation();
+				}
+			};
+			region.append(back);
+		}
+		region.append(appTopicArticleNode("h3", "app-topic-thread-heading", entry.thread.title));
+		const body = appTopicArticleNode("div", "app-topic-thread-content");
+		body.setAttribute("aria-busy", "true");
+		body.textContent = "Loading comments…";
+		region.append(body);
+		if (!preview) {
+			const original = appTopicOriginalLink(entry.thread.url, "Open original discussion");
+			original.className = "app-topic-thread-source";
+			region.append(original);
+		}
+		aside.insertBefore(region, aside.querySelector(".app-topic-discussion-list"));
+		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted &&
+			panel.entries.has(url) && reading.settings?.sources?.[entry.thread.source];
+		if (!panel.cache.has(key)) {
+			panel.cache.set(key, readAppTopicComments(entry.discussion, preview, current, panel.controller.signal).catch(() => null));
+		}
+		panel.cache.get(key).then((comments) => {
+			if (!current() || panel.mount !== region || !region.isConnected) return;
+			body.removeAttribute("aria-busy");
+			if (!comments?.length) {
+				if (preview) {
+					panel.emptyPreview = url;
+					region.remove();
+					return;
+				}
+				body.textContent = comments ? "No comments yet." : "Comments couldn’t be loaded.";
+				if (!comments) {
+					const retry = appTopicArticleNode("button", "app-topic-thread-back", "Retry comments");
+					retry.type = "button";
+					retry.onclick = () => {
+						panel.cache.delete(key);
+						region.remove();
+						paintAppTopicComments(reading);
+						panel.mount?.querySelector("button")?.focus({ preventScroll: true });
+					};
+					body.append(" ", retry);
+				}
+				return;
+			}
+			if (!preview && panel.preview === url) {
+				panel.emptyPreview = null;
+				panel.cache.set("preview:" + url, Promise.resolve(comments));
+			}
+			const list = appTopicArticleNode("ol", "app-topic-comments");
+			for (const { comment, depth } of (preview ? comments.slice(0, 1) : comments)) {
+				const item = appTopicArticleNode("li");
+				if (depth) item.dataset.depth = String(depth);
+				const text = appTopicArticleNode("div", "app-topic-comment-body");
+				if (preview || comment.bodyHTML.length > 2600) text.textContent = textExcerpt(comment.bodyHTML, preview ? 190 : 2600);
+				else text.innerHTML = sanitizeHTML(comment.bodyHTML, { images: false });
+				const byline = [comment.author || "Anonymous", commentAgeLabel(timeAgo(comment.createdAt))].filter(Boolean);
+				item.append(appTopicArticleNode("span", "app-topic-comment-author", byline.join(" · ")), text);
+				list.append(item);
+			}
+			body.replaceChildren(list);
+			region.hidden = false;
+		});
+	}
+
+	function syncAppTopicDiscussions(reading, scroller, article) {
+		const panel = reading.discussionPanel ||= { controller: new AbortController(), cache: new Map() };
+		panel.scroller = scroller;
+		panel.entries = new Map();
+		for (const source of article.sources) for (const thread of source.discussions) {
+			const discussion = appTopicKnownThread(reading, { source, thread });
+			const existing = panel.entries.get(thread.url);
+			if (discussion && (!existing || (thread.comments ?? -1) > (existing.thread.comments ?? -1))) {
+				panel.entries.set(thread.url, { thread, discussion, source });
+			}
+		}
+		if (!panel.entries.has(panel.selected)) panel.selected = null;
+		if (!panel.preview && !panel.selected && reading.publicId && !reading.pending) {
+			const published = new Set((reading.remote?.sources || []).flatMap((source) => source.discussions.map((thread) => thread.url)));
+			const index = sharedTopicCache?.index;
+			const eligible = [...panel.entries.values()].filter(({ thread, source }) =>
+				["hn", "lemmy", "lobsters"].includes(thread.source) && thread.comments !== 0 &&
+				(published.has(thread.url) || index?.pages.get(sharedTopicURLKey(source.url))?.includes(reading.publicId)));
+			eligible.sort((left, right) => (right.thread.comments || 0) - (left.thread.comments || 0));
+			panel.preview = eligible[0]?.thread.url;
+		}
+		paintAppTopicComments(reading);
+	}
+
+	function openAppTopicDiscussion(reading, { thread }, anchor) {
+		const panel = reading.discussionPanel;
+		if (appState?.topicArticle !== reading || !panel?.entries.has(thread.url) || !reading.settings?.sources?.[thread.source]) return false;
+		if (!panel.selected) panel.returnScroll = panel.scroller.scrollTop;
+		panel.selected = thread.url;
+		paintAppTopicComments(reading);
+		panel.mount?.querySelector("button")?.focus({ preventScroll: true });
+		if (anchor?.isConnected) panel.mount?.scrollIntoView({ block: "nearest" });
+		return true;
+	}
+
+	function closeAppTopicDiscussion(reading) {
+		const panel = reading?.discussionPanel;
+		if (!panel?.selected || appState?.topicArticle !== reading) return false;
+		const link = [...panel.scroller.querySelectorAll("[data-topic-thread]")].find((item) => item.dataset.topicThread === panel.selected);
+		panel.selected = null;
+		paintAppTopicComments(reading);
+		link?.focus({ preventScroll: true });
+		panel.scroller.scrollTop = panel.returnScroll;
+		return true;
+	}
+
+	function disposeAppTopicDiscussions(reading) {
+		reading?.discussionPanel?.controller.abort();
 	}
 
 	async function prepareAppDiscussion(row, opened) {
@@ -50324,7 +51426,7 @@ ${frontPageChooserHTML()}
 		const open = shadow.querySelector("#app-article-open");
 
 		paintAppArticleActions();
-		shadow.querySelector("#app-view-toggle").hidden = !url;
+		shadow.querySelector("#app-view-toggle").hidden = !url && !appState.topicArticle;
 
 		if (!url) {
 			setAppViewMenuOpen(false);
@@ -50332,6 +51434,7 @@ ${frontPageChooserHTML()}
 
 		open.href = url || "";
 		open.hidden = !url;
+		open.closest(".app-view-original").hidden = !url;
 	}
 
 	function teardownAppArticle() {
