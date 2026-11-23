@@ -1,7 +1,7 @@
 import { canonicalURL, publisherArticleKey, usableTopicTitle } from "./feeds.mjs";
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-export const ARTICLE_PIPELINE_VERSION = MODEL + ":report-v5.1";
+export const ARTICLE_PIPELINE_VERSION = MODEL + ":report-v5.2";
 export const MAX_ARTICLE_SOURCES = 12;
 const MAX_FETCHED_SOURCES = 8;
 const MAX_HTML_BYTES = 768 * 1024;
@@ -383,6 +383,7 @@ function publicationMetadata(html, url, robotsHeader) {
     ...body.paragraphs, ...structuredBody];
   const passages = candidates.flatMap((value) => {
     const text = plain(value, 5000);
+    if (/\(\s*(?:AP Photo|Photo by|Getty Images|photo credit|file photo)\b/i.test(text)) return [];
     return text.length <= 480 && text.split(" ").length <= 65 ? [text] : evidenceSentences(text);
   });
   const parts = [];
@@ -497,21 +498,64 @@ function standaloneFinding(sentence) {
   return !/\b(?:I['’]m|we['’]re|I am|we are|we were|I was)\s+(?:(?:very|really|so|particularly|incredibly)\s+)*(?:happy|glad|proud|thrilled|delighted|pleased|excited|grateful)\b/i.test(sentence);
 }
 
-function coverage(topic, records, generatedAt, draft) {
+function marketObservation(sentence) {
+  const instrument = /\b(?:shares?|stocks?)\b/i.exec(sentence);
+  const value = /(\d+(?:\.\d+)?)\s*(?:%|per\s?cent\b)/i.exec(sentence);
+  if (!instrument || !value) return null;
+  const ambiguous = (sentence.match(/\d+(?:\.\d+)?\s*(?:%|per\s?cent\b)/gi) || []).length !== 1 ||
+    value.index < instrument.index || (sentence.match(/\b(?:shares|stock)\b/gi) || []).length > 1;
+  const scope = (sentence.slice(0, value.index + value[0].length) + sentence.slice(value.index + value[0].length)
+    .split(/\s+(?:after|following|because|amid|ahead of|as a result of)\s|[;,]/i, 1)[0])
+    .replace(/^(?:after|following|because|amid)\s+[^,]+,\s*/i, "");
+  if (!/\b(?:rose|rise[sn]?|rising|fell|fall(?:s|ing)?|gain(?:s|ed)?|jump(?:s|ed)?|climb(?:s|ed)?|ralli(?:ed|es)|rally|los[est]+|shed|surge[ds]?|soar(?:s|ed)?|dip(?:s|ped)?|skyrocket(?:s|ed)?|slid|drop(?:s|ped)?|trade[ds]?|trad(?:es|ing)|closed?|finished|ended|higher|lower|up|down)\b/i.test(ambiguous ? sentence : scope)) return null;
+  const owner = /^\s+(?:of|in)\s+(\p{Lu}[\p{L}\d&.-]*(?:\s+\p{Lu}[\p{L}\d&.-]*){0,2})/u.exec(sentence.slice(instrument.index + instrument[0].length))?.[1] ||
+    /(\p{Lu}[\p{L}\d&.-]*(?:\s+\p{Lu}[\p{L}\d&.-]*){0,2})(?:['’]s)?\s*$/u.exec(sentence.slice(0, instrument.index))?.[1] || "";
+  const issuer = /^(?:the|its|company|following|as|on)$/i.test(owner) ? "" : folded(owner);
+  const day = /\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\b|\b\d{4}-\d\d-\d\d\b/i.exec(scope)?.[0].toLowerCase();
+  const end = /\b(?:clos(?:ed?|ing)|end(?:ed)? (?:the (?:day|session)|trading)|finished (?:the (?:day|session)|trading))\b/i.test(scope);
+  const period = /\b(intraday|(?:pre|after)[- ](?:market|hours)|(?:morning|afternoon|midday|early|late)(?= (?:trading|session))|as of \d{1,2}(?::\d\d)?|at \d{1,2}:\d\d|year[- ]to[- ]date)\b/i.exec(scope)?.[0].toLowerCase();
+  const relative = /\b(?:after|following)\s+[^.!?;]{0,75}\b(?:announc\w*|vote[ds]?|approv\w*|signed|decision|contract|reinstatement|election|release|ruling)\b/i.test(sentence.slice(value.index + value[0].length));
+  const stage = end ? 4 : period ? 3 : day ? 2 : relative ? 1 : 0;
+  const down = /[-−]\s*$/.test(sentence.slice(0, value.index)) || /\b(?:fell|fall(?:s|ing)?|lost|shed|slid|drop(?:s|ped)?|dip(?:s|ped)?|lower|down)\b/i.test(scope);
+  return { issuer, amount: value[1], stage, period, day, down, ambiguous };
+}
+
+function sameMarket(left, right) {
+  return left && right && (!left.issuer || !right.issuer || left.issuer === right.issuer) &&
+    (!left.day || !right.day || left.day === right.day);
+}
+
+function contestedRelativeMarket(market, observations) {
+  return market.stage === 1 && observations.some((other) => sameMarket(market, other) && !other.ambiguous && other.amount !== market.amount);
+}
+
+function departureActor(sentence, topicWords) {
+  const action = /\b(?:resign(?:s|ed|ing|ation)?|stepp?ed (?:down|aside)|quit(?:s|ting)?)\b/i.exec(sentence);
+  if (!action) return "";
+  const before = sentence.slice(0, action.index);
+  const name = /(\p{Lu}[\p{L}'’-]+)\s+(?:(?:had|has|recently|previously)\s+)*$/u.exec(before)?.[1] ||
+    [...before.matchAll(/\b\p{Lu}[\p{Ll}'’-]+\s+(\p{Lu}[\p{Ll}'’-]+)\b/gu)].find((entry) => terms(entry[1]).some((word) => topicWords.has(word)))?.[1];
+  return name ? folded(name) : "";
+}
+
+function coverage(topic, records, generatedAt, draft, sources) {
   const narrative = draft?.sections.flatMap(({ paragraphs }) => paragraphs) || [];
   if (draft && (narrative.length >= 3 || records.reduce((size, { parts }) => size + parts.length, 0) < 4)) return draft;
   const wanted = new Set(terms(topic.label));
+  const headlines = sources.map(({ source }) => new Set(terms(source.title).filter((word) => !wanted.has(word) && word.length > 3)));
   // An appositive can distinguish two people with the same name and age.
   const named = /^(\p{Lu}[\p{Ll}'’-]+(?:\s+\p{Lu}[\p{Ll}'’-]+){1,3}),\s*([^,]+),/u.exec(topic.label);
   const affiliations = (named?.[2].match(/\b\p{Lu}[\p{L}]{1,}/gu) || [])
     .filter((word) => !/^(?:Former|Late|Longtime|Retired|The)$/i.test(word));
   const findings = new Map();
   const context = records.flatMap(({ parts }) => parts);
+  const observations = context.flatMap(evidenceSentences).map(marketObservation).filter((sample) => sample && !sample.ambiguous);
   for (const { source, parts, roundup, live, named: primary } of records) {
     if (!parts.length) continue;
     const document = new Set(terms(parts.join(" ")));
     if (affiliations.some((word) => terms(word).some((term) => !document.has(term)))) continue;
     const titleMatches = new Set(terms(source.title).filter((term) => wanted.has(term))).size;
+    const ownTitle = new Set(terms(source.title).filter((word) => !wanted.has(word)));
     const minimum = Math.min(titleMatches >= 2 ? 1 : 2, wanted.size);
     const candidates = [];
     for (const [index, part] of parts.entries()) for (const sentence of evidenceSentences(part)) {
@@ -521,20 +565,27 @@ function coverage(topic, records, generatedAt, draft) {
         key === folded(source.title).replace(/[.!?]+$/, "") || !standaloneFinding(sentence)) continue;
       if (/^(?:there (?:is|are|was|were)\b|when you\b.*\bplease\b|thank (?:you|our)\b)/i.test(sentence) && !amounts(sentence).length) continue;
       if (unsupportedOutcome(sentence, sentence, context) || pendingOwnership(sentence, context)) continue;
-      const shared = new Set(terms(sentence).filter((term) => wanted.has(term))).size;
-      const direct = shared >= minimum && (!named || folded(sentence).includes(folded(named[1])));
+      const market = marketObservation(sentence);
+      if (market && (market.ambiguous || !market.stage || contestedRelativeMarket(market, observations))) continue;
+      const words = new Set(terms(sentence));
+      const shared = [...words].filter((term) => wanted.has(term)).length;
+      const echoes = [...words].filter((word) => ownTitle.has(word)).length;
+      const direct = (shared >= minimum || shared > 0 && titleMatches > 0 && echoes >= 2) && (!named || folded(sentence).includes(folded(named[1])));
+      const angle = Math.max(0, ...headlines.map((headline) => [...headline].filter((word) => words.has(word)).length));
+      const departure = departureActor(sentence, wanted);
+      const background = !!departure && /\b(?:\w+ (?:days?|weeks?|months?|years?) (?:ago|earlier)|earlier (?:this|that) (?:month|week|year)|previously)\b/i.test(sentence);
       const detail = index > 0 || !part.startsWith(sentence);
       const rank = shared + Number(!roundup) + 2 * Number(PENDING_TRANSACTION.test(part)) + 2 * Number(!!primary) +
         Number(!detail) - 4 * Number(/\b(?:must have|might have|could have|may have|speculat\w*)\b/i.test(sentence));
-      candidates.push({ key, sentence, direct, shared, detail, rank, location: source.id + "/" + index });
+      candidates.push({ key, sentence, direct, shared, detail, rank, market, departure, background, angle, location: source.id + "/" + index });
     }
     if (!candidates.some(({ direct }) => direct)) continue;
-    for (const { key, sentence, direct, shared, detail, rank, location } of candidates) {
+    for (const { key, sentence, direct, shared, detail, rank, market, departure, background, angle, location } of candidates) {
       if (!direct && (roundup || live || !titleMatches)) continue;
       if (!direct && /\b(?:polled|surveyed).+\b(?:expected|estimated)\s+[$€£\d][\d.,]+(?:\s+\w+)?[.!]?$/i.test(sentence)) continue;
       let finding = findings.get(key);
       if (!finding) {
-        finding = { sentence, direct, shared, detail, rank, location, publisher: source.publisher, citations: new Map(), roundup };
+        finding = { sentence, direct, shared, detail, rank, location, market, departure, background, angle, publisher: source.publisher, citations: new Map(), roundup };
         findings.set(key, finding);
       } else if (rank > finding.rank) {
         Object.assign(finding, { rank, publisher: source.publisher, roundup });
@@ -544,11 +595,13 @@ function coverage(topic, records, generatedAt, draft) {
       finding.citations.set(source.id, { sourceId: source.id, excerpt: citationExcerpt(sentence, sentence) });
     }
   }
-  const ranked = [...findings.values()].sort((a, b) => Number(!!a.roundup) - Number(!!b.roundup) ||
+  const all = [...findings.values()];
+  const ranked = all.filter((finding) => !finding.market || !all.some((other) =>
+    sameMarket(finding.market, other.market) && other.market.stage > finding.market.stage)).sort((a, b) => Number(!!a.roundup) - Number(!!b.roundup) ||
     b.citations.size - a.citations.size || b.rank - a.rank);
   const statement = (finding, attribute = true) => {
     const citations = [...finding.citations.values()].sort((a, b) => Number(a.sourceId.slice(1)) - Number(b.sourceId.slice(1)));
-    const attribution = attribute || finding.roundup ? finding.publisher + (finding.roundup ? "’s roundup reports, " : " reports, ") : "";
+    const attribution = attribute || finding.roundup || finding.market ? finding.publisher + (finding.roundup ? "’s roundup reports, " : " reports, ") : "";
     return { text: attribution + "“" + finding.sentence + "”",
       sourceIds: citations.map(({ sourceId }) => sourceId), citations };
   };
@@ -556,6 +609,12 @@ function coverage(topic, records, generatedAt, draft) {
   const sections = draft ? [...draft.sections] : lead ? [{ heading: "Brief", paragraphs: [statement(lead)] }] : [];
   if (!lead) return draft || { sections, timeline: [] };
   const existing = draft ? [...narrative, ...draft.timeline] : [statement(lead)];
+  const credited = new Set(existing.flatMap(({ sourceIds }) => sourceIds));
+  const origins = new Map(records.map(({ source, origin }) => [source.id, origin]));
+  const coveredOrigins = new Set([...credited].map((id) => origins.get(id)));
+  const extensive = !draft && new Set(origins.values()).size >= 4;
+  const markets = existing.flatMap(({ text }) => evidenceSentences(text).map(marketObservation)).filter(Boolean);
+  const departures = new Set(existing.map(({ text }) => departureActor(text, wanted)).filter(Boolean));
   const used = existing.flatMap(({ text, citations }) => [text, ...citations.map(({ excerpt }) => excerpt)]).map((value) => new Set(terms(value)));
   const wordsQuoted = new Map(draft ? [] : [[lead.publisher, lead.sentence.split(" ").length]]);
   const knownAmounts = new Set(existing.flatMap(({ text }) => amounts(text)));
@@ -563,12 +622,20 @@ function coverage(topic, records, generatedAt, draft) {
   const usedPassages = new Set();
   const varyPassages = new Set(ranked.map(({ location }) => location)).size > 2;
   const details = [];
-  const later = ranked.filter((finding) => finding !== lead).sort((a, b) => Number(hasNewAmount(b)) - Number(hasNewAmount(a)) ||
-    Number(b.detail) - Number(a.detail));
+  const later = ranked.filter((finding) => finding !== lead);
+  const importance = (finding) => Number(finding.market?.stage === 4) * 4 + Math.min(3, finding.angle) +
+    2 * Number(finding.background) + Number(hasNewAmount(finding)) + Number(finding.detail) +
+    Number(finding.background && /\b(?:days?|weeks?|months?|years?) (?:ago|earlier)\b/i.test(finding.sentence));
+  later.sort((a, b) => importance(b) - importance(a));
   for (const finding of later) {
     if (finding.roundup && !lead.roundup) continue;
+    if (markets.some((observation) => sameMarket(observation, finding.market))) continue;
+    if (finding.departure && departures.has(finding.departure)) continue;
     if (varyPassages && usedPassages.has(finding.location)) continue;
-    if (!finding.detail && finding.shared >= Math.min(3, wanted.size) && !hasNewAmount(finding)) continue;
+    if (!finding.detail && finding.shared >= Math.min(3, wanted.size) && !hasNewAmount(finding) && !finding.background && finding.angle < 2) continue;
+    if (details.length >= 3 && !(extensive && finding.direct && finding.angle > 0 &&
+      [...finding.citations.keys()].some((id) => !coveredOrigins.has(origins.get(id))) &&
+      /\b(?:criticiz\w*|criticis\w*|question(?:s|ed|ing)?|oppose[sd]?|contest(?:s|ed)?|dispute[sd]?|urge[sd]?|call(?:s|ed)? for|request(?:s|ed)?|warn(?:s|ed)?|defend(?:s|ed)?|endorse[sd]?|reject(?:s|ed)?)\b/i.test(finding.sentence))) continue;
     const words = new Set(terms(finding.sentence));
     if (used.some((previous) => {
       const shared = [...words].filter((word) => previous.has(word)).length;
@@ -576,12 +643,16 @@ function coverage(topic, records, generatedAt, draft) {
     })) continue;
     const total = (wordsQuoted.get(finding.publisher) || 0) + finding.sentence.split(" ").length;
     if (total > 52) continue;
-    details.push(statement(finding, false));
+    const point = statement(finding, ![...finding.citations.keys()].some((id) => credited.has(id)));
+    details.push(point);
+    for (const id of point.sourceIds) { credited.add(id); coveredOrigins.add(origins.get(id)); }
     used.push(words);
     amounts(finding.sentence).forEach((amount) => knownAmounts.add(amount));
     usedPassages.add(finding.location);
+    if (finding.market) markets.push(finding.market);
+    if (finding.departure) departures.add(finding.departure);
     wordsQuoted.set(finding.publisher, total);
-    if (details.length === 3) break;
+    if (details.length === (extensive ? 4 : 3)) break;
   }
   if (details.length) sections.push({ heading: "Further details", paragraphs: details });
   if (draft) return { sections, timeline: draft.timeline };
@@ -612,6 +683,7 @@ const INSTRUCTIONS = [
   "Lead with the most specific supported development. Then explain what happened, how it happened, and what follows wherever the passages supply those details. Preserve meaningful figures, mechanisms, named participants and open questions.",
   "Write original, connected sentences with concrete people, actions, and consequences. Bring sources together around the same question rather than recapping each in turn.",
   "Name the responsible organization when more than one appears. Choose documented mechanisms, effects or limitations over promotional remarks.",
+  "Give each development once. For fast-moving figures use the most precisely timed observation, attribute it and preserve whether it is a closing value or an intraday snapshot. Use the remaining space for earlier events, direct accounts or consequences supported by the passages.",
   "Use story-specific section headings and one or two sentences per paragraph. When there are distinct findings, develop them in two or three sections, up to 320 words. A single supported development can stand alone. Never list headlines or pad thin material.",
   "Each sentence should make one claim. Write it in your own words, then cite the exact sourceId and passage ID (for example p2) that substantiate the claim. Cite multiple passages if necessary for every factual clause.",
   "Do not quote a whole sentence in the narrative. Keep distinctive names and figures, but change the sentence structure and use your own words.",
@@ -742,6 +814,22 @@ function supportedPoint(point, records, issue = {}) {
     references.push({ id: record.source.id, quote, excerpt: citationExcerpt(original || record.source.title, text) });
   }
   const evidence = references.map(({ quote }) => quote).join(" ");
+  const citedMarkets = /%|per\s?cent\b/i.test(text) ? references.flatMap(({ quote }) =>
+    evidenceSentences(quote).map(marketObservation).filter(Boolean).map((snapshot) => ({ snapshot, quote }))) : [];
+  let market = marketObservation(text);
+  if (!market && citedMarkets.length) {
+    const explicit = text.replace(/(\b\p{Lu}[\p{L}\d&.-]*(?:\s+\p{Lu}[\p{L}\d&.-]*){0,2})\s+(?=(?:closed|finished|ended|traded|rose|fell|gained|lost|jumped|soared|climbed)\b)/u, "$1 shares ");
+    if (explicit !== text) market = marketObservation(explicit);
+  }
+  if (market && (market.ambiguous || !market.stage ||
+    market.stage === 1 && contestedRelativeMarket(market, context.flatMap(evidenceSentences).map(marketObservation)) ||
+    !citedMarkets.some(({ quote, snapshot }) => sameMarket(snapshot, market) && !snapshot.ambiguous &&
+      snapshot.amount === market.amount && snapshot.stage === market.stage &&
+      (!market.issuer || snapshot.issuer === market.issuer || folded(quote).includes(market.issuer)) &&
+      snapshot.down === market.down && (!market.period || market.period === snapshot.period) && (!market.day || market.day === snapshot.day)))) {
+    issue.note = "State one market move with the trading period and figure from the same cited sentence. A session high or untimed estimate cannot establish the closing value.";
+    return null;
+  }
   const outcome = unsupportedOutcome(text, evidence, context);
   if (outcome) { issue.note = outcome; return null; }
   const supportedAmounts = new Set(amounts(evidence));
@@ -762,7 +850,7 @@ function supportedPoint(point, records, issue = {}) {
     return null;
   }
   const citations = references.map(({ id, excerpt }) => ({ sourceId: id, excerpt }));
-  return { text, sourceIds: [...new Set(references.map(({ id }) => id))], evidence, quotes: references.map(({ quote }) => quote), hasPassage, citations };
+  return { text, sourceIds: [...new Set(references.map(({ id }) => id))], evidence, quotes: references.map(({ quote }) => quote), hasPassage, citations, market };
 }
 
 function explicitlyDated(date, evidence) {
@@ -786,6 +874,7 @@ function acceptedDraft(draft, eligible, generatedAt, issue) {
   if (!Array.isArray(draft?.sections) || !draft.sections.length || draft.sections.length > 4) return null;
   const records = new Map(eligible.map((record) => [record.source.id, record]));
   const used = new Set();
+  const markets = [];
   const sections = [];
   for (const section of draft.sections) {
     const heading = modelText(section?.heading, 100);
@@ -800,6 +889,13 @@ function acceptedDraft(draft, eligible, generatedAt, issue) {
         if (paragraphIssue.ownership && (sections.length || paragraphs.length)) continue;
         Object.assign(issue, paragraphIssue);
         return null;
+      }
+      for (const { market } of sentences) if (market) {
+        if (markets.some((previous) => sameMarket(previous, market))) {
+          issue.note = "Choose one precisely timed stock move for this issuer, then use a different documented development for the next paragraph.";
+          return null;
+        }
+        markets.push(market);
       }
       const sourceIds = [...new Set(sentences.flatMap((sentence) => sentence.sourceIds))];
       sourceIds.forEach((id) => used.add(id));
@@ -916,7 +1012,7 @@ export async function buildTopicArticle(topic, pages, { ai, fetcher, now = Date.
     else status = "unavailable";
   }
   onStatus?.(status);
-  const content = coverage(identity, reporting, generatedAt, draft);
+  const content = coverage(identity, reporting, generatedAt, draft, records);
   const byId = new Map(reporting.map((record) => [record.source.id, record]));
   const images = [], publishers = new Set();
   const cited = new Set(content.sections.flatMap(({ paragraphs }) => paragraphs.flatMap(({ sourceIds }) => sourceIds)));

@@ -893,3 +893,122 @@ test("supplementary reporting on a release chooses concrete features ahead of th
   assert(details.every(({ text }) => !text.includes("very happy")));
   assert.deepEqual(new Set(details.map(({ citations }) => citations[0].excerpt)), new Set([updates, testing, crashes]));
 });
+
+test("different live price reports yield one attributed closing figure alongside the earlier event and the direct account", async () => {
+  const subject = { id: "story:rail", label: "Aster reinstates Dana Shore as CEO" };
+  const announcement = "Aster reinstated Dana Shore as president and chief executive, effective immediately.";
+  const close = "Shares of Aster closed up 31% following Shore’s reinstatement.";
+  const unqualified = "Aster’s stock soared 35% on the news, following a sell-off on Friday.";
+  const dated = "On Monday, Aster stock jumped 30%, lifting the entire market.";
+  const departure = "Dana Shore resigned two weeks ago after an investigation by the board.";
+  const account = "Mayor Casey Ray told Harbor Radio she called Aster’s directors to request a new vote.";
+  const pages = ["aster", "markets", "radio", "journal"].map((name) => ({ url: "https://" + name + ".org/report", posts: [] }));
+  const docs = [
+    ["Aster board reinstates Dana Shore as CEO", [announcement]],
+    ["Aster reinstates Dana Shore as CEO and shares rise", [close, departure]],
+    ["Mayor describes her call to Aster directors", [account, unqualified]],
+    ["Aster reinstates Dana Shore, market reacts", [dated]],
+  ];
+  const article = await buildTopicArticle(subject, pages, { now, fetcher: async (url) => {
+    const [title, passages] = docs[pages.findIndex((page) => page.url === url)];
+    return html("<title>" + title + "</title><article>" + passages.map((p) => "<p>" + p + "</p>").join("") + "</article>");
+  } });
+  const paragraphs = article.sections.flatMap(({ paragraphs }) => paragraphs);
+  assert.deepEqual(paragraphs.filter(({ text }) => text.includes("%")).map(({ text }) => text), ['markets.org reports, “' + close + '”']);
+  for (const fact of [departure, account]) assert(paragraphs.some(({ text, citations }) =>
+    text.includes(fact) && citations.some(({ excerpt }) => excerpt === fact)), fact);
+});
+
+test("a day describing a different event cannot date an untimed stock observation or an archival caption", async () => {
+  const subject = { id: "story:aster", label: "Aster reinstates Dana Shore" };
+  const announcement = "Aster reinstated Dana Shore as president following a public vote.";
+  const price = "Aster’s shares surged 35% on the news after a technology sell-off Friday.";
+  const caption = "Dana Shore waits for a groundbreaking ceremony to begin in Eastport on June 16, 2026. (AP Photo/Casey Ray, File)";
+  const article = await buildTopicArticle(subject, [bridge], { now, fetcher: async () =>
+    html("<title>" + subject.label + "</title><article>" + [announcement, price, caption].map(p=>"<p>"+p+"</p>").join("") + "</article>") });
+  assert.match(JSON.stringify(article.sections), /public vote/);
+  assert.doesNotMatch(JSON.stringify([article.sections, article.timeline]), /35%|groundbreaking|AP Photo/);
+});
+
+test("the synthesis cannot attach an intraday high to the close or recount the same stock move as two developments", async () => {
+  const subject = { id: "story:aster", label: "Aster shares rise after the bridge contract" };
+  const high = "Aster shares rose as much as 35% in morning trading after the contract was signed.";
+  const close = "Aster shares closed up 31% after the bridge contract was signed.";
+  const relative = "Aster stock rose 30% after the board announced its decision.";
+  const project = "The bridge contract covers electrical cable work on the western river crossing.";
+  const fetcher = async (url) => html("<title>" + subject.label + "</title><article><p>" +
+    (url === bridge.url ? high + "</p><p>" + close + "</p><p>" + relative : project) + "</p></article>");
+  const valid = point("Aster shares ended trading 31% higher after the bridge contract.", "s1", close);
+  const background = point("The bridge contract includes electrical work at the western river crossing.", "s2", project);
+  for (const [market, expected] of [
+    [[valid], "synthesis"],
+    [[point("Aster shares rose 35% after the bridge contract.", "s1", high)], "coverage"],
+    [[point("Aster closed 35% higher after the bridge contract.", "s1", high)], "coverage"],
+    [[point("Aster stock rose 30% after the board announced its decision.", "s1", relative)], "coverage"],
+    [[{ text: "Aster shares closed up 35% after the contract.", evidence: [{ sourceId: "s1", passage: "p1" }, { sourceId: "s1", passage: "p2" }] }], "coverage"],
+    [[point("Aster shares rose 35% during morning trading.", "s1", high), valid], "coverage"],
+  ]) {
+    const answer = { sections: [{ heading: "Contract and trading", paragraphs: [...market, background].map(s=>({ sentences: [s] })) }], events: [] };
+    const article = await buildTopicArticle(subject, [bridge, ferry], { now, fetcher, ai: { run: () => ({ response: answer }) } });
+    assert.equal(article.method, expected, market.map(({ text }) => text).join(" / "));
+    assert.equal(article.sections.flatMap(s=>s.paragraphs).filter(p=>p.text.includes("%")).length, 1);
+  }
+});
+
+test("rewording an earlier departure does not crowd out a distinct cited interview", async () => {
+  const subject = { id: "story:rail", label: "Aster reinstates Dana Shore as CEO" };
+  const lead = "Aster reinstated Dana Shore as its chief executive after a vote on Monday.";
+  const first = "Dana Shore resigned from the top job earlier this month after an internal review.";
+  const copy = "Dana Shore will return as Aster’s CEO, in a reversal after she stepped down two weeks ago.";
+  const interview = "Governor Nia Perry told Beacon Radio that she spoke directly with Aster’s directors about a second vote.";
+  const pages = [bridge, ferry, {url:"https://beacon.org/news",posts:[]}];
+  const docs = [[lead, first], [copy], [interview]];
+  const article = await buildTopicArticle(subject, pages, { now, fetcher: async url => {
+    const i=pages.findIndex(p=>p.url===url);
+    return html("<title>" + (i === 2 ? "Governor speaks with Aster directors" : subject.label) + "</title><article>" +
+      docs[i].map(p=>"<p>"+p+"</p>").join("") + "</article>");
+  } });
+  const claims=article.sections.flatMap(s=>s.paragraphs);
+  assert.equal(claims.filter(p=>/resigned|stepped down/i.test(p.text)).length, 1);
+  assert(claims.some(p=>p.text.includes(interview) && p.sourceIds[0] === "s3"));
+});
+
+test("price percentages stay with their issuer and cannot borrow a voter percentage or a different trading period", async () => {
+  const subject = { id: "story:rail", label: "Aster and Meridian report rail contracts" };
+  const lead = "Aster and Meridian won separate rail maintenance contracts after an open tender.";
+  const close = "Aster stock closed 3% higher following the rail tender.";
+  const other = "Meridian shares closed 7% lower following the rail tender.";
+  const mixed = "After 10% of shareholders voted, Aster stock closed 3% higher and Meridian shares were flat.";
+  const early = "Aster shares gained 8% in morning trading after the contract awards.";
+  const doc = "<title>" + subject.label + "</title><article>" + [lead,mixed,close,other,early].map(p=>"<p>"+p+"</p>").join("") + "</article>";
+  const report=await buildTopicArticle(subject, [bridge], { now, fetcher: async()=>html(doc) });
+  const claims=report.sections.flatMap(s=>s.paragraphs);
+  for(const detail of [close,other]) assert(claims.some(p=>p.text.includes(detail) && p.citations[0].excerpt===detail));
+  assert(!claims.some(p=>/10%|8%/.test(p.text)));
+  for(const [bad,quote] of [["Harbor Gazette reports Aster shares closed 10% higher.",mixed],["Harbor Gazette reports Aster shares gained 8% in afternoon trading.",early]]) {
+    const response={sections:[{heading:"Market reaction",paragraphs:[{sentences:[point(bad,"s1",quote)]}]}],events:[]};
+    const article=await buildTopicArticle(subject,[bridge],{now,fetcher:async()=>html('<meta property="og:site_name" content="Harbor Gazette">'+doc),ai:{run:()=>({response})}});
+    assert.equal(article.method,"coverage",bad);
+  }
+});
+
+test("an extensively reported event makes room for a distinct sourced response without filling a fourth slot on a sparse story", async () => {
+  const subject = { id: "story:rail", label: "Aster reinstates Dana Shore as CEO" };
+  const docs = [
+    ["Aster reinstatement announcement", "Aster reinstated Dana Shore as chief executive following a board vote."],
+    ["Aster shares surge after vote", "Shares of Aster closed up 31% following Shore’s reinstatement."],
+    ["Dana Shore’s earlier departure", "Dana Shore stepped down two weeks ago while directors investigated the contract."],
+    ["Governor called Aster directors", "Governor Ty Gray called Aster’s directors on Sunday to argue for a new vote."],
+    ["Aster regulator questions decision", "The state regulator questioned Aster’s decision and requested the minutes of the vote."],
+  ];
+  const pages=docs.map((_,i)=>({url:"https://press"+i+".org/story",posts:[]}));
+  const fetcher=async url=>{
+    const [title,fact]=docs[pages.findIndex(p=>p.url===url)];return html("<title>"+title+"</title><article><p>"+fact+"</p></article>");
+  };
+  const rich=await buildTopicArticle(subject,pages,{now,fetcher});
+  const paragraphs=rich.sections.flatMap(s=>s.paragraphs);
+  for(const [,fact] of docs) assert(paragraphs.some(p=>p.text.includes(fact)),fact);
+  assert(paragraphs.some(p=>p.text.startsWith("press4.org reports") && p.citations[0].excerpt===docs[4][1]));
+  const sparse=await buildTopicArticle(subject,pages.slice(0,2),{now,fetcher});
+  assert.equal(sparse.sections.flatMap(s=>s.paragraphs).length,2);
+});
