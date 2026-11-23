@@ -2,7 +2,7 @@ import { canonicalURL, publisherArticleKey, usableTopicTitle } from "./feeds.mjs
 import { compatibleStoryTitles, relatedStoryTitles } from "./grouping.mjs";
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-export const ARTICLE_PIPELINE_VERSION = MODEL + ":report-v5.3";
+export const ARTICLE_PIPELINE_VERSION = MODEL + ":report-v5.4";
 export const MAX_ARTICLE_SOURCES = 12;
 const MAX_FETCHED_SOURCES = 8;
 const MAX_HTML_BYTES = 768 * 1024;
@@ -573,9 +573,22 @@ function departureActor(sentence, topicWords) {
   return name ? folded(name) : "";
 }
 
+function responseVoice(sentence, topicWords) {
+  const action = REPORTED_RESPONSE.exec(sentence) ||
+    /\b(?:object(?:s|ed)? to|challenge[sd]?|condemn(?:s|ed)?|support(?:s|ed)?|welcome[sd]?)\b/i.exec(sentence);
+  if (!action?.index) return null;
+  const actors = terms(sentence.slice(0, action.index)).filter((word) => !topicWords.has(word) && !word.endsWith("ly"));
+  const stance = /^(?:critic|question|oppos|contest|disput|warn|reject|object|challeng|condemn)/i.test(action[0]) ? "opposition" :
+    /^(?:defend|endors|support|welcom)/i.test(action[0]) ? "support" : "request";
+  return { stance, actors };
+}
+
 function coverage(topic, records, generatedAt, draft, sources) {
   const narrative = draft?.sections.flatMap(({ paragraphs }) => paragraphs) || [];
-  if (draft && (narrative.length >= 3 || records.reduce((size, { parts }) => size + parts.length, 0) < 4)) return draft;
+  const regularLimit = narrative.length >= 3 ? 0 : 3;
+  const origins = new Map(records.map(({ source, origin }) => [source.id, origin]));
+  const extensive = new Set(records.filter((record) => !record.roundup).map((record) => record.origin)).size >= 4;
+  if (draft && (!regularLimit && !extensive || records.reduce((size, { parts }) => size + parts.length, 0) < 4)) return draft;
   const wanted = new Set(terms(topic.label));
   const headlines = sources.map(({ source }) => new Set(terms(source.title).filter((word) => !wanted.has(word) && word.length > 3)));
   // An appositive can distinguish two people with the same name and age.
@@ -645,19 +658,21 @@ function coverage(topic, records, generatedAt, draft, sources) {
   if (!lead) return draft || { sections, timeline: [] };
   const existing = draft ? [...narrative, ...draft.timeline] : [statement(lead)];
   const credited = new Set(existing.flatMap(({ sourceIds }) => sourceIds));
-  const origins = new Map(records.map(({ source, origin }) => [source.id, origin]));
   const coveredOrigins = new Set([...credited].map((id) => origins.get(id)));
-  const extensive = !draft && new Set(origins.values()).size >= 4;
+  const voices = existing.flatMap(({ text }) => evidenceSentences(text).map((sentence) => responseVoice(sentence, wanted))).filter(Boolean);
   const markets = existing.flatMap(({ text }) => evidenceSentences(text).map(marketObservation)).filter(Boolean);
   const departures = new Set(existing.map(({ text }) => departureActor(text, wanted)).filter(Boolean));
-  const used = existing.flatMap(({ text, citations }) => [text, ...citations.map(({ excerpt }) => excerpt)]).map((value) => new Set(terms(value)));
+  const used = existing.flatMap(({ text, citations }) => [text, ...citations.map(({ excerpt }) => excerpt)])
+    .map((value) => ({ words: new Set(terms(value)), voice: responseVoice(value, wanted) }));
   const wordsQuoted = new Map(draft ? [] : [[lead.publisher, lead.sentence.split(" ").length]]);
   const knownAmounts = new Set(existing.flatMap(({ text }) => amounts(text)));
   const hasNewAmount = ({ sentence }) => amounts(sentence).some((amount) => !knownAmounts.has(amount));
   const usedPassages = new Set();
   const varyPassages = new Set(ranked.map(({ location }) => location)).size > 2;
   const details = [];
-  const later = ranked.filter((finding) => finding !== lead);
+  let addedResponse = false;
+  const isResponse = (finding) => !finding.roundup && finding.direct && finding.angle > 0 && REPORTED_RESPONSE.test(finding.sentence);
+  const later = ranked.filter((finding) => finding !== lead || draft && isResponse(finding));
   const importance = (finding) => Number(finding.market?.stage === 4) * 4 + Math.min(3, finding.angle) +
     2 * Number(finding.background) + Number(hasNewAmount(finding)) + Number(finding.detail) +
     Number(finding.background && /\b(?:days?|weeks?|months?|years?) (?:ago|earlier)\b/i.test(finding.sentence));
@@ -668,26 +683,33 @@ function coverage(topic, records, generatedAt, draft, sources) {
     if (finding.departure && departures.has(finding.departure)) continue;
     if (varyPassages && usedPassages.has(finding.location)) continue;
     if (!finding.detail && finding.shared >= Math.min(3, wanted.size) && !hasNewAmount(finding) && !finding.background && finding.angle < 2) continue;
-    if (details.length >= 3 && !(extensive && finding.direct && finding.angle > 0 &&
-      [...finding.citations.keys()].some((id) => !coveredOrigins.has(origins.get(id))) &&
-      REPORTED_RESPONSE.test(finding.sentence))) continue;
+    const response = isResponse(finding);
+    const newPublisher = [...finding.citations.keys()].some((id) => !coveredOrigins.has(origins.get(id)));
+    const responseOnly = details.length >= regularLimit;
+    if ((responseOnly || draft && response) && !(extensive && response && newPublisher && !addedResponse)) continue;
+    const voice = response ? responseVoice(finding.sentence, wanted) : null;
+    if (voice && voices.some((other) => other.stance === voice.stance && voice.actors.some((actor) => other.actors.includes(actor)))) continue;
     const words = new Set(terms(finding.sentence));
     if (used.some((previous) => {
-      const shared = [...words].filter((word) => previous.has(word)).length;
-      return shared >= 3 && shared >= Math.min(words.size, previous.size) * 0.66;
+      // A quotation can repeat the full name and office while adding a different speaker’s response.
+      if (voice?.actors.length && newPublisher && !previous.voice && voice.actors.every((actor) => !previous.words.has(actor))) return false;
+      const shared = [...words].filter((word) => previous.words.has(word)).length;
+      return shared >= 3 && shared >= Math.min(words.size, previous.words.size) * 0.66;
     })) continue;
     const total = (wordsQuoted.get(finding.publisher) || 0) + finding.sentence.split(" ").length;
     if (total > 52) continue;
-    const point = statement(finding, ![...finding.citations.keys()].some((id) => credited.has(id)));
+    const point = statement(finding, responseOnly || ![...finding.citations.keys()].some((id) => credited.has(id)));
     details.push(point);
     for (const id of point.sourceIds) { credited.add(id); coveredOrigins.add(origins.get(id)); }
-    used.push(words);
+    used.push({ words, voice });
     amounts(finding.sentence).forEach((amount) => knownAmounts.add(amount));
     usedPassages.add(finding.location);
     if (finding.market) markets.push(finding.market);
     if (finding.departure) departures.add(finding.departure);
+    if (voice) voices.push(voice);
+    if (response && newPublisher) addedResponse = true;
     wordsQuoted.set(finding.publisher, total);
-    if (details.length === (extensive ? 4 : 3)) break;
+    if (details.length === regularLimit + Number(extensive)) break;
   }
   if (details.length) sections.push({ heading: "Further details", paragraphs: details });
   if (draft) return { sections, timeline: draft.timeline };

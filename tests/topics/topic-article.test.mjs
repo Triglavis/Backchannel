@@ -1051,3 +1051,71 @@ test("an extensively reported event makes room for a distinct sourced response w
   const sparse=await buildTopicArticle(subject,pages.slice(0,2),{now,fetcher});
   assert.equal(sparse.sections.flatMap(s=>s.paragraphs).length,2);
 });
+
+test("accepted briefs preserve their reporting and include an omitted independent response only once", async (t) => {
+  const subject = { id: "story:rail", label: "Aster reinstates Dana Shore as CEO" };
+  const notice = "Aster reinstated Dana Shore as chief executive following a vote of its board.";
+  const assurance = "Government officials assured the Aster directors that the appointment posed no security risk.";
+  const close = "Shares of Aster closed up 31% following Shore’s reinstatement.";
+  const departure = "Dana Shore stepped down two weeks ago while directors investigated the contract.";
+  const phone = "Governor Ty Gray called Aster’s directors on Sunday to argue for a new vote.";
+  const response = "Republican lawmakers criticized Aster’s decision to reinstate chief executive Dana Shore despite the governor’s intervention.";
+  const secondAccount = "Republicans in the legislature opposed bringing Shore back to run Aster.";
+  const defense = "Freight workers defended Aster’s appointment of Dana Shore, saying directors consulted the union in advance.";
+  const documents = [
+    ["Aster reinstatement announcement", [notice]],
+    ["Security assurances for Aster directors", [assurance]],
+    ["Aster shares surge after vote", [close]],
+    ["Dana Shore’s earlier departure", [departure]],
+    ["Governor called Aster directors", [phone]],
+    ["Lawmakers criticize Aster’s decision", [response]],
+    ["Shore’s appointment divides state leaders", [secondAccount]],
+    ["Freight workers defend Shore’s appointment", [defense]],
+  ];
+  const pages = documents.map(([title], i) => ({ title, url: "https://desk" + i + ".org/story", posts: [] }));
+  const opening = point("Aster’s directors voted to reinstate Dana Shore as chief executive.", "s1", notice);
+  const background = point("Aster directors received assurances from government officials about the security risk.", "s2", assurance);
+  const intervention = point("Governor Gray called Aster’s board on Sunday and argued for a new vote.", "s5", phone);
+  const opposition = point("Republicans in the legislature opposed Shore’s return to Aster.", "s7", secondAccount);
+  const fetcher = async (url) => {
+    const [title, facts] = documents[pages.findIndex((p) => p.url === url)];
+    return html("<title>" + title + "</title><article>" + facts.map((fact) => "<p>" + fact + "</p>").join("") + "</article>");
+  };
+  const generate = async (points, selected = pages, getPage = fetcher) => {
+    const sections = points.map((fact, i) => ({ heading: ["Board vote", "Security review", "Public response"][i],
+      paragraphs: [{ sentences: [fact] }] }));
+    const article = await buildTopicArticle(subject, selected, { now, fetcher: getPage, ai: { run: () => ({ response: { sections, events: [] } }) } });
+    assert.equal(article.method, "synthesis");
+    assert.deepEqual(article.sections.slice(0, sections.length).map((s) => [s.heading, s.paragraphs[0].text, s.paragraphs[0].sourceIds]),
+      sections.map((s, i) => [s.heading, points[i].text, [points[i].evidence[0].sourceId]]));
+    return article.sections.slice(sections.length).flatMap((section) => section.paragraphs);
+  };
+  const firstSix = pages.slice(0, 6);
+  await t.test("a two-paragraph synthesis retains the close, departure and call alongside the independent criticism", async () => {
+    const details = await generate([opening, background], firstSix);
+    assert.equal(details.length, 4);
+    for (const fact of [close, departure, phone, response]) assert(details.some((p) => p.text.includes(fact)), fact);
+    assert.deepEqual(details.find((p) => p.text.includes(response)).citations, [{ sourceId: "s6", excerpt: response }]);
+  });
+  await t.test("a developed synthesis adds only the missing response", async () => {
+    const details = await generate([opening, background, intervention], firstSix);
+    assert.deepEqual(details.map((p) => [p.text, p.sourceIds]), [["desk5.org reports, “" + response + "”", ["s6"]]]);
+  });
+  await t.test("another outlet’s account of the same opposition needs no second reaction", async () => {
+    assert.deepEqual(await generate([opening, background, opposition], pages.slice(0, 7)), []);
+  });
+  await t.test("a short brief adds at most one response when several new publishers have one", async () => {
+    const selected = pages.filter((_, i) => [0, 1, 5, 7].includes(i));
+    const details = await generate([opening, background], selected);
+    assert.equal(details.length, 1);
+    assert([response, defense].some((fact) => details[0].text.includes(fact)));
+  });
+  await t.test("fewer independent publishers cannot trigger a response supplement at either draft length", async () => {
+    const three = pages.filter((_, i) => [0, 1, 5].includes(i));
+    const getPage = (url) => url === three[0].url ? html("<title>Aster reinstatement announcement</title><article><p>" + notice +
+      "</p><p>Aster’s appointed chief executive will take office on Monday morning.</p></article>") : fetcher(url);
+    const vote = point("Aster’s board voted on the appointment of its chief executive.", "s1", notice);
+    assert.deepEqual(await generate([opening, background, vote], three, getPage), []);
+    assert(!(await generate([opening, background], three, getPage)).some((p) => p.text.includes(response)));
+  });
+});
