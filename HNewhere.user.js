@@ -38201,8 +38201,13 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 		--icon-knock:var(--rail-bg);
 	}
 
-	#app #app-chin .app-head-icon:is(:hover, :active, .item-action-on, [aria-pressed="true"], [aria-expanded="true"]) {
+	#app #app-chin .app-head-icon:enabled:is(:hover, :active) {
 		background:color-mix(in srgb, var(--rail-fg) 18%, transparent);
+	}
+
+	#app #app-chin .app-head-icon:enabled:is(.item-action-on, [aria-pressed="true"], [aria-expanded="true"]) {
+		background:#fff;
+		color:var(--rail-bg);
 	}
 
 	#app-chin .app-head-icon > svg {
@@ -38225,11 +38230,6 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 		width:11px;
 		height:11px;
 		margin-top:.4px;
-	}
-
-	#app #app-chin #app-article-actions .item-action-on {
-		background:var(--rail-fg);
-		color:var(--rail-bg);
 	}
 }
 

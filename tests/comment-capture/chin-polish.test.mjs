@@ -48,6 +48,69 @@ test('chin keyboard order follows the visible controls without replacing their h
   }finally{await app.browser.close()}
 });
 
+for (const colorScheme of ['light', 'dark']) {
+  test(`toggled chin buttons use a solid white background and the selected rail glyph color in ${colorScheme} mode`, {timeout: 20000}, async () => {
+    const app = await launchApp({sharedStore: true, colorScheme, settings: {updateCheck: false}});
+    try {
+      const {page} = app;
+      await page.goto('https://backchnnl.app/');
+      const story = page.locator('#app-list-body .browse-title-link').first();
+      await story.waitFor();
+      const chin = page.locator('#app-chin');
+      const discussion = chin.locator('#app-toggle-discussion');
+      const style = chin.locator('#app-view-toggle');
+      const save = chin.locator('[data-item-action="save"]');
+      const rail = page.locator('#app-rail .rail-button.is-current:visible').first();
+      const selected = {
+        background: 'rgb(255, 255, 255)',
+        image: 'none',
+        glyph: await rail.evaluate(button => getComputedStyle(button).color),
+      };
+      const colors = button => button.evaluate(node => {
+        const paint = getComputedStyle(node);
+        const path = node.querySelector('svg path');
+        return {
+          background: paint.backgroundColor,
+          image: paint.backgroundImage,
+          glyph: path ? getComputedStyle(path).fill : getComputedStyle(node, '::after').backgroundColor,
+        };
+      });
+      const checkSelected = async (button, label) => {
+        await page.mouse.move(0, 0);
+        assert.deepEqual(await colors(button), selected, label);
+        await button.hover();
+        assert.deepEqual(await colors(button), selected, `${label} on hover`);
+      };
+
+      assert(await discussion.isDisabled());
+      assert.equal(await discussion.isVisible(), false);
+      assert.notEqual((await colors(discussion)).background, selected.background);
+      await story.click();
+      await discussion.waitFor();
+      const resting = await colors(save);
+      await checkSelected(discussion, 'Visible Discussion');
+      await discussion.click();
+      const hovered = await colors(discussion);
+      assert.notEqual(hovered.background, selected.background);
+      assert.notEqual(hovered.background, resting.background);
+      await page.mouse.move(0, 0);
+      assert.deepEqual(await colors(discussion), resting, 'Hidden Discussion');
+      await save.click();
+      await save.filter({hasText: 'unsave'}).waitFor();
+      await checkSelected(save, 'Saved story');
+      await style.click();
+      await page.locator('#app-view-menu').waitFor();
+      await checkSelected(style, 'Open style menu');
+      await page.keyboard.press('Escape');
+      await page.mouse.move(0, 0);
+      assert.deepEqual(await colors(style), resting, 'Closed style menu');
+      assert.deepEqual(app.errors, []);
+    } finally {
+      await app.browser.close();
+    }
+  });
+}
+
 test('chin outlines fit the chin surface and each glyph is vertically centered',{timeout:15000},async()=>{
   const app=await ready();
   try{
