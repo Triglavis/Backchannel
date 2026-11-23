@@ -56,7 +56,8 @@ test('Next in queue follows the article inside the Reader scroller',{timeout:200
   await page.locator('#app-rail [data-app-view="queue"]').click();
   await page.locator('#app-list-body').getByRole('link',{name:current.title,exact:true}).click();
   const pane=page.locator('#app-article-body[data-mode="reader"]');
-  await pane.waitFor();
+  // Firefox can omit the load event for a refused frame. Reader then probes it after eight seconds.
+  await pane.waitFor({timeout:12000});
   const queue=page.locator('#next-up');
   await queue.getByRole('link',{name:next.title,exact:true}).waitFor();
   assert.equal(await page.locator('#panel #next-up').count(),0,'the discussion does not contain the queue footer');
