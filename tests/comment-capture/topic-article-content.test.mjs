@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { launchApp, waitFor } from "./harness.mjs";
 
 const catalogURL = "https://topics.backchnnl.app/api/topics";
+const testPhoto = fileURLToPath(new URL("../../site/src/shot-reader.webp", import.meta.url));
 const topic = { id: "topic:railway-signals", label: "Railway signal upgrades", kind: "topic" };
 const articleURL = catalogURL + "/article?id=topic%3Arailway-signals";
 const issue = {
@@ -34,10 +36,10 @@ const issue = {
 	],
 };
 
-function openReader({ catalogPages = [], responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
+function openReader({ catalogPages = [], artwork, responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
 	const now = Date.now();
 	const index = {
-		version: 1, generatedAt: new Date(now).toISOString(), topics: [topic],
+		version: 1, generatedAt: new Date(now).toISOString(), topics: [{ ...topic, image: artwork }],
 		pages: [{ key: "framed.example.com/post/260", topicIds: [topic.id] }, { key: "plain.example.org/post", topicIds: [topic.id] }, ...catalogPages],
 	};
 	const stories = issue.sources.map((source, i) => ({
@@ -141,6 +143,67 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 		}
 	});
 }
+
+test("a topic illustrates its reporting with attributed publisher photos and quiet source references", async (t) => {
+	const images = [
+		{ url: "https://pictures.example.org/platform.jpg", alt: "Signal crews at the station", sourceId: "s2" },
+		{ url: "https://pictures.example.org/interlock.jpg", alt: "The replacement interlocking", sourceId: "s1" },
+	];
+	const published = { ...issue, images, sections: [...issue.sections, {
+		heading: "Testing the interlocking", paragraphs: [{ text: "The interlocking passed its tests.", sourceIds: ["s1"] }],
+	}] };
+	const app = await openReader({ responses: [{ match: (url) => url === articleURL, json: published }] });
+	t.after(() => app.browser.close());
+	const photos = [];
+	await app.context.route("https://pictures.example.org/**", async (route) => {
+		photos.push([route.request().url(), route.request().headers().referer]);
+		await route.fulfill({ contentType: "image/webp", path: testPhoto });
+	});
+	await app.page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const article = app.page.locator("#app-article-body article");
+	await article.getByRole("heading", { name: "Testing the interlocking" }).waitFor();
+	const figures = article.locator(".app-topic-narrative figure");
+	assert.equal(await figures.count(), 2);
+	for (const [i, image] of images.entries()) {
+		const figure = figures.nth(i);
+		const pic = figure.getByRole("img", { name: image.alt });
+		await pic.scrollIntoViewIfNeeded();
+		assert(await waitFor(() => pic.evaluate((el) => el.complete && el.naturalWidth > 0)));
+		assert.equal(await figure.locator("figcaption a").getAttribute("href"), issue.sources.find((s) => s.id === image.sourceId).url);
+	}
+	assert(photos.every(([, referer]) => !referer));
+	const first = article.getByRole("list", { name: "Sources" }).locator(":scope > li").first();
+	const reference = first.getByRole("button", { name: "Source 1, Signal Journal" });
+	assert(await reference.evaluate((el) => el.closest(".app-topic-credit") && getComputedStyle(el).backgroundColor === "rgba(0, 0, 0, 0)" &&
+		parseFloat(getComputedStyle(el).fontSize) <= 0.87 * parseFloat(getComputedStyle(el.closest(".app-topic-credit")).fontSize)));
+	await reference.click();
+	await app.page.getByRole("dialog", { name: issue.sources[0].title }).waitFor();
+});
+
+test("a missing publisher photo falls back to attributed topic artwork without loading a hidden source photo", async (t) => {
+	const broken = "https://pictures.example.org/broken.jpg", hiddenImage = "https://pictures.example.org/hidden.jpg";
+	const artwork = { url: "https://upload.wikimedia.org/wikipedia/commons/1/11/Station.jpg",
+		source: "https://commons.wikimedia.org/wiki/File:Station.jpg", credit: "Chris Track · CC BY 4.0", subject: "Station signals" };
+	const seen = [];
+	const hidden = issue.sources[1];
+	const app = await openReader({ artwork, values: { "HNewhere:hidden_stories": [{ key: hidden.url.slice(8), url: hidden.url, title: hidden.title }] },
+		responses: [{ match: (url) => url === articleURL, json: { ...issue, images: [
+			{ url: broken, alt: "Unavailable photo", sourceId: "s1" }, { url: hiddenImage, alt: "Hidden photo", sourceId: "s2" },
+		] } }] });
+	t.after(() => app.browser.close());
+	await app.context.route("https://pictures.example.org/**", async (route) => { seen.push(route.request().url()); await route.fulfill({ status: 404 }); });
+	await app.context.route(artwork.url, (route) => route.fulfill({ contentType: "image/webp", path: testPhoto }));
+	await app.page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const figure = app.page.locator("#app-article-body article .app-topic-narrative figure");
+	await app.page.locator(".app-topic-source-title").first().waitFor();
+	assert(await waitFor(() => seen.includes(broken)), "the public publisher photo is tried");
+	const image = figure.getByRole("img", { name: artwork.subject });
+	await image.waitFor();
+	assert(await waitFor(() => image.evaluate((el) => el.complete && el.naturalWidth > 0)));
+	assert.equal(await figure.locator("figcaption a").getAttribute("href"), artwork.source);
+	assert.match(await figure.locator("figcaption").innerText(), /Chris Track · CC BY 4\.0/);
+	assert(!seen.includes(hiddenImage));
+});
 
 test("thin coverage keeps titles in Sources and quotes only complete publisher descriptions", async () => {
 	const listed = "The public listing describes this link as “Some trains used the old signals until Tuesday.”";
@@ -331,9 +394,20 @@ ${seam}`);
 				{ ...fixture.sources[0], excerpt: "" }, { ...fixture.sources[1], sharedAt: null },
 			]);
 			const withUnsafeThread = altered((item) => item.sources[0].discussions[0].url = "javascript:noop()");
+			const safeURL = "https://pictures.example.org/engineering/signals.jpg?width=700";
+			const filteredImages = altered((item) => item.images = [
+				{ url: "https://127.0.0.1/photo.jpg", alt: "Local network", sourceId: "s1" },
+				{ url: safeURL, alt: "Unknown coverage", sourceId: "s999" },
+				{ url: safeURL, alt: "Engineering works", sourceId: "s2" },
+			]).images;
 			const localSources = Array.from({ length: 170 }, (_, index) => ({
 				...fixture.sources[0], id: "local" + index, url: "https://tracks.example.com/story/" + index,
 			}));
+			const detailed = local("Signal report", "local", [
+				{ ...fixture.sources[0], preview: "https://pictures.example.org/west.jpg", discussions: [] },
+				{ ...fixture.sources[1], preview: "https://pictures.example.org/east.jpg", discussions: [{ url: "https://news.ycombinator.com/item?id=205", source: "hn", comments: 50 }] },
+				{ ...fixture.sources[0], id: "s3", url: "https://other.example.org/tests", excerpt: fixture.sources[1].excerpt },
+			]);
 			return {
 				rejected: [
 					parse(fixture, new Set(["story:unrelated"])),
@@ -348,6 +422,7 @@ ${seam}`);
 					altered((item) => item.sections[0].paragraphs[0].citations = Array(2).fill({ sourceId: "s1", excerpt: "Duplicated." })),
 				],
 				discussions: withUnsafeThread.sources[0].discussions,
+				images: filteredImages,
 				savedThreads: fromRows([{ story: { title: "River report", url: "https://city.example/report" }, discussions: [
 					{ source: "hn", id: 115 }, { source: "lemmy", id: 120 }, { source: "lobsters", id: "ow65gf" },
 					{ source: "reddit", id: "r4567" }, { source: "bsky", id: "at://did:plc:abcd/app.bsky.feed.post/3a56" },
@@ -355,10 +430,13 @@ ${seam}`);
 				] }], {})[0].discussions.map(({ url }) => url),
 				fallback: sourceOnly, headlineOnly: local("Empty material", "local", fixture.sources.map((s) => ({ ...s, excerpt: "" }))),
 				localCount: local("Railway history", "local", localSources).sources.length,
+				detailSources: detailed.sections.flatMap((s) => s.paragraphs.map((p) => p.citations[0].sourceId)),
+				previewSources: detailed.images.map((photo) => photo.sourceId),
 			};
 		}, issue);
 		assert.deepEqual(results.rejected, Array(10).fill(null));
 		assert.deepEqual(results.discussions, []);
+		assert.deepEqual(results.images, [{ url: "https://pictures.example.org/engineering/signals.jpg?width=700", alt: "Engineering works", sourceId: "s2" }]);
 		assert.deepEqual(results.savedThreads, ["https://news.ycombinator.com/item?id=115", "https://lemmy.world/post/120",
 			"https://lobste.rs/s/ow65gf", "https://www.reddit.com/comments/r4567/", "https://bsky.app/profile/did:plc:abcd/post/3a56"]);
 		assert.equal(results.fallback.method, "coverage");
@@ -368,6 +446,8 @@ ${seam}`);
 		assert.deepEqual(results.fallback.timeline, []);
 		assert.deepEqual(results.headlineOnly.sections, []);
 		assert.equal(results.localCount, 170);
+		assert.deepEqual(results.detailSources, ["s2", "s1"]);
+		assert.deepEqual(results.previewSources, ["s2", "s1"]);
 		const invalid = await page.evaluate(async () => {
 			const { request } = window.__topicContent();
 			return Promise.all(["reader-story:private/article", "https://private.example.org/article", "topic:https://private.example.org/article"].map((id) => request(id)));

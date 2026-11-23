@@ -121,31 +121,42 @@ test('wide Reader keeps its real article actions together in the chin',{timeout:
 });
 
 for (const [width, hasTouch] of [[1600, false], [320, true]]) {
-  test(`${width}px Topics back button matches the Sources byline close button`, {timeout: 20000}, async () => {
+  test(`${width}px topic reading preserves the list toolbar and the compact Sources filter control`, {timeout: 20000}, async () => {
     const topic = {id: 'story:runtime-costs', kind: 'story', label: 'Runtime costs'};
     const pages = STORIES.slice(0, 2).map(({url}) => ({key: url.slice('https://'.length), topicIds: [topic.id]}));
     const app = await launchApp({
       sharedStore: true, viewport: {width, height: 850}, hasTouch, resubmissions: 1,
-      settings: {sources: {hn: true}, frontPageMode: 'sources', updateCheck: false},
+      settings: {sources: {hn: true}, frontPageMode: 'sources', sourceRefreshMinutes: 0, updateCheck: false},
+      values: {
+        'HNewhere:app_panes': {list: true, discussion: true},
+        'HNewhere:frontpage_feed:/hn/front/': {
+          timestamp: Date.now(), stories: STORIES.slice(0, 2).map(story => ({...story, source: 'hn', descendants: story.comments})),
+        },
+      },
       responses: [{match: url => url === 'https://topics.backchnnl.app/api/topics', json: {
         version: 1, generatedAt: new Date().toISOString(), topics: [topic], pages,
       }}],
     });
     try {
       const {page} = app;
+      page.setDefaultTimeout(5000);
       const size = button => button.evaluate(node => [node, node.querySelector('svg')].map(part => {
         const {width, height} = part.getBoundingClientRect();
         return [width, height];
       }));
       await page.goto('https://backchnnl.app/');
       await page.getByRole('tab', {name: 'By topic', exact: true}).click();
-      await page.locator('.app-topic-row').filter({hasText: topic.label}).click();
+      const card = page.locator('.app-topic-row').filter({hasText: topic.label});
+      await card.click();
+      await page.locator('.app-topic-article h1').getByText(topic.label, {exact: true}).waitFor();
       if (hasTouch) {
-        await page.locator('#app[data-stage="article"]:not([data-moving]) .app-topic-article').waitFor();
+        await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
         await page.locator('#app-bar-back').tap();
         await page.locator('#app[data-stage="list"]:not([data-moving])').waitFor();
       }
-      const backSize = await size(page.getByRole('button', {name: 'Back to topics', exact: true}));
+      assert(await card.isVisible());
+      assert.equal(await page.getByRole('button', {name: 'Back to topics', exact: true}).isVisible(), false);
+      await page.getByRole('tab', {name: 'By link', exact: true}).click();
       await page.locator('#app-list-body').getByRole('link', {name: STORIES[0].title, exact: true}).click();
       if (hasTouch) {
         await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
@@ -157,7 +168,6 @@ for (const [width, hasTouch] of [[1600, false], [320, true]]) {
       await sources.locator('[data-discussion-key] input').first().uncheck();
       const closeSize = await size(page.getByRole('button', {name: 'Show all discussions', exact: true}));
       assert.deepEqual(closeSize, [[15, 15], [12, 12]]);
-      assert.deepEqual(backSize, closeSize);
       assert.deepEqual(app.errors, []);
     } finally {
       await app.browser.close();

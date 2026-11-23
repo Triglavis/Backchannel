@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { frontPageHTML, launchApp, waitFor } from "./harness.mjs";
+import { reinstatement, otherDevelopments } from "../topics/leadership-fixture.mjs";
 
 const catalogURL = "https://topics.backchnnl.app/api/topics";
 const fallbackCatalogURL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
@@ -95,7 +96,7 @@ function requestsContaining(app, values) {
 	return app.requests.filter(({ url }) => values.some((value) => decodeURIComponent(url).includes(value)));
 }
 
-async function returnToTopicLinksOnPhone(page) {
+async function returnToTopicCardsOnPhone(page) {
 	await page.locator('#app[data-stage="article"]:not([data-moving]) .app-topic-article').waitFor();
 	await page.locator("#app-bar-back").click();
 	await page.locator('#app[data-stage="list"]:not([data-moving])').waitFor();
@@ -108,11 +109,26 @@ async function expectLinkTitles(list, titles) {
 	assert.deepEqual((await rows.allTextContents()).sort(), [...titles].sort());
 }
 
+const topicSources = (page) => page.locator(".app-topic-sources");
+const topicHeading = (page) => page.locator(".app-topic-article h1");
+
+async function expectSourceTitles(page, titles) {
+	const sources = topicSources(page);
+	await sources.getByRole("link", { name: titles[0], exact: true }).first().waitFor();
+	assert.deepEqual((await sources.locator(".app-topic-source-title").allTextContents()).sort(), [...titles].sort());
+}
+
 async function expectTopicMembers(list, card, titles) {
 	await card.click();
-	await expectLinkTitles(list, titles);
-	await list.page().getByRole("button", { name: "Back to topics", exact: true }).click();
-	await card.waitFor();
+	await expectSourceTitles(list.page(), titles);
+	assert.equal(await card.getAttribute("aria-current"), "true");
+}
+
+async function openTopicLinkManagement(card) {
+	const page = card.page();
+	await card.click({ button: "right" });
+	await page.getByRole("menuitem", { name: "Select links", exact: true }).click();
+	await page.getByRole("button", { name: "Close selection", exact: true }).click();
 }
 
 const topicPhoto = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Subject.jpg/250px-Subject.jpg";
@@ -177,7 +193,7 @@ test("equivalent topics share one subject image and count each discussion once",
 		assert.deepEqual(await image.evaluate((node) => [node.naturalWidth, node.getBoundingClientRect().width,
 			node.getBoundingClientRect().height, getComputedStyle(node).objectFit]), [1, 54, 44, "cover"]);
 		assert.equal(app.requests.filter(({ url }) => url === report.url).length, 0);
-		await merged.click();
+		await openTopicLinkManagement(merged);
 		await list.getByRole("link", { name: guide.title }).waitFor();
 		await list.getByRole("link", { name: report.title }).waitFor();
 		const heading = page.locator("#app-list-topic");
@@ -252,7 +268,7 @@ test("a broken exact topic image gives way to a subject photo and its credit", a
 		const group = topic(page.locator("#app-list-body"), "Extension permissions");
 		await expectTopicPhoto(group, /source code/i);
 		await group.click();
-		await expectTopicPhoto(page.locator("#app-list-topic"), /source code/i);
+		await expectTopicPhoto(group, /source code/i);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -307,8 +323,8 @@ test("topics always show an icon when a Commons photo is missing, repeated, or b
 		assert.notEqual(await unknown.locator(".app-topic-icon").innerHTML(), await broken.locator(".app-topic-icon").innerHTML());
 		assert.match(await unknown.locator(".app-topic-media").getAttribute("title"), /Vardum/);
 		await unknown.click();
-		await list.getByRole("link", { name: topics[2].label + " (first)", exact: true }).waitFor();
-		assert.equal(await page.locator("#app-list-topic .app-topic-icon svg").isVisible(), true);
+		await topicSources(page).getByRole("link", { name: topics[2].label + " (first)", exact: true }).waitFor();
+		assert.equal(await unknown.locator(".app-topic-icon svg").isVisible(), true);
 		assert.equal(await page.getByRole("link", { name: /image credit/i }).count(), 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -374,7 +390,7 @@ test("Reader gets a Wikipedia image for a locally grouped topic and caches its c
 		assert.equal(await icon.isVisible(), false);
 		assert.equal(await picture.getAttribute("referrerpolicy"), "no-referrer");
 		await group.click();
-		const headingPhoto = page.locator("#app-list-topic img[data-loaded]");
+		const headingPhoto = group.locator("img[data-loaded]");
 		await headingPhoto.waitFor();
 		assert.match(await headingPhoto.getAttribute("title"), /iran.*sibr4.*public domain/i);
 		const toWikipedia = () => requests.filter(({ url }) => isQuery(url, "en.wikipedia.org", subject));
@@ -521,7 +537,7 @@ test("renamed shared topics preserve old filters and resolve in universal search
 		await page.locator("#app-rail-search").click();
 		await page.locator("#app-search-input").fill(oldLabel);
 		await page.getByRole("button", { name: "#" + title + " Front Pages · 2 links", exact: true }).click();
-		await page.locator("#app-list-topic-title").getByText("#" + title, { exact: true }).waitFor();
+		await topicHeading(page).getByText(title, { exact: true }).waitFor();
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -798,10 +814,7 @@ test("By topic lists only groups and By link restores every link in the current 
 		const group = topic(list, "Extension permissions");
 		await group.waitFor();
 		assert.equal(await list.locator(".browse-title-link").count(), 0);
-		await group.click();
-		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([guide.title, report.title]));
-		await page.getByRole("button", { name: "Back to topics" }).click();
+		await expectTopicMembers(list, group, [guide.title, report.title]);
 		await group.waitFor();
 		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		await links.click();
@@ -813,7 +826,7 @@ test("By topic lists only groups and By link restores every link in the current 
 	}
 });
 
-test("a long topic byline stays inside its pane above the links on desktop and phone", async () => {
+test("the link-selection byline stays inside its pane above the links on desktop and phone", async () => {
 	const label = "Researchers publish " + "a detailed regional comparison of the findings and ".repeat(5) + "interoperability".repeat(8);
 	const story = { id: "story:long-heading", kind: "story", label, curated: true };
 	const rows = Array.from({ length: 32 }, (_, i) => ({
@@ -831,8 +844,7 @@ test("a long topic byline stays inside its pane above the links on desktop and p
 		const header = page.locator("#app-list-topic");
 		for (const viewport of [{ width: 1100, height: 680 }, { width: 320, height: 580 }]) {
 			await page.setViewportSize(viewport);
-			await page.locator('[data-shared-topic="story:long-heading"]').click();
-			if (viewport.width === 320) await returnToTopicLinksOnPhone(page);
+			await openTopicLinkManagement(page.locator('[data-shared-topic="story:long-heading"]'));
 			await header.getByText(/in 32 links$/).waitFor();
 			const geometry = await header.evaluate((bar) => {
 				const rect = bar.getBoundingClientRect();
@@ -877,8 +889,8 @@ test("public Topics scopes normal link rows and preserves their discussions and 
 		assert.equal(await topic(list, "Browser privacy").count(), 0);
 		assert.equal(await topicsTab.getAttribute("aria-selected"), "true");
 		assert(await topicsTab.evaluate((button) => button.getRootNode().activeElement === button));
-		await permissions.click();
-		await page.locator("#app-article-body .app-topic-article").waitFor();
+		await expectTopicMembers(list, permissions, [guide.title, report.title]);
+		await linksTab.click();
 		await guideLink.waitFor();
 		await reportLink.waitFor();
 		await guideLink.click();
@@ -887,6 +899,7 @@ test("public Topics scopes normal link rows and preserves their discussions and 
 		assert.equal(await page.getByRole("button", { name: "Mark all as read" }).isVisible(), true);
 
 		await rail(page, "all").click();
+		await topicsTab.click();
 		await permissions.getByText(/in 2 links$/).waitFor();
 		await rail(page, "source:hn").click();
 		await guideLink.waitFor();
@@ -1240,9 +1253,9 @@ test("right-clicking a topic row opens its menu and can select its links", async
 		await group.press("Shift+F10");
 		await menu.getByRole("menuitem", { name: "Open", exact: true }).click();
 		await page.locator("#app-article-body .app-topic-article").waitFor();
-		await expectLinkTitles(list, [guide.title, report.title]);
-		assert(await waitFor(() => back.evaluate((button) => button.getRootNode().activeElement === button)));
-		await back.click();
+		await expectSourceTitles(page, [guide.title, report.title]);
+		assert.equal(await back.isVisible(), false);
+		await page.keyboard.press("Escape");
 		assert(await waitFor(() => group.evaluate((row) => row.getRootNode().activeElement === row)));
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -1296,14 +1309,14 @@ function coverageResponse(id, options = { json: coverageFixture }, offset = null
 
 const loadHiddenLinks = (page) => page.getByRole("button", { name: "Load hidden links about this topic", exact: true });
 
-async function openPermissionsTopic(page, { phone = false } = {}) {
+async function openPermissionsTopic(page) {
 	await page.goto("https://backchnnl.app/");
 	await page.getByRole("tab", { name: "By topic", exact: true }).click();
 	const list = page.locator("#app-list-body");
 	await topic(list, coverageTopic.label).click();
-	if (phone) await returnToTopicLinksOnPhone(page);
-	await list.getByRole("link", { name: report.title, exact: true }).waitFor();
-	return list;
+	const sources = topicSources(page);
+	await sources.getByRole("link", { name: report.title, exact: true }).waitFor();
+	return sources;
 }
 
 test("an outdated topic catalog explains an empty hidden-link result and keeps keyboard focus", async () => {
@@ -1317,22 +1330,22 @@ test("an outdated topic catalog explains an empty hidden-link result and keeps k
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(3500);
-		const list = await openPermissionsTopic(page);
-		const before = await list.locator(".browse-title-link").allTextContents();
-		const result = list.getByRole("status").filter({ hasText: /no (?:additional|more|hidden) links/i });
+		const sources = await openPermissionsTopic(page);
+		const before = await sources.locator(".app-topic-source-title").allTextContents();
+		const result = sources.getByRole("status").filter({ hasText: /no (?:additional|more|hidden) links/i });
 		const changed = [[200, coverageFixture.links.slice(0, 2)], [200, []],
 			[200, [{ ...furtherLink, title: "New ceramic glazes tested in a studio" }]], [404, []], [410, []]];
 		for (const [i, [status, links]] of changed.entries()) {
 			detail.status = status;
 			detail.json = { ...coverageFixture, links };
 			if (i) {
-				await page.getByRole("button", { name: "Back to topics" }).click();
-				await topic(list, coverageTopic.label).click();
+				await page.keyboard.press("Escape");
+				await topic(page.locator("#app-list-body"), coverageTopic.label).click();
 			}
 			await loadHiddenLinks(page).press("Enter");
 			await result.waitFor();
 			assert.equal(await loadHiddenLinks(page).count(), 0);
-			assert.deepEqual(await list.locator(".browse-title-link").allTextContents(), before);
+			assert.deepEqual(await sources.locator(".app-topic-source-title").allTextContents(), before);
 			assert(await waitFor(() => result.evaluate((node) => node.getRootNode().activeElement === node)));
 			assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, i + 1);
 		}
@@ -1355,10 +1368,9 @@ test("public share variants of a visible topic link do not offer a hidden-links 
 		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [{ ...article, topic: "technology" }] },
 	}, responses: [{ match: (url) => url === catalogURL, json: index }] });
 	try {
-		const list = await openPermissionsTopic(app.page);
-		const back = app.page.getByRole("button", { name: "Back to topics", exact: true });
-		assert(await waitFor(() => back.evaluate((node) => node.getRootNode().activeElement === node)));
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([article.title, report.title]));
+		const sources = await openPermissionsTopic(app.page);
+		assert.equal(await app.page.locator("#app-list-topic").isVisible(), false);
+		assert.deepEqual(new Set(await sources.locator(".app-topic-source-title").allTextContents()), new Set([article.title, report.title]));
 		assert.equal(await loadHiddenLinks(app.page).count(), 0);
 		assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, 0);
 		assert.deepEqual(app.errors, []);
@@ -1388,14 +1400,16 @@ test("a distinct topic URL keeps its query and combines discussions from its pub
 	] });
 	try {
 		app.page.setDefaultTimeout(3500);
-		const list = await openPermissionsTopic(app.page);
+		const sources = await openPermissionsTopic(app.page);
 		await loadHiddenLinks(app.page).press("Enter");
-		const additional = list.locator("[data-topic-extra] .browse-title-link");
+		const additional = sources.getByRole("link", { name: furtherLink.title, exact: true });
 		await additional.first().waitFor();
 		assert.equal(await additional.count(), 1);
 		assert.equal(new URL(await additional.getAttribute("href")).searchParams.get("issue"), "2");
-		assert.equal(await app.page.locator("#app-list-topic-count").textContent(), "29 comments across 4 discussions in 3 links");
 		assert(await waitFor(() => additional.evaluate((node) => node.getRootNode().activeElement === node)));
+		const threads = additional.locator("..").locator(".app-topic-source-threads");
+		await threads.locator("summary").click();
+		assert.equal(await threads.locator(".app-topic-thread-original").count(), 2);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1412,11 +1426,10 @@ test("a topic offers only the hidden links left by the reader’s filters", asyn
 		frontPageMode: "topics", frontPageTopics: ["technology"],
 	} }, responses: [{ match: (url) => url === catalogURL, json: index }] });
 	try {
-		const list = await openPermissionsTopic(app.page);
-		const back = app.page.getByRole("button", { name: "Back to topics", exact: true });
-		assert(await waitFor(() => back.evaluate((node) => node.getRootNode().activeElement === node)));
+		const sources = await openPermissionsTopic(app.page);
+		assert.equal(await app.page.locator("#app-list-topic").isVisible(), false);
 		assert.equal(await loadHiddenLinks(app.page).count(), 0);
-		assert.equal(await list.locator(".browse-title-link").count(), 2);
+		assert.equal(await sources.locator(".app-topic-source-title").count(), 2);
 		assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -1449,11 +1462,14 @@ test("loading a filtered Collection topic reveals its private saved link locally
 		await group.click();
 		await page.locator("#app-article-body .app-topic-article").waitFor();
 		assert.equal(new URL(page.url()).searchParams.has("topic"), false);
-		await loadHiddenLinks(page).press("Enter");
-		const revealed = list.locator("[data-topic-extra] .browse-title-link");
+		const sources = page.locator(".app-topic-sources");
+		await sources.getByRole("button", { name: "Load hidden links about this topic" }).press("Enter");
+		const revealed = sources.getByRole("link", { name: saved[2].title, exact: true });
 		await revealed.waitFor();
 		assert.equal(await revealed.getAttribute("href"), saved[2].url);
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(saved.map(({ title }) => title)));
+		assert.deepEqual(new Set(await sources.locator(".app-topic-source-title").allTextContents()), new Set(saved.map(({ title }) => title)));
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		assert.equal(await group.getAttribute("aria-current"), "true");
 		expectTopicRequests(app, [catalogURL]);
 		assert.deepEqual(requestsContaining(app, [localId, ...saved.map(({ url }) => new URL(url).hostname)]), []);
 		assert.deepEqual(app.errors, []);
@@ -1476,20 +1492,20 @@ test("a partial coverage failure keeps its links and retries only the unfinished
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
+		const sources = await openPermissionsTopic(page);
 		await loadHiddenLinks(page).press("Enter");
-		const loading = list.getByRole("button", { name: "Loading hidden links…" });
+		const loading = sources.getByRole("button", { name: "Loading hidden links…" });
 		await loading.waitFor();
 		assert(await loading.isDisabled());
 		await loading.evaluate((button) => button.click());
-		await list.getByRole("status").getByText(/some hidden links couldn’t be loaded/i).waitFor();
-		assert.deepEqual(await list.locator("[data-topic-extra] .browse-title-link").allTextContents(), [furtherLink.title]);
+		await sources.getByRole("status").getByText(/some hidden links couldn’t be loaded/i).waitFor();
+		await expectSourceTitles(page, [guide.title, report.title, furtherLink.title]);
 		Object.assign(retry, { status: 200, delay: 0, json: { ...coverageFixture, topic: other, links: [last] } });
 		await loadHiddenLinks(page).press("Enter");
-		const lastLink = list.getByRole("link", { name: last.title, exact: true });
+		const lastLink = sources.getByRole("link", { name: last.title, exact: true });
 		await lastLink.waitFor();
 		assert(await waitFor(() => lastLink.evaluate((node) => node.getRootNode().activeElement === node)));
-		assert.deepEqual(new Set(await list.locator("[data-topic-extra] .browse-title-link").allTextContents()), new Set([furtherLink.title, last.title]));
+		await expectSourceTitles(page, [guide.title, report.title, furtherLink.title, last.title]);
 		const calls = app.requests.filter(({ url }) => url.startsWith(coverageURL)).map(({ url }) => new URL(url).searchParams.get("id"));
 		assert.equal(calls.filter((id) => id === coverageTopic.id).length, 1);
 		assert.equal(calls.filter((id) => id === other.id).length, 2);
@@ -1500,7 +1516,7 @@ test("a partial coverage failure keeps its links and retries only the unfinished
 	}
 });
 
-test("Reader loads additional topic links after the current rows without navigating", async () => {
+test("Reader loads additional topic sources in the article without navigating", async () => {
 	const preview = "https://another.example.com/preview.png";
 	const app = await launchTopics({ stored: { "HNewhere:looks": {
 		"another.example.com/extension-permissions": { image: preview, at: now * 1000 },
@@ -1513,34 +1529,29 @@ test("Reader loads additional topic links after the current rows without navigat
 		page.setDefaultTimeout(5000);
 		await context.route(preview, (route) => route.fulfill({ contentType: "image/png", body: previewPNG }));
 		await context.route(topicPhoto, (route) => route.fulfill({ contentType: "image/png", body: previewPNG }));
-		const list = await openPermissionsTopic(page);
-		const titles = list.locator(".browse-title-link");
+		const sources = await openPermissionsTopic(page);
+		const titles = sources.locator(".app-topic-source-title");
 		const visible = await titles.allTextContents();
 		const load = loadHiddenLinks(page);
 		await load.waitFor();
 		await page.waitForURL((url) => url.searchParams.get("topic") === coverageTopic.id);
 		const topicAddress = page.url();
-		assert(await list.locator(":scope > :last-child").getByRole("button", { name: "Load hidden links about this topic" }).isVisible());
+		assert(await sources.locator(":scope > :last-child").getByRole("button", { name: "Load hidden links about this topic" }).isVisible());
 		assert.deepEqual(new Set(visible), new Set([guide.title, report.title]));
-		assert.equal(await page.locator("#app-list-topic").getByRole("link", { name: /image credit/i }).count(), 0);
+		assert.equal(await page.locator("#app-list-body").getByRole("link", { name: /image credit/i }).count(), 0);
 		assert.equal(app.requests.some(({ url }) => url.startsWith(coverageURL)), false);
 
 		await load.press("Enter");
-		const additional = list.getByRole("link", { name: furtherLink.title, exact: true });
+		const additional = sources.getByRole("link", { name: furtherLink.title, exact: true });
 		await additional.waitFor();
-		assert.deepEqual(await titles.allTextContents(), [...visible, furtherLink.title]);
+		await expectSourceTitles(page, [...visible, furtherLink.title]);
 		assert.equal(await load.count(), 0);
 		assert.equal(page.url(), topicAddress);
 		assert.equal(await page.getByRole("button", { name: "Back to links", exact: true }).count(), 0);
-		await page.locator("#app-list-topic").getByText(/in 3 links$/).waitFor();
-		assert(await additional.locator("xpath=ancestor::*[@data-topic-extra]").isVisible());
-		const picture = list.locator("[data-topic-extra] .browse-thumb");
-		await picture.waitFor();
-		assert(await waitFor(() => picture.evaluate((node) => node.naturalWidth === 1)));
-		assert.deepEqual(await picture.evaluate((node) => [node.offsetWidth, node.offsetHeight]), [30, 30]);
+		assert.equal(await page.locator("#app-list-body .browse-title-link").count(), 0);
 		assert(await waitFor(() => additional.evaluate((link) => link.getRootNode().activeElement === link)));
-		await page.getByRole("button", { name: "Back to topics", exact: true }).click();
-		await topic(list, coverageTopic.label).waitFor();
+		await page.keyboard.press("Escape");
+		await topic(page.locator("#app-list-body"), coverageTopic.label).waitFor();
 		assert.equal(await additional.count(), 0);
 		const requests = app.requests.filter(({ url }) => url.startsWith(coverageURL));
 		assert.equal(requests.length, 1);
@@ -1566,12 +1577,12 @@ test("an unread topic can reveal its read links without asking for public covera
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
-		const earlierLink = list.getByRole("link", { name: earlier.title, exact: true });
+		const sources = await openPermissionsTopic(page);
+		const earlierLink = sources.getByRole("link", { name: earlier.title, exact: true });
 		assert.equal(await earlierLink.count(), 0);
 		await loadHiddenLinks(page).click();
 		await earlierLink.waitFor();
-		assert.equal(await list.locator(".browse-title-link").last().textContent(), earlier.title);
+		await expectSourceTitles(page, [guide.title, report.title, earlier.title]);
 		assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, 0);
 		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
 		assert.deepEqual(app.errors, []);
@@ -1596,11 +1607,11 @@ test("a merged topic loads additional links from each equivalent topic", async (
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
+		const sources = await openPermissionsTopic(page);
 		await loadHiddenLinks(page).click();
-		await list.getByRole("link", { name: another.title, exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator("[data-topic-extra] .browse-title-link").allTextContents()), new Set([furtherLink.title, another.title]));
-		assert.equal(await list.locator(".browse-title-link").count(), 4);
+		await sources.getByRole("link", { name: another.title, exact: true }).waitFor();
+		await expectSourceTitles(page, [guide.title, report.title, furtherLink.title, another.title]);
+		assert.equal(await sources.locator(".app-topic-source-title").count(), 4);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1617,10 +1628,9 @@ test("a topic keeps an explicitly hidden link out of the additional rows", async
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
-		const back = page.getByRole("button", { name: "Back to topics", exact: true });
-		assert(await waitFor(() => back.evaluate((button) => button.getRootNode().activeElement === button)));
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([guide.title, report.title]));
+		const sources = await openPermissionsTopic(page);
+		assert.equal(await page.locator("#app-list-topic").isVisible(), false);
+		assert.deepEqual(new Set(await sources.locator(".app-topic-source-title").allTextContents()), new Set([guide.title, report.title]));
 		assert.equal(await loadHiddenLinks(page).count(), 0);
 		assert.equal(app.requests.some(({ url }) => url.startsWith(coverageURL)), false);
 		assert.deepEqual(app.errors, []);
@@ -1629,7 +1639,7 @@ test("a topic keeps an explicitly hidden link out of the additional rows", async
 	}
 });
 
-test("a narrow phone returns from the topic article to its byline and additional links", async () => {
+test("a narrow phone loads additional sources in the article and returns to its topic card", async () => {
 	const app = await launchTopics({ viewport: { width: 320, height: 740 }, hasTouch: true, responses: [
 		{ match: (url) => url === catalogURL, json: coverageIndexWithImage },
 		coverageResponse(coverageTopic.id, { json: coverageWithImage }),
@@ -1637,17 +1647,17 @@ test("a narrow phone returns from the topic article to its byline and additional
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page, { phone: true });
-		const header = page.locator("#app-list-topic");
-		await header.getByRole("button", { name: "Read topic article", exact: true }).waitFor();
-		await header.getByRole("button", { name: "Back to topics", exact: true }).waitFor();
-		assert.equal(await header.getByRole("button").count(), 2);
+		const sources = await openPermissionsTopic(page);
+		await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
 		const load = loadHiddenLinks(page);
 		await load.waitFor();
 		const box = await load.boundingBox();
 		assert(box.x >= 0 && box.x + box.width <= 320);
 		await load.tap();
-		await list.getByRole("link", { name: furtherLink.title, exact: true }).waitFor();
+		await sources.getByRole("link", { name: furtherLink.title, exact: true }).waitFor();
+		await returnToTopicCardsOnPhone(page);
+		await topic(page.locator("#app-list-body"), coverageTopic.label).waitFor();
+		assert.equal(await page.locator("#app-list-topic").isVisible(), false);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1661,7 +1671,8 @@ test("a single visible story stays a link and hides the topic tabs", async () =>
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
+		await openPermissionsTopic(page);
+		const list = page.locator("#app-list-body");
 		await rail(page, "source:hn").click();
 		const row = list.locator(".browse-row").filter({ hasText: guide.title });
 		await row.getByRole("link", { name: guide.title, exact: true }).waitFor();
@@ -1682,15 +1693,15 @@ test("an unavailable additional link request keeps the topic readable while it i
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
+		const sources = await openPermissionsTopic(page);
 		await loadHiddenLinks(page).click();
-		await list.getByRole("button", { name: /loading hidden links/i }).waitFor();
-		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
-		await list.getByRole("status").getByText(/couldn’t load hidden links/i).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([guide.title, report.title]));
+		await sources.getByRole("button", { name: /loading hidden links/i }).waitFor();
+		await sources.getByRole("link", { name: guide.title, exact: true }).waitFor();
+		await sources.getByRole("status").getByText(/couldn’t load hidden links/i).waitFor();
+		assert.deepEqual(new Set(await sources.locator(".app-topic-source-title").allTextContents()), new Set([guide.title, report.title]));
 		Object.assign(response, { status: 200, json: coverageFixture, delay: 0 });
 		await loadHiddenLinks(page).click();
-		await list.getByRole("link", { name: furtherLink.title, exact: true }).waitFor();
+		await sources.getByRole("link", { name: furtherLink.title, exact: true }).waitFor();
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1706,7 +1717,7 @@ test("a direct topic link opens its group in the current view", async () => {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/?topic=" + coverageTopic.id);
-		await page.locator("#app-list-topic-title").getByText("#" + coverageTopic.label).waitFor();
+		assert.equal(await page.locator("#app-list-topic").isVisible(), false);
 		await page.locator("#app-article-body .app-topic-article").getByRole("heading", { name: coverageTopic.label, exact: true }).waitFor();
 		await loadHiddenLinks(page).waitFor();
 		expectTopicRequests(app, [catalogURL, topicArticleURL(coverageTopic.id)]);
@@ -1727,9 +1738,9 @@ test("Reader follows the canonical continuation when loading hidden topic links"
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
+		const sources = await openPermissionsTopic(page);
 		await loadHiddenLinks(page).click();
-		await list.getByRole("link", { name: furtherLink.title, exact: true }).waitFor();
+		await sources.getByRole("link", { name: furtherLink.title, exact: true }).waitFor();
 		const requests = app.requests.filter(({ url }) => url.startsWith(coverageURL + "?")).map(({ url }) => {
 			const query = new URL(url).searchParams;
 			return [query.get("id"), query.get("offset")];
@@ -1754,15 +1765,15 @@ test("Reader refuses to append a repeating or changed coverage continuation", as
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
-		const list = await openPermissionsTopic(page);
-		const status = list.getByRole("status").getByText(/couldn’t load hidden links/i);
+		const sources = await openPermissionsTopic(page);
+		const status = sources.getByRole("status").getByText(/couldn’t load hidden links/i);
 		await loadHiddenLinks(page).click();
 		await status.waitFor();
-		assert.equal(await list.getByRole("link", { name: furtherLink.title, exact: true }).count(), 0);
+		assert.equal(await sources.getByRole("link", { name: furtherLink.title, exact: true }).count(), 0);
 		invalid.json = { ...second, generatedAt: new Date((now + 1) * 1000).toISOString() };
 		await loadHiddenLinks(page).click();
 		await status.waitFor();
-		assert.equal(await list.getByRole("link", { name: furtherLink.title, exact: true }).count(), 0);
+		assert.equal(await sources.getByRole("link", { name: furtherLink.title, exact: true }).count(), 0);
 		assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL + "?")).length, 4);
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -1782,13 +1793,13 @@ test("Reader stops requesting hidden links after leaving the topic", async () =>
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		const requested = (offset) => app.requests.some(({ url }) => coverageResponse(coverageTopic.id, {}, offset).match(url));
-		const list = await openPermissionsTopic(page);
+		const sources = await openPermissionsTopic(page);
 		await loadHiddenLinks(page).click();
 		assert(await waitFor(() => requested(1)));
-		await page.getByRole("button", { name: "Back to topics", exact: true }).click();
-		await topic(list, coverageTopic.label).waitFor();
+		await page.keyboard.press("Escape");
+		await topic(page.locator("#app-list-body"), coverageTopic.label).waitFor();
 		assert.equal(await waitFor(() => requested(2), 900), false);
-		assert.equal(await list.getByRole("link", { name: furtherLink.title, exact: true }).count(), 0);
+		assert.equal(await sources.getByRole("link", { name: furtherLink.title, exact: true }).count(), 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1830,7 +1841,7 @@ test("reviewed standalone links and separately curated topics survive local regr
 		assert.equal(await groups.locator(`img[src="${topicPhoto}"]`).count(), 1);
 		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		for (const [i, id] of ids.entries()) {
-			await list.locator(`[data-shared-topic="${id}"]`).click();
+			await openTopicLinkManagement(list.locator(`[data-shared-topic="${id}"]`));
 			await list.locator(".browse-title-link").getByText(stories[i * 2 + 1].title, { exact: true }).waitFor();
 			assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()),
 				new Set(stories.slice(i * 2 + 1, i * 2 + 3).map(({ title }) => title)));
@@ -1878,8 +1889,7 @@ test("right-clicking a link in a topic reports the link and the displayed assign
 		await page.goto("https://backchnnl.app/");
 		const list = page.locator("#app-list-body");
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
-		await topic(list, "Extension permissions").click();
-		await returnToTopicLinksOnPhone(page);
+		await openTopicLinkManagement(topic(list, "Extension permissions"));
 		const row = list.locator(".browse-row").filter({ hasText: guide.title });
 		await row.click({ button: "right" });
 		const menu = page.locator("#app-row-menu");
@@ -1987,7 +1997,7 @@ test("universal search opens multi-link topics and opens single links directly",
 			const link = list.locator(rowSelector).getByRole("link", { name: article.title, exact: true });
 			await link.waitFor();
 			if (scope === "Front Pages") {
-				await page.locator("#app-list-topic-title").getByText("#Extension permissions", { exact: true }).waitFor();
+				await topicHeading(page).getByText("Extension permissions", { exact: true }).waitFor();
 				await page.locator("#app-article-body .app-topic-article").waitFor();
 			} else {
 				await page.locator("#app-list-topic").waitFor({ state: "hidden" });
@@ -1999,7 +2009,7 @@ test("universal search opens multi-link topics and opens single links directly",
 			}
 			await reportLink.waitFor({ state: scope === "Collection" ? "detached" : "visible" });
 			const topics = page.getByRole("tab", { name: "By topic", exact: true });
-			if (scope === "Front Pages") assert.equal(await topics.getAttribute("aria-selected"), "true");
+			if (scope === "Front Pages") assert.equal(await topics.getAttribute("aria-selected"), "false");
 			else assert.equal(await topics.count(), 0);
 			assert.equal(await page.locator("#app-search-page").isVisible(), false);
 		}
@@ -2028,7 +2038,7 @@ test("universal search can find a local Collection topic with the public index u
 		assert.deepEqual(requestsContaining(app, privateHosts), []);
 		expectTopicRequests(app, [catalogURL]);
 		await result.click();
-		await page.locator("#app-list-topic-title").getByText("#Ceramic Glazes", { exact: true }).waitFor();
+		await topicHeading(page).getByText("Ceramic Glazes", { exact: true }).waitFor();
 		await page.locator("#app-article-body .app-topic-article").waitFor();
 		for (const { title } of bookmarks) {
 			await page.locator("#app-list-body").getByRole("link", { name: title, exact: true }).waitFor();
@@ -2121,14 +2131,14 @@ test("recovering the shared index keeps the current topic open and restores focu
 		const group = topic(list, published.label);
 		assert.match(await group.getAttribute("data-shared-topic"), /^reader-story:/);
 		await group.click();
-		await list.getByRole("link", { name: article.title, exact: true }).waitFor();
+		await topicSources(page).getByRole("link", { name: article.title, exact: true }).waitFor();
 		await page.evaluate(() => {
 			const now = Date.now;
 			Date.now = () => now() + 61_000;
 		});
 		await page.locator("#app-list-sync").evaluate((button) => button.onclick());
-		await list.getByRole("link", { name: article.title, exact: true }).waitFor();
-		await page.getByRole("button", { name: "Back to topics" }).click();
+		await topicSources(page).getByRole("link", { name: article.title, exact: true }).waitFor();
+		await page.keyboard.press("Escape");
 		assert.equal(await group.getAttribute("data-shared-topic"), published.id);
 		assert(await waitFor(() => group.evaluate((node) => node.getRootNode().activeElement === node)));
 		assert.deepEqual(app.errors, []);
@@ -2149,7 +2159,7 @@ test("mark all as read in a topic marks the current group", async () => {
 		const group = topic(list, "Extension permissions");
 		await group.waitFor();
 		assert.equal(await list.locator(".browse-title-link").count(), 0);
-		await group.click();
+		await openTopicLinkManagement(group);
 		await expectLinkTitles(list, [guide.title, report.title]);
 		await page.getByRole("button", { name: "Mark all as read" }).click();
 		assert(await waitFor(() => ["hn:9360", "lemmy:9361"].every((id) => Number(app.store.get("HNewhere:seen_comments")?.[id]) > 0)));
@@ -2178,7 +2188,7 @@ test("clearing read Queue entries in a topic keeps the other queued links", asyn
 		const list = page.locator("#app-list-body");
 		await list.getByRole("link", { name: guide.title }).waitFor();
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
-		await topic(list, "Extension permissions").click();
+		await openTopicLinkManagement(topic(list, "Extension permissions"));
 		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
 		await list.getByRole("button", { name: "clear read" }).click();
 		assert(await waitFor(() => app.store.get("HNewhere:queue")?.length === 1));
@@ -2199,7 +2209,7 @@ test("mark-read stays scoped while a topic list is still visible during navigati
 		const link = list.getByRole("link", { name: guide.title });
 		await link.waitFor();
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
-		await topic(list, "Extension permissions").click();
+		await openTopicLinkManagement(topic(list, "Extension permissions"));
 		await link.waitFor();
 		const stillShowingTopic = await page.getByRole("button", { name: "Back to topics" }).evaluate((button) => {
 			const shadow = button.getRootNode();
@@ -2293,8 +2303,8 @@ test("Collection finds subjects in unindexed bookmark titles and URL paths witho
 		assert.equal(await list.locator(".app-topic-row").count(), 1);
 		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		await archives.click();
-		await list.getByRole("link", { name: bookmarks[0].title }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set([
+		await topicSources(page).getByRole("link", { name: bookmarks[0].title }).waitFor();
+		assert.deepEqual(new Set(await topicSources(page).locator(".app-topic-source-title").allTextContents()), new Set([
 			bookmarks[0].title, bookmarks[1].title,
 		]));
 		expectTopicRequests(app, [catalogURL]);
@@ -2330,9 +2340,8 @@ test("Collection matches a saved headline to the exact public topic before alias
 		await privacy.getByText(/in 2 links$/).waitFor();
 		assert.equal(await privacy.count(), 1);
 		await privacy.click();
-		await page.locator("#app-article-body .app-topic-article").waitFor();
-		await list.getByRole("link", { name: additional.title }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set([imported.title, additional.title]));
+		await topicSources(page).getByRole("link", { name: additional.title }).waitFor();
+		assert.deepEqual(new Set(await topicSources(page).locator(".app-topic-source-title").allTextContents()), new Set([imported.title, additional.title]));
 		expectTopicRequests(app, [catalogURL, topicArticleURL("topic:privacy")]);
 		assert.deepEqual(requestsContaining(app, [new URL(additional.url).hostname, "utm_source=bookmark-export"]), []);
 		assert.deepEqual(app.errors, []);
@@ -2556,13 +2565,13 @@ test("All articles assigns overlapping published coverage to one visible card pe
 		for (const [i, group] of definitions.entries()) {
 			const card = list.locator(`[data-shared-topic="${group.id}"]`).filter({ hasText: group.label });
 			await card.click();
-			await expectLinkTitles(list, members[i]);
+			await expectSourceTitles(page, members[i]);
 			if (group === definitions[1]) {
 				await loadHiddenLinks(page).click();
-				await list.getByRole("link", { name: extra.title, exact: true }).waitFor();
-				assert.deepEqual(await list.locator("[data-topic-extra] .browse-title-link").allTextContents(), [extra.title]);
+				await topicSources(page).getByRole("link", { name: extra.title, exact: true }).waitFor();
+				await expectSourceTitles(page, [...members[i], extra.title]);
 			}
-			await page.getByRole("button", { name: "Back to topics" }).click();
+			await page.keyboard.press("Escape");
 		}
 		await page.getByRole("tab", { name: "By link", exact: true }).click();
 		await expectLinkTitles(list, titles);
@@ -2604,9 +2613,8 @@ test("Topics put separate developments under specific headlines with or without 
 				await card.getByText(count + " comments across 2 discussions in 2 links", { exact: true }).waitFor({ timeout: 5000 });
 				assert.equal(await list.locator(".app-topic-row").count(), 3);
 				await card.click();
-				await page.locator("#app-list-topic-title").getByText("#" + rows[lead].title, { exact: true }).waitFor();
-				assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([rows[lead].title, rows[other].title]));
-				await page.getByRole("button", { name: "Back to topics" }).click();
+				await topicHeading(page).getByText(rows[lead].title, { exact: true }).waitFor();
+				await expectSourceTitles(page, [rows[lead].title, rows[other].title]);
 			}
 			await list.locator(".app-topic-row").first().waitFor();
 			assert.equal(await list.getByText("#Iran", { exact: true }).count(), 0);
@@ -2835,8 +2843,8 @@ test("Collection names a shared development from the member headlines and exclud
 		assert.equal(await photo.getAttribute("src"), topicPhoto);
 		assert.match(await photo.getAttribute("title"), /BepiColombo.*Example author/);
 		await list.locator(".app-topic-row").click();
-		await list.getByRole("link", { name: links[0][0], exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 3).map(([title]) => title)));
+		await topicSources(list.page()).getByRole("link", { name: links[0][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await topicSources(list.page()).locator(".app-topic-source-title").allTextContents()), new Set(links.slice(0, 3).map(([title]) => title)));
 		const queries = app.requests.filter(({ url }) => new URL(url).hostname === "en.wikipedia.org")
 			.flatMap(({ url }) => (new URL(url).searchParams.get("titles") || new URL(url).searchParams.get("gsrsearch")).split("|"));
 		assert(queries.includes("BepiColombo"));
@@ -2942,8 +2950,8 @@ test("private bookmarks group the same accreditation change and keep other decis
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert(links.slice(0, 2).some(([title]) => "#" + title === headings[0]), headings[0]);
 		await list.locator(".app-topic-row").click();
-		await list.getByRole("link", { name: links[0][0], exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 2).map(([title]) => title)));
+		await topicSources(list.page()).getByRole("link", { name: links[0][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await topicSources(list.page()).locator(".app-topic-source-title").allTextContents()), new Set(links.slice(0, 2).map(([title]) => title)));
 	});
 });
 
@@ -2963,8 +2971,8 @@ test("a published status change and newly imported coverage open as one topic wi
 		const card = list.locator('[data-shared-topic="story:public-announcement"]');
 		await card.getByText(/in 4 links$/).waitFor();
 		await card.click();
-		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 4).map(([title]) => title)));
+		await topicSources(list.page()).getByRole("link", { name: links[3][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await topicSources(list.page()).locator(".app-topic-source-title").allTextContents()), new Set(links.slice(0, 4).map(([title]) => title)));
 	}, { stored: { [catalogKey]: { fetchedAt: Date.now(), data: { ...catalog, topics: [story], pages } } } });
 });
 
@@ -2984,8 +2992,8 @@ test("a status headline covers early reporting and keeps its explanatory follow-
 		assert.match(headings[0], /^#(?:The U\.S\. (?:has |just )?lost|US loses) (?:its )?measles elimination status$/);
 		await list.getByText(/in 5 links$/).waitFor();
 		await list.locator(".app-topic-row").click();
-		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 5).map(([title]) => title)));
+		await topicSources(list.page()).getByRole("link", { name: links[3][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await topicSources(list.page()).locator(".app-topic-source-title").allTextContents()), new Set(links.slice(0, 5).map(([title]) => title)));
 	});
 });
 
@@ -3001,9 +3009,9 @@ test("Collection uses meaningful saved discussions and disregards access-page de
 		const headings = await list.locator(".app-topic-name").allTextContents();
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert.match(headings[0], /^#Selene.*Ceres/);
-		const rows = list.locator(".browse-title-link");
+		const rows = topicSources(list.page()).locator(".app-topic-source-title");
 		await list.locator(".app-topic-row").click();
-		await list.getByRole("link", { name: discussions[0].title, exact: true }).waitFor();
+		await topicSources(list.page()).getByRole("link", { name: discussions[0].title, exact: true }).waitFor();
 		assert.deepEqual(new Set(await rows.allTextContents()), new Set(discussions.map(({ title }) => title)));
 	}, { byLink: [...discussions.map(({ title, url }) => [title, url]), ...links.slice(2)], stored: {
 		"HNewhere:favorites": [...discussions, { ...discussions[0], key: "hn:9902", id: 9902, title: "An apparent coincidence" }],
@@ -3063,12 +3071,22 @@ async function expectFeedEvent(list, page, reports, selector = '[data-shared-top
 	const label = (await cards.locator(".app-topic-name").textContent()).slice(1);
 	assert(reports.some(([title]) => title === label), label);
 	await cards.click();
-	await page.locator("#app-list-topic-title").waitFor();
-	assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(reports.map(([title]) => title)));
+	await expectSourceTitles(page, reports.map(([title]) => title));
 }
 
 test("unindexed reports about a failed summit share a member headline and exclude preliminary negotiations", async () => {
 	await withEventFeed([...summitControls, ...summitReports], (list, page) => expectFeedEvent(list, page, summitReports));
+});
+
+test("Reader reunites local perspectives and split published IDs for one reinstatement", async () => {
+	const reports = reinstatement.map((title, i) => [title, "https://source" + i + ".example/report"]);
+	const controls = otherDevelopments.map((title, i) => [title, "https://separate" + i + ".example/other"]);
+	const topics = [0, 4].map((i) => ({ id: "story:published-" + i, kind: "story", label: reinstatement[i] }));
+	const pages = [0, 3, 4, 5].map((i) => ({ key: "source" + i + ".example/report", topicIds: [topics[i < 4 ? 0 : 1].id] }));
+	for (const index of [undefined, { ...catalog, topics, pages }]) {
+		await withEventFeed([...reports, ...controls], (list, page) =>
+			expectFeedEvent(list, page, reports, index ? '[data-shared-topic="story:published-0"]' : '[data-shared-topic^="reader-story:"]'), index);
+	}
 });
 
 test("new reports join the published summit outcome while a reviewed link stays separate", async () => {
@@ -3166,7 +3184,7 @@ test("a status headline omits a publisher’s follow-up question and keeps the o
 		assert.equal(await card.count(), 1);
 		assert.doesNotMatch(await card.locator(".app-topic-name").textContent(), /\?/);
 		await card.click();
-		await list.getByRole("link", { name: reports[1][0], exact: true }).waitFor();
+		await topicSources(list.page()).getByRole("link", { name: reports[1][0], exact: true }).waitFor();
 	});
 });
 
@@ -3181,7 +3199,7 @@ test("an intact member headline leads coverage when a second feed cuts off a quo
 		assert.equal(await card.count(), 1);
 		assert.equal(await card.locator(".app-topic-name").textContent(), "#" + reports[1][0].split(" | ")[0]);
 		await card.click();
-		await list.getByRole("link", { name: reports[0][0], exact: true }).waitFor();
+		await topicSources(list.page()).getByRole("link", { name: reports[0][0], exact: true }).waitFor();
 	});
 });
 
@@ -3225,10 +3243,10 @@ test("opening a topic clears its unread dot across Reader views and reloads whil
 		await page.keyboard.press("Escape");
 		await expectTopicStatus(group, "Unread");
 		await group.press("Enter");
-		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
-		assert.equal(await list.locator(".browse-row.is-unread").count(), 2);
+		await expectSourceTitles(page, [guide.title, report.title]);
+		assert.equal(await group.getAttribute("aria-current"), "true");
 		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
-		await page.getByRole("button", { name: "Back to topics" }).click();
+		await page.keyboard.press("Escape");
 		await expectTopicStatus(group, "Read");
 		const checkView = async (view, heading) => {
 			const previous = await group.elementHandle();
@@ -3273,27 +3291,37 @@ function launchTwoVisitTopics({ stored, ...options } = {}) {
 }
 
 test("direct and search visits mark their own topics independently of earlier article reads", async () => {
-	const app = await launchTwoVisitTopics({ colorScheme: "dark", stored: { "HNewhere:seen_comments": { "hn:9362": now - 60, "hn:9363": now - 60 } } });
+	let releaseVisit;
+	const slowSets = { prefix: "HNewhere:topic_visits", wait: new Promise((resolve) => { releaseVisit = resolve; }), armed: false };
+	const app = await launchTwoVisitTopics({ slowSets, colorScheme: "dark", stored: { "HNewhere:seen_comments": { "hn:9362": now - 60, "hn:9363": now - 60 } } });
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		const list = page.locator("#app-list-body");
 		await page.goto("https://backchnnl.app/?topic=topic:permissions");
-		await page.locator("#app-list-topic-title").getByText("#Extension permissions").waitFor();
-		await page.getByRole("button", { name: "Back to topics" }).click();
+		await topicHeading(page).getByText("Extension permissions").waitFor();
+		await page.getByRole("tab", { name: "By topic" }).click();
 		await expectTopicStatus(topic(list, "Extension permissions"), "Read");
 		await rail(page, "all").click();
 		const other = topic(list, observatory.label);
 		await expectTopicStatus(other, "Unread");
 		await page.locator("#app-rail-search").click();
 		await page.locator("#app-search-input").fill("observatory mirror");
+		slowSets.armed = true;
 		await page.getByRole("button", { name: "#Observatory mirror repairs Front Pages · 2 links", exact: true }).click();
-		await page.locator("#app-list-topic-title").getByText("#" + observatory.label).waitFor();
-		await page.getByRole("button", { name: "Back to topics" }).click();
+		await topicHeading(page).getByText(observatory.label).waitFor();
+		assert(await waitFor(() => !slowSets.armed));
+		await page.keyboard.press("Escape");
+		await rail(page, "unread").click();
+		await topic(list, "Extension permissions").waitFor();
+		await rail(page, "all").click();
 		await expectTopicStatus(other, "Read");
+		releaseVisit();
+		assert(await waitFor(() => app.store.get("HNewhere:topic_visits")?.[observatory.id]));
 		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
 		assert.deepEqual(app.errors, []);
 	} finally {
+		releaseVisit();
 		await app.browser.close();
 	}
 });
@@ -3320,8 +3348,8 @@ test("a visited local story keeps its read state when the same coverage is publi
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		assert.match(await group.getAttribute("data-shared-topic"), /^reader-story:/);
 		await group.click();
-		await list.getByRole("link", { name: first.title, exact: true }).waitFor();
-		await page.getByRole("button", { name: "Back to topics" }).click();
+		await topicSources(page).getByRole("link", { name: first.title, exact: true }).waitFor();
+		await page.keyboard.press("Escape");
 		await expectTopicStatus(group, "Read");
 		online = true;
 		await page.reload();
@@ -3366,9 +3394,10 @@ test("overlapping topic visits from two Reader tabs preserve both read indicator
 		await topic(firstList, "Extension permissions").click();
 		assert(await waitFor(() => !slowSets.armed));
 		await topic(secondList, observatory.label).click();
-		await firstList.getByRole("link", { name: guide.title, exact: true }).waitFor();
-		await secondList.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
-		await first.getByRole("button", { name: "Back to topics", exact: true }).click();
+		await topicSources(first).getByRole("link", { name: guide.title, exact: true }).waitFor();
+		await topicSources(second).getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+		assert(await waitFor(() => app.store.get("HNewhere:topic_visits")?.[observatory.id]));
+		await first.keyboard.press("Escape");
 		await first.waitForURL((url) => !url.searchParams.has("topic"));
 		await first.reload();
 		await expectTopicStatus(topic(firstList, "Extension permissions"), "Read");

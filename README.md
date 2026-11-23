@@ -60,18 +60,21 @@ related account metadata.
 
 In Reader, **By link** lists individual links. **By topic** groups links about
 the same development under a headline drawn from their coverage. Each topic
-shows how many comments, discussions, and links it includes. Open a topic to
-read its brief, followed by a timeline when the reporting dates a development.
+shows how many comments, discussions, and links it includes. Opening a topic
+keeps your place in the list. Its article brings together the reported
+development, attributed photos, and a timeline when the reporting gives dates.
 Comments from the topic’s discussions appear beside the story on wide screens
-and inline on phones. Each comment links back to its source. Select **Read thread**
-to see the conversation in place.
+and inline on phones. Use **Sort** to change the order or prioritize unread
+comments, and **Sources** to choose or refresh discussions. Each comment links
+back to its source. Select **Read thread** to see the conversation in place.
 Source links are collected at the end. Select a number beside a passage to
 inspect the supporting text or open the publisher’s page in a new tab.
 Opening a topic marks the topic as read. Each link keeps its own read status.
 
 For a published topic, Reader requests the brief by public topic ID. The Topics
-Worker uses available publisher evidence to write a cited brief and caches it
-across readers. When there's too little reporting for a brief, the original
+Worker uses discussion activity to choose which originals to read, draws on
+distinct publishers for details, and caches the cited brief across readers.
+When there's too little reporting for a brief, the original
 sources and their discussions are still available. You can share a published
 topic by copying the Reader address. Reader also groups
 links using titles, URL paths, and saved page metadata on your device. Articles

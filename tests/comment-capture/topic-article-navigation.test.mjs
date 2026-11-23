@@ -27,7 +27,6 @@ const articleURL = (topic) => api + "/article?id=" + encodeURIComponent(topic.id
 const card = (page, index) => page.locator('[data-shared-topic="' + topics[index].id + '"]');
 const articlePane = (page) => page.locator("#app-article-body .app-topic-article");
 const traffic = (app) => app.requests.filter(({ url }) => url.startsWith(api + "/article"));
-const button = (page, name) => page.getByRole("button", { name, exact: true });
 const member = (page, i) => page.locator("#app-list-body").getByRole("link", { name: reports[i].title, exact: true });
 
 function responseFor(i, more = []) {
@@ -43,10 +42,14 @@ function responseFor(i, more = []) {
 	};
 }
 
-async function openReader({ phone, hidden, more = [], responses = [], local = reports, redirects, sourceEnabled = true, seen = {} } = {}) {
+async function openReader({ phone, hidden, more = [], responses = [], local = reports, catalogTopics = topics, byTopic = true,
+	redirects, sourceEnabled = true, seen = {} } = {}) {
 	const pages = reports.map(({ url, topic }) => ({ key: url.slice(8), topicIds: [topics[topic].id] }));
+	for (const story of local.filter(({ topic }) => topic >= topics.length)) {
+		pages.push({ key: story.url.slice(8), topicIds: [catalogTopics[story.topic].id] });
+	}
 	for (const { url } of more) pages.push({ key: url.slice(8), topicIds: [topics[0].id] });
-	const fixture = { version: 1, generatedAt: new Date().toISOString(), topics, pages, redirects };
+	const fixture = { version: 1, generatedAt: new Date().toISOString(), topics: catalogTopics, pages, redirects };
 	const app = await launchApp({
 		...(phone && { viewport: { width: 320, height: 720 }, hasTouch: true }),
 		settings: {
@@ -54,7 +57,7 @@ async function openReader({ phone, hidden, more = [], responses = [], local = re
 			frontPageMode: "topics", frontPageTopics: ["technology"],
 		},
 		values: {
-			"HNewhere:app_browse_topics": true,
+			"HNewhere:app_browse_topics": byTopic,
 			"HNewhere:seen_comments": seen,
 			"HNewhere:app_panes": { list: true, discussion: true },
 			"HNewhere:frontpage_feed:technology/hn/front/": {
@@ -71,33 +74,35 @@ async function openReader({ phone, hidden, more = [], responses = [], local = re
 	return app;
 }
 
-test("opening a topic shows its cited brief and leaves the source links unread", async (t) => {
+test("opening a topic keeps the Reader list in place and only marks that topic read", async (t) => {
 	const app = await openReader();
 	t.after(() => app.browser.close());
 	const { page } = app;
 	await page.goto(base);
 	await card(page, 0).waitFor();
+	const sibling = await card(page, 1).elementHandle();
 	assert.equal(traffic(app).length, 0);
 	await card(page, 0).click();
 	const article = articlePane(page);
 	await article.getByText(summaries[0], { exact: false }).first().waitFor();
 	await article.getByRole("heading", { name: topics[0].label, exact: true }).waitFor();
 	assert.equal(new URL(page.url()).searchParams.get("topic"), topics[0].id);
-	assert.equal(await page.locator("#app-list-body .app-row.is-unread").count(), 2);
+	assert(await sibling.evaluate((node) => node.isConnected));
+	assert.equal(await card(page, 0).getAttribute("aria-current"), "true");
+	assert.equal(await card(page, 0).getAttribute("aria-description"), "Read");
+	assert.equal(await card(page, 1).getAttribute("aria-description"), "Unread");
+	assert.equal(await member(page, 0).count(), 0);
+	assert.deepEqual(app.store.get("HNewhere:seen_comments"), {});
+	assert.equal(await article.getByRole("link", { name: reports[0].title, exact: true }).getAttribute("href"), reports[0].url);
 	assert.deepEqual(traffic(app).map(({ url, method, anonymous, data }) => [url, method, anonymous, data]),
 		[[articleURL(topics[0]), "GET", true, undefined]]);
 	assert.equal(await page.locator("#app-article-actions").isVisible(), false);
 	assert.equal(await page.locator("#next-up").isVisible(), false);
 	assert(await page.locator("#app-view-toggle").isVisible());
-	await member(page, 0).click();
+	await page.keyboard.press("Escape");
 	await article.waitFor({ state: "detached" });
-	assert.equal(await page.locator("#app-article-open").getAttribute("href"), reports[0].url);
 	assert.equal(new URL(page.url()).searchParams.has("topic"), false);
-	await button(page, "Read topic article").click();
-	await article.getByText(summaries[0], { exact: false }).first().waitFor();
-	await button(page, "Back to topics").click();
-	await card(page, 1).waitFor();
-	assert.equal(await article.count(), 0);
+	assert(await card(page, 0).evaluate((node) => node.getRootNode().activeElement === node));
 	assert.deepEqual(app.errors, []);
 });
 
@@ -113,9 +118,11 @@ test("a late topic brief cannot replace the next topic or a member article", asy
 	await page.goto(base);
 	await card(page, 0).click();
 	assert(await waitFor(() => traffic(app).length === 1));
-	await button(page, "Back to topics").click();
 	await card(page, 1).click();
 	await articlePane(page).getByText(summaries[1], { exact: false }).first().waitFor();
+	assert.equal(await card(page, 0).getAttribute("aria-current"), null);
+	assert.equal(await card(page, 1).getAttribute("aria-current"), "true");
+	await page.getByRole("tab", { name: "By link" }).click();
 	await member(page, 2).click();
 	await completed;
 	assert(await waitFor(async () => (await page.locator("#app-article-open").getAttribute("href")) === reports[2].url));
@@ -123,7 +130,7 @@ test("a late topic brief cannot replace the next topic or a member article", asy
 	assert.deepEqual(app.errors, []);
 });
 
-test("a direct topic link opens the phone reading stage with a route back to member links", async (t) => {
+test("a direct topic link opens the phone reading stage and returns to the focused topic card", async (t) => {
 	const app = await openReader({ phone: true });
 	t.after(() => app.browser.close());
 	const { page } = app;
@@ -133,8 +140,11 @@ test("a direct topic link opens the phone reading stage with a route back to mem
 	assert(await page.locator("#app-bar-view").isVisible());
 	assert.equal(await page.locator("#app-bar-open").isVisible(), false);
 	await page.locator("#app-bar-back").tap();
-	await member(page, 0).waitFor();
-	await button(page, "Read topic article").tap();
+	await page.locator('#app[data-stage="list"]:not([data-moving])').waitFor();
+	assert.equal(await member(page, 0).count(), 0);
+	assert.equal(new URL(page.url()).searchParams.has("topic"), false);
+	assert(await waitFor(() => card(page, 0).evaluate((node) => node.getRootNode().activeElement === node)));
+	await card(page, 1).tap();
 	await page.locator('#app[data-stage="article"]').waitFor();
 	assert.deepEqual(app.errors, []);
 });
@@ -159,6 +169,21 @@ test("a shared former topic address opens its current brief without any local me
 	assert.deepEqual(app.errors, []);
 });
 
+test("a shared topic keeps By link selected and returns desktop keyboard focus to that list", async (t) => {
+	const app = await openReader({ byTopic: false });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	await page.goto(base + "?topic=" + encodeURIComponent(topics[0].id));
+	await articlePane(page).getByRole("heading", { name: topics[0].label, exact: true }).waitFor();
+	const tab = page.getByRole("tab", { name: "By link", selected: true });
+	await tab.waitFor();
+	await member(page, 2).waitFor();
+	await page.keyboard.press("Escape");
+	await articlePane(page).waitFor({ state: "detached" });
+	assert(await tab.evaluate((node) => node.getRootNode().activeElement === node));
+	assert.deepEqual(app.errors, []);
+});
+
 test("a published article still opens from its URL when all of its local members have been read", async (t) => {
 	const members = reports.filter(({ topic }) => topic === 0);
 	const seen = Object.fromEntries(members.map((member) => ["hn:" + member.id, now]));
@@ -171,6 +196,56 @@ test("a published article still opens from its URL when all of its local members
 	assert.deepEqual(app.store.get("HNewhere:seen_comments"), seen);
 	assert.deepEqual(app.errors, []);
 });
+
+test("a direct link can reveal previously read local sources while its public brief is unavailable", async (t) => {
+	const seen = Object.fromEntries(reports.slice(0, 2).map((member) => ["hn:" + member.id, now]));
+	const app = await openReader({ seen, responses: [{ match: (url) => url === articleURL(topics[0]), status: 503 }] });
+	t.after(() => app.browser.close());
+	await app.page.goto(base + "?topic=" + encodeURIComponent(topics[0].id));
+	const sources = articlePane(app.page).locator(".app-topic-sources");
+	await sources.getByRole("button", { name: "Load hidden links about this topic" }).click();
+	await sources.getByRole("link", { name: reports[0].title, exact: true }).waitFor();
+	assert.equal(app.requests.some(({ url }) => url.startsWith(api + "/coverage")), false);
+	assert.deepEqual(app.store.get("HNewhere:seen_comments"), seen);
+	assert.deepEqual(app.errors, []);
+});
+
+for (const phone of [false, true]) {
+	test(`a topic preserves its filtered ${phone ? "phone" : "desktop"} list and scroll position`, async (t) => {
+		const moreTopics = Array.from({ length: 18 }, (_, i) => ({
+			id: "story:project-" + i, label: "Project " + i + " wins a local grant", curated: true, kind: "story",
+		}));
+		const moreStories = moreTopics.flatMap((topic, i) => [0, 1].map((j) => ({
+			...reports[j], topic: i + topics.length, id: 93000 + i * 2 + j, time: now - 10 - i * 2 - j,
+			url: "https://publisher" + j + ".example/project-" + i, title: topic.label + " in district " + j,
+		})));
+		const app = await openReader({ phone, local: [...reports, ...moreStories], catalogTopics: [...topics, ...moreTopics] });
+		t.after(() => app.browser.close());
+		const { page } = app;
+		await page.goto(base);
+		const filter = page.locator((phone ? "#app-list-tags" : "#app-rail") + ' [data-app-view="topic:technology"]');
+		await filter.click();
+		const target = page.locator('[data-shared-topic="' + moreTopics[12].id + '"]');
+		await target.scrollIntoViewIfNeeded();
+		const offset = () => target.evaluate((node, phone) => phone ? window.scrollY : node.parentElement.scrollTop, phone);
+		const before = await offset();
+		assert(before > 0);
+		await target.press("Enter");
+		await articlePane(page).getByRole("heading", { name: moreTopics[12].label, exact: true }).waitFor();
+		if (phone) {
+			await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
+			await page.locator("#app-bar-back").tap();
+			await page.locator('#app[data-stage="list"]:not([data-moving])').waitFor();
+		} else {
+			assert.equal(await offset(), before);
+			await page.keyboard.press("Escape");
+		}
+		assert.equal(await filter.getAttribute("aria-pressed"), "true");
+		assert.equal(await offset(), before);
+		assert(await target.evaluate((node) => node.getRootNode().activeElement === node));
+		assert.deepEqual(app.errors, []);
+	});
+}
 
 test("hidden sources are excluded from the brief, timeline and list of sources", async (t) => {
 	const dto = responseFor(0, [extra]);

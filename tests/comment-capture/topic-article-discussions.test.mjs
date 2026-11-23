@@ -110,7 +110,7 @@ for (const phone of [false, true]) {
 		assert(await anchor.evaluate((node) => node.getRootNode().activeElement === node));
 		if (phone) {
 			await page.locator("#app-bar-back").tap();
-			await page.locator('#app[data-stage="list"] #app-list-topic-title').waitFor();
+			await page.locator('#app[data-stage="list"] [data-shared-topic="' + topic.id + '"]').waitFor();
 		}
 		assert.deepEqual(errors, []);
 	});
@@ -175,6 +175,10 @@ test("an unavailable and an empty conversation give way to replies from another 
 			{ comment: { id: 2, path: "0.2", content: reply }, creator: { name: "pilot" } }] } },
 	] });
 	await feedList(aside).getByText(reply, { exact: true }).waitFor();
+	await aside.getByRole("button", { name: "Discussion sources" }).click();
+	const sourceChoice = aside.getByRole("checkbox", { name: thread.title, exact: true }).locator("xpath=ancestor::div[contains(@class, 'source-menu-entry')][1]");
+	assert.equal(await sourceChoice.getByRole("link").textContent(), "1 comment");
+	await sourceChoice.getByRole("checkbox").press("Escape");
 	assert.equal(await aside.getByText("Comments couldn’t be loaded.", { exact: true }).count(), 0);
 	assert(requests.filter(({ url }) => url.includes("/api/v3/comment/list?post_id=112233")).every(({ anonymous }) => anonymous));
 	const first = await sourceThread(page, threadURL(stories[0].id));
@@ -403,6 +407,7 @@ test("a comment request finishing after opening a source article leaves that art
 	const { page, aside } = await openTopic(t, { holdURL: hnItem(stories[1].id) });
 	await feedList(aside).getByText(/Comment 1 on Inspectors/).waitFor();
 	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
+	await page.getByRole("tab", { name: "By link", exact: true }).click();
 	await page.locator("#app-list-body").getByRole("link", { name: stories[0].title, exact: true }).click();
 	assert(await waitFor(async () => (await page.locator("#app-article-open").getAttribute("href")) === stories[0].url));
 	await page.evaluate(() => window.__releaseTopicResponse());
@@ -456,4 +461,216 @@ test("Back from a differently ordered full Reddit thread restores the original a
 	await list.waitFor();
 	assert.deepEqual(await list.getByRole("link").evaluateAll((links) => links.map((link) => link.href)), keys);
 	assert(await original.evaluate((node) => node.getRootNode().activeElement === node));
+});
+
+const asideSort = (aside) => aside.getByRole("button", { name: /^Sort (Best|Oldest|Newest)$/ });
+const asideSources = (aside) => aside.getByRole("button", { name: /discussion sources/i });
+
+test("topic sorting uses comment dates and the saved per-discussion unread timestamps", async (t) => {
+	const ids = [981011, 981012, 981021, 981022];
+	const dates = [now - 100, now - 500, now - 300, now - 200];
+	const names = ["Bridge survey", "Earlier inspection", "Port reopening", "Updated clearance"];
+	const { aside, page, store } = await openTopic(t, { phone: true, values: {
+		"HNewhere:seen_comments": { "hn:9741": now - 350, "hn:9742": now - 250 },
+	}, responses: [
+		...stories.map((story, i) => ({ match: (url) => url === hnItem(story.id), json: { id: story.id, kids: ids.slice(i * 2, i * 2 + 2) } })),
+		...ids.map((id, i) => ({ match: (url) => url === hnItem(id), json: { id, type: "comment", by: "surveyor", time: dates[i], text: names[i] } })),
+	] });
+	const list = feedList(aside);
+	const bodies = () => list.locator(".app-topic-comment-body").allTextContents();
+	await list.getByText("Updated clearance").waitFor();
+	const sort = asideSort(aside);
+	assert(await sort.count(), "the Topic Article exposes its own Discussion sort");
+	await sort.press("ArrowDown");
+	await aside.getByRole("menuitemradio", { name: "Oldest" }).click();
+	assert(await waitFor(async () => (await bodies()).join() === ["Earlier inspection", "Port reopening", "Updated clearance", "Bridge survey"].join()));
+	await sort.press("Enter");
+	await page.keyboard.press("End");
+	const unread = aside.getByRole("menuitemcheckbox", { name: "Prioritize unread comments" });
+	assert(await unread.evaluate((button) => button.matches(":focus")));
+	await unread.press("Space");
+	assert(await waitFor(async () => (await bodies()).join() === ["Updated clearance", "Bridge survey", "Earlier inspection", "Port reopening"].join()));
+	await sort.click();
+	await aside.getByRole("menuitemradio", { name: "Newest" }).click();
+	assert(await waitFor(async () => (await bodies()).join() === ["Bridge survey", "Updated clearance", "Port reopening", "Earlier inspection"].join()));
+	assert.equal(store.get("HNewhere:settings").commentSort, "newest");
+	assert.equal(store.get("HNewhere:settings").newCommentsFirst, true);
+	await page.reload();
+	await feedList(aside).getByText("Updated clearance").waitFor();
+	await sort.click();
+	assert.equal(await unread.getAttribute("aria-checked"), "true");
+	assert.equal(await aside.getByRole("menuitemradio", { name: "Newest" }).getAttribute("aria-checked"), "true");
+	await page.keyboard.press("Escape");
+	assert(await sort.evaluate((button) => button.matches(":focus")));
+	assert.deepEqual(store.get("HNewhere:seen_comments"), { "hn:9741": now - 350, "hn:9742": now - 250 });
+});
+
+test("topic Sources filters all, platforms and individual threads and syncs the chosen discussions", async (t) => {
+	let revised = false;
+	const update = 981032;
+	const published = "An updated sounding from the selected discussion.";
+	const { aside, page, requests, errors } = await openTopic(t, { phone: true, responses: [
+		{ match: (url) => revised && url === hnItem(stories[1].id), json: { id: stories[1].id, kids: [update] } },
+		{ match: (url) => url === hnItem(update), json: { type: "comment", id: update, by: "pilot", time: now, text: published } },
+	] });
+	const list = feedList(aside);
+	await list.getByText(/Comment 1 on Operators/).waitFor();
+	const sources = asideSources(aside);
+	assert(await sources.count(), "the Topic Article exposes its own discussion source picker");
+	await sources.press("Enter");
+	const group = aside.getByRole("group", { name: "Filter discussions by source" });
+	const all = group.getByRole("checkbox", { name: "All sources", exact: true });
+	const platform = group.getByRole("checkbox", { name: "Hacker News", exact: true });
+	await platform.uncheck();
+	await aside.getByText("No discussions selected.").waitFor();
+	assert.equal(await all.isChecked(), false);
+	await group.getByRole("checkbox", { name: stories[1].title, exact: true }).check();
+	assert(await platform.evaluate((box) => box.indeterminate));
+	assert(await all.evaluate((box) => box.indeterminate));
+	await list.getByText(/Comment 1 on Operators/).waitFor();
+	assert.equal(await list.getByText(/Comment 1 on Inspectors/).count(), 0);
+	const before = requests.filter(({ url }) => url === hnItem(stories[0].id)).length;
+	revised = true;
+	await group.getByRole("button", { name: "Sync" }).click();
+	await list.getByText(published).waitFor();
+	assert.equal(requests.filter(({ url }) => url === hnItem(stories[0].id)).length, before);
+	if (await group.isVisible()) await group.getByRole("checkbox", { name: "All sources" }).press("Escape");
+	assert(await sources.evaluate((button) => button.matches(":focus")));
+	await sources.click();
+	await all.check();
+	await group.getByRole("checkbox", { name: "All sources" }).press("Escape");
+	await list.getByText(/Comment 1 on Inspectors/).waitFor();
+	assert(await list.getByText(published).isVisible());
+	assert.equal(await aside.evaluate((element) => element.scrollWidth > element.clientWidth + 1), false);
+	assert.deepEqual(errors, []);
+});
+
+test("thread controls target the chosen comment, preserve drafts, and save under its source article", async (t) => {
+	const { aside, store, page, errors } = await openTopic(t);
+	const root = feedList(aside).getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
+	await root.getByRole("button", { name: /Read thread/ }).click();
+	const detail = threadDetail(aside);
+	const row = detail.getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
+	await row.waitFor();
+	const reply = row.getByRole("button", { name: "Reply", exact: true });
+	assert(await reply.count(), "thread actions are available for the selected source comment");
+	assert(await row.evaluate((li) => li.matches(":focus")));
+	await reply.click();
+	const field = row.getByRole("textbox");
+	await field.fill("Comment draft for the second port report");
+	await detail.getByRole("button", { name: "Back to discussions" }).click();
+	assert(await root.getByRole("button", { name: /Read thread/ }).evaluate((button) => button.matches(":focus")));
+	await root.getByRole("button", { name: /Read thread/ }).click();
+	await reply.click();
+	await field.waitFor();
+	assert(await waitFor(async () => (await field.inputValue()) === "Comment draft for the second port report"));
+	await reply.click();
+	await row.getByRole("button", { name: /^save$/i }).click();
+	assert(await waitFor(() => store.get("HNewhere:favorites")?.some((item) => item.focus === "hn:974201" && item.parent === "9742" && item.url === stories[1].url && item.page === "journal.example/findings")));
+	await row.getByRole("button", { name: "Collapse comment" }).click();
+	assert.equal(await row.locator(".app-topic-comment-body").isVisible(), false);
+	assert(await waitFor(() => store.get("HNewhere:collapsed_comments")?.includes("hn:974201")));
+	await row.getByRole("button", { name: "Expand comment" }).press("Enter");
+	await row.getByRole("button", { name: "Focus", exact: true }).click();
+	assert.equal(await detail.getByRole("listitem").count(), 1);
+	await detail.getByRole("button", { name: "Show full thread" }).click();
+	assert(await detail.getByRole("listitem").count() > 1);
+	await detail.getByRole("textbox", { name: /Add a comment/ }).fill("Local note on the harbor findings");
+	await detail.getByRole("button", { name: "Keep a note" }).click();
+	assert(await waitFor(() => store.get("HNewhere:notes:url:journal.example/findings")?.notes?.some((note) => note.text === "Local note on the harbor findings")));
+	assert.equal(page.url(), address);
+	assert.deepEqual(errors, []);
+});
+
+test("the thread vote and reply controls address the selected Hacker News item", async (t) => {
+	const comment = 974201;
+	const { aside, page, context, store } = await openTopic(t, { responses: [{ match: (url) => url === threadURL(stories[1].id),
+		text: '<a id="up_974201" href="vote?id=974201&amp;how=up">up</a>' }] });
+	await context.route("https://news.ycombinator.com/**", (route) => route.fulfill({ contentType: "text/html", body: "<p>Fixture discussion</p>" }));
+	const origin = feedList(aside).getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
+	await origin.getByRole("button", { name: /Read thread/ }).click();
+	const row = threadDetail(aside).getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
+	await row.waitFor();
+	const reply = row.getByRole("button", { name: "Reply", exact: true });
+	assert(await reply.count(), "reply is available on this source");
+	await reply.click();
+	const composer = row.locator(".comment-composer");
+	await composer.getByRole("textbox").fill("A reply for this harbor survey");
+	const popup = context.waitForEvent("page");
+	await composer.getByRole("button", { name: "Post reply", exact: true }).click();
+	const helper = await popup;
+	await helper.waitForURL((url) => url.hostname === "news.ycombinator.com" && url.pathname === "/reply" && url.searchParams.get("id") === String(comment));
+	assert([...store.values()].some((value) => value?.storyID === "9742" && value.parentId === String(comment) && value.text === "A reply for this harbor survey"));
+	await helper.close();
+	await page.bringToFront();
+	const votePopup = context.waitForEvent("page");
+	await row.getByRole("button", { name: "Upvote on Hacker News" }).click();
+	const voter = await votePopup;
+	await voter.waitForURL((url) => url.hostname === "news.ycombinator.com" && url.searchParams.get("id") === String(comment));
+	assert([...store.values()].some((value) => value?.kind === "vote" && value.storyID === "9742" && value.item === String(comment)));
+	await voter.close();
+});
+
+test("the topic composer can start a comment in a chosen empty discussion", async (t) => {
+	const { aside, context, store } = await openTopic(t, { responses: [
+		{ match: (url) => url === hnItem(stories[0].id), json: { id: stories[0].id, kids: [] } },
+	] });
+	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
+	const start = aside.getByRole("button", { name: "Add a comment", exact: true });
+	assert(await start.count(), "the mixed feed exposes the discussion composer");
+	await start.press("Enter");
+	const chooser = aside.getByRole("group", { name: "Choose a discussion" });
+	await chooser.getByRole("button", { name: new RegExp(stories[0].title) }).click();
+	const detail = threadDetail(aside);
+	await detail.getByText("No comments yet.", { exact: true }).waitFor();
+	const draft = detail.getByRole("textbox", { name: /Add a comment/ });
+	assert(await draft.evaluate((field) => field.matches(":focus")));
+	await draft.fill("Question for the original inspection report");
+	await context.route("https://news.ycombinator.com/**", (route) => route.fulfill({ contentType: "text/html", body: "<p>Fixture discussion</p>" }));
+	const waiting = context.waitForEvent("page");
+	await detail.getByRole("button", { name: "Add a comment", exact: true }).click();
+	const helper = await waiting;
+	await helper.waitForURL((url) => url.origin === "https://news.ycombinator.com" && url.pathname === "/item" && url.searchParams.get("id") === "9741");
+	assert([...store.values()].some((value) => value?.storyID === "9741" && value.parentId === null && value.text === "Question for the original inspection report"));
+	await helper.close();
+});
+
+test("a long inline topic thread can load the next replies", async (t) => {
+	const { aside } = await openTopic(t);
+	await feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Inspectors/ }).getByRole("button", { name: /Read thread/ }).click();
+	const detail = threadDetail(aside);
+	await detail.getByText(/Comment 16 on Inspectors/).waitFor();
+	const more = detail.getByRole("button", { name: "Show more replies", exact: true });
+	assert(await more.count(), "the inline thread exposes unread portions of a long conversation");
+	await more.click();
+	await detail.getByText(/Comment 17 on Inspectors/).waitFor();
+	await detail.getByText(/Comment 1 on Inspectors/).waitFor();
+});
+
+test("an inline topic thread offers the submission's own vote and Save controls and links its authors", async (t) => {
+	const { aside, store } = await openTopic(t, { responses: [{ match: (url) => url === threadURL(9742),
+		text: '<a id="up_9742" href="vote?id=9742&amp;how=up">up</a>' }] });
+	await feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Operators/ }).getByRole("button", { name: /Read thread/ }).click();
+	const detail = threadDetail(aside);
+	await detail.getByText(/Comment 1 on Operators/).waitFor();
+	const actions = detail.getByRole("group", { name: "Discussion actions" });
+	assert(await actions.count(), "the discussion has its own source actions");
+	await actions.getByRole("button", { name: "Upvote on Hacker News" }).waitFor();
+	await actions.getByRole("button", { name: /^save$/i }).click();
+	assert(await waitFor(() => store.get("HNewhere:favorites")?.some((item) => item.key === "hn:9742" && item.kind === "discussion" && item.url === stories[1].url)));
+	assert.equal(await detail.getByRole("link", { name: "commenter1", exact: true }).getAttribute("href"), "https://news.ycombinator.com/user?id=commenter1");
+});
+
+test("sync in an open topic thread reloads comments beyond the mixed feed preview", async (t) => {
+	let revised = false;
+	const changed = 974111;
+	const { aside } = await openTopic(t, { responses: [{ match: (url) => revised && url === hnItem(changed),
+		json: { id: changed, type: "comment", by: "editor", text: "Revised after the hydrographic survey.", time: now } }] });
+	await feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Inspectors/ }).getByRole("button", { name: /Read thread/ }).click();
+	const detail = threadDetail(aside);
+	await detail.getByText(/Comment 12 on Inspectors/).waitFor();
+	revised = true;
+	await asideSources(aside).click();
+	await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
+	assert(await waitFor(async () => (await detail.getByText("Revised after the hydrographic survey.").count()) === 1), "sync retrieves fresh bodies throughout the inline discussion");
 });
