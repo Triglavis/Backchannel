@@ -281,6 +281,7 @@ function statusChange(title) {
     const complement = /^\s+(?:of|for|as)\s+([^,;:]+)/i.exec(title.slice(end));
     if (complement && !trailingHolders.size) detail += " " + complement[1];
   }
+  detail = detail.replace(/\b(?:long[ ‐‑–-]?(?:held|standing)|(?:decades?|years?|centur(?:y|ies))[ ‐‑–-]old)\b/gi, "");
   const attribute = new Set(eventWords(titleWords(detail.replace(/[-‐‑–]free\b/gi, " elimination"))).filter((word) => !STATUS_NOISE.has(word))
     .map((word) => word.replace(/ation$/, "at")));
   const kind = Object.keys(change.groups).find((key) => change.groups[key]);

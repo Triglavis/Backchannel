@@ -17861,7 +17861,8 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			object = standing?.[1] || control[1] + " free";
 			direction = /^(?:los|forfeit)/i.test(action[0]) ? "loss" : /^(?:retain|keep|kept)/i.test(action[0]) ? "retention" : "gain";
 		}
-		const terms = [...readerStoryTerms(object.replace(/\beliminat(?:ed|ion)\b/gi, "free"))]
+		const attribute = object.replace(/\b(?:long[ ‐‑–-]?(?:held|standing)|(?:decades?|years?|centur(?:y|ies))[ ‐‑–-]old)\b/gi, "");
+		const terms = [...readerStoryTerms(attribute.replace(/\beliminat(?:ed|ion)\b/gi, "free"))]
 			.filter((word) => !/^(?:official|status|designation)$/.test(word)).sort();
 		if (!terms.some((term) => term !== "free")) return null;
 		const names = new Set();

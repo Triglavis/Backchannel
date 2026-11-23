@@ -123,6 +123,7 @@ test("early and syndicated reports of one confirmed designation change share a c
     page("regional", "Measles is no longer considered eliminated in the US and Mexico", { domain: "ap.example" }),
     page("followup", "US loses its measles-free status. Here's how the Trump administration has responded to outbreaks", { domain: "ap.example" }),
     page("wunc", early, { url: "https://radio.example/2026-11-14/authorities-report-the-loss", firstPostedAt: announced }),
+    page("reaction", "‘I’m heartbroken’: experts dismayed as US loses long-held measles elimination status"),
     page("control", "US has officially lost control of measles"),
   ].map((item) => ({ ...item, postedAt: announced }));
   const other = [
@@ -130,6 +131,7 @@ test("early and syndicated reports of one confirmed designation change share a c
     page("reposted", early, { url: "https://archive.example/2019/nov/17/an-earlier-story", firstPostedAt: announced }),
     page("uncertain", "US could lose measles elimination status", { publishedAt: first }),
     page("investment", "US loses control of measles research funding", { publishedAt: announced }),
+    page("provisional", "The US loses its provisional measles elimination status", { publishedAt: announced }),
   ];
   const groups = groupPages([...pages, ...other]);
   const story = groups.find(({ pageIds }) => pageIds.includes("wunc"));

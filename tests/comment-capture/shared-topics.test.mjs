@@ -2506,17 +2506,19 @@ test("a status headline covers early reporting and keeps its explanatory follow-
 		["The U.S. has lost measles elimination status. Here's what that means and who is most at risk.", "https://news.example/2026/11/17/bulletin"],
 		["The U.S. just lost its measles elimination status. What now?", "https://health.example/2026/11/17/coverage"],
 		["US has lost measles elimination status, global health authorities say", "https://radio.example/2026/11/14/report"],
+		["‘I’m heartbroken’: experts dismayed as US loses long-held measles elimination status", "https://paper.example/2026/11/18/reaction"],
 		["The U.S. lost its measles elimination status in 1991", "https://archive.example/2026/11/15/retrospective"],
+		["The U.S. loses its provisional measles elimination status", "https://archive.example/2026/11/16/provisional"],
 	];
 	await withBookmarkTopics(links, async (list) => {
 		const headings = await list.locator(".app-topic-name").allTextContents();
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert.match(headings[0], /^#(?:The U\.S\. (?:has |just )?lost|US loses) (?:its )?measles elimination status$/);
-		await list.getByText(/in 4 links$/).waitFor();
-		await list.getByRole("link", { name: links[4][0], exact: true }).waitFor();
+		await list.getByText(/in 5 links$/).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(5).map(([title]) => title)));
 		await list.locator(".app-topic-row").click();
 		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 4).map(([title]) => title)));
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 5).map(([title]) => title)));
 	});
 });
 
