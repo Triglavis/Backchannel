@@ -3,13 +3,69 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { groupPages } from "../../topics/grouping.mjs";
-import { buildTopicsIndex, retainedEvidenceKeys } from "../../topics/index.mjs";
+import { buildTopicsIndex, resolvePublishedTopic, retainedEvidenceKeys } from "../../topics/index.mjs";
+import { reinstatement, otherDevelopments } from "./leadership-fixture.mjs";
 import worker from "../../topics/worker.mjs";
 
 const DAY = 86_400_000;
 const START = Date.parse("2026-11-20T12:00:00.000Z");
 const REFRESH_TOKEN = "test-refresh-token";
 const migrations = new URL("../../topics/migrations/", import.meta.url);
+
+test("a refresh reunites split event coverage, preserves old addresses and accepts a new perspective", async (t) => {
+  const pages = [...reinstatement, ...otherDevelopments.slice(0, 6)].map((title, i) => ({
+    id: String(i), title, domain: "source" + i + ".example.org", key: "source" + i + ".example.org/report",
+    url: "https://source" + i + ".example.org/report", firstPostedAt: START, postedAt: START,
+    posts: [{ id: "hn:" + (41 + i), title, postedAt: START, comments: i + 5 }],
+  }));
+  const oldGroups = [[3, 4, 5], [1], [2], [0], [6], ...pages.slice(8).map((_, i) => [i + 8])];
+  const oldTopics = oldGroups.map(([i]) => {
+    const kind = i === 1 ? "coverage" : "story";
+    return { id: kind + ":" + i, label: pages[i].title, kind };
+  });
+  const previous = buildTopicsIndex({
+    generatedAt: new Date(START).toISOString(), topics: oldTopics,
+    pages: oldGroups.flatMap((group, i) => group.map((n) => ({ ...pages[n], topicIds: [oldTopics[i].id] }))),
+  });
+  const publish = (previous, live, date) => {
+    const historical = JSON.parse(previous.body);
+    const recover = new Set(retainedEvidenceKeys(historical, JSON.parse(previous.page_timestamps), date));
+    const topics = groupPages(live);
+    return buildTopicsIndex({
+      generatedAt: new Date(date).toISOString(), topics,
+      pages: live.map((p) => ({ ...p, topicIds: [topics.find((t) => t.pageIds.includes(p.id)).id] })),
+    }, { ...previous, sourcePages: pages.filter(({ key }) => recover.has(key)) });
+  };
+  let result;
+  for (const live of [[pages[7]], pages.slice(0, 8), []]) {
+    const first = publish(previous, live, START + DAY);
+    const next = publish(first, [pages[7]], START + 2 * DAY);
+    result = JSON.parse(next.body);
+    const story = resolvePublishedTopic(result, oldTopics[0].id);
+    assert(story);
+    assert.equal(story.id, oldTopics[0].id);
+    for (const old of oldTopics.slice(0, 5)) {
+      assert.equal(resolvePublishedTopic(result, old.id)?.id, story.id, old.label);
+      assert([story.label, ...story.aliases].includes(old.label), old.label);
+    }
+    assert.deepEqual(result.pages.filter((p) => p.topicIds.includes(story.id)).map((p) => p.key).sort(),
+      pages.slice(0, 8).map((p) => p.key).sort());
+    for (const [i, p] of pages.entries()) {
+      assert.deepEqual(result.pages.find(({ key }) => key === p.key)?.posts, [["hn:" + (41 + i), i + 5]]);
+    }
+  }
+  const fixture = await articleFixture(t, { sources: pages.map((page) => ({ ...page, description: page.title })), publisherStatus: () => 403 });
+  Object.assign(fixture.index, result);
+  await fixture.publish();
+  const urls = new Set(pages.slice(0, 8).map(({ url }) => url));
+  for (const [endpoint, field] of [["coverage", "links"], ["article", "sources"]]) {
+    const response = await fixture.request("/api/topics/" + endpoint + "?id=" + encodeURIComponent(oldTopics[1].id));
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.topic.id, oldTopics[0].id);
+    assert.deepEqual(new Set(body[field].map(({ url }) => url)), urls);
+  }
+});
 
 async function service(t, options = {}) {
   const runtime = new Miniflare(convertV4MiniflareOptions({
@@ -1256,7 +1312,8 @@ async function articleFixture(t, { run = bridgeInference, sources = bridgeSource
     if (!page) return new Response(null, { status: 404 });
     const status = publisherStatus(page);
     if (status !== 200) return new Response(null, { status });
-    return new Response('<html><head><title>' + page.title + '</title><meta name="description" content="' +
+    const image = page.image ? '<meta property="og:image" content="' + page.image + '">' : '';
+    return new Response('<html><head><title>' + page.title + '</title>' + image + '<meta name="description" content="' +
       page.description + '"></head><body><article><p>' + page.description + '</p></article></body></html>',
     { headers: { "Content-Type": "text/html; charset=utf-8" } });
   });
@@ -1426,6 +1483,44 @@ test("a temporary model outage serves cited public coverage and retries after th
   assert.equal(runs, 2);
 });
 
+test("transient publisher retries keep verified reporting and photos until more sources recover", async (t) => {
+  const photo = "https://chronicle.example.org/photos/river-bridge-deck.jpg";
+  const sources = [{ ...bridgeReporting[0], image: photo }, bridgeReporting[1], {
+    url: "https://zledger.example.org/river-bridge-contract", title: "County signs contract for river bridge",
+    description: "The county awarded the bridge repair contract to River Works after receiving four bids for the deck replacement.",
+  }];
+  let available = 2;
+  const { db, request, path, advance } = await articleFixture(t, {
+    sources, publisherStatus: (page) => sources.indexOf(page) < available ? 200 : 503,
+  });
+  const first = await request(path);
+  const saved = await first.json();
+  let delay = Number(first.headers.get("retry-after"));
+  assert(delay > 0);
+  assert.equal(saved.method, "synthesis");
+  assert(saved.images.some(({ url }) => url === photo));
+  await db.prepare("UPDATE posts SET comments = 6 WHERE id = 'hn:41'").run();
+  for (available of [0, 1]) {
+    advance(delay * 1000 + 10);
+    const response = await request(path);
+    const retained = await response.json();
+    assert.equal(retained.generatedAt, saved.generatedAt);
+    assert.deepEqual(retained.sections, saved.sections);
+    assert.deepEqual(retained.images, saved.images);
+    assert.equal(retained.sources[0].discussions[0].comments, 6);
+    delay = Number(response.headers.get("retry-after"));
+    assert(delay > 0);
+  }
+  available = 3;
+  advance(delay * 1000 + 10);
+  const recovered = await request(path);
+  const complete = await recovered.json();
+  assert.equal(recovered.headers.get("retry-after"), null);
+  assert.notEqual(complete.generatedAt, saved.generatedAt);
+  assert.equal(complete.method, "synthesis");
+  assert.match(complete.sources.find(({ url }) => url === sources[2].url).excerpt, /four bids/);
+});
+
 test("blocked originals replace the previous headline-only article with a cacheable source dossier", async (t) => {
   const { request, path, db, fetched, index } = await articleFixture(t, {
     publisherStatus: () => 403, run: () => assert.fail("Blocked originals cannot support inference"),
@@ -1497,9 +1592,12 @@ test("partial publisher access returns a cited brief and keeps the blocked origi
   assert(brief.sources.some(({ url }) => url === bridgeSources[1].url));
   assert.equal(brief.method, "coverage");
   const paragraphs = brief.sections.flatMap(({ paragraphs }) => paragraphs);
-  assert.equal(paragraphs.length, 1);
-  assert.deepEqual(paragraphs[0].sourceIds, [readable.id]);
-  assert.match(paragraphs[0].text, /prefabricated panels/);
+  assert(paragraphs.some(({ text }) => text.includes("replace the bridge deck")));
+  assert(paragraphs.some(({ text }) => text.includes("prefabricated panels")));
+  for (const paragraph of paragraphs) {
+    assert.deepEqual(paragraph.sourceIds, [readable.id]);
+    assert.deepEqual(paragraph.citations.map(({ sourceId }) => sourceId), [readable.id]);
+  }
   assert.deepEqual(brief.timeline, []);
 });
 
@@ -1537,6 +1635,91 @@ test("publisher sharing variants contribute one indexed article and preserve eac
   assert.deepEqual(article.sources.map(({ url }) => url), [base]);
   assert.deepEqual(new Set(article.sources[0].discussions.map(({ url }) => url)),
     new Set([41, 42, 43].map((id) => "https://news.ycombinator.com/item?id=" + id)));
+});
+
+test("article selection ranks all published originals before the source cap and refreshes a warm alias", async (t) => {
+  const sources = Array.from({ length: 15 }, (_, i) => ({ ...bridgeSources[0],
+    url: `https://paper${String(i).padStart(2, "0")}.example.org/bridge-repairs`, title: "River crossing report " + i }));
+  const { request, path, db, fetched, advance } = await articleFixture(t, { sources, publisherStatus: () => 403 });
+  const alias = "/api/topics/article?id=story%3Aold-bridge";
+  await db.prepare("UPDATE posts SET comments = 91, posted_at = ? WHERE id = 'hn:55'").bind(START - DAY).run();
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  const original = await response.json();
+  assert.equal(original.sources.length, 12);
+  assert(original.sources.some(({ url }) => url === sources[14].url));
+  assert.equal(fetched[0], sources[14].url);
+  const count = fetched.length;
+  assert.equal((await request(alias, { headers: { "If-None-Match": response.headers.get("etag") } })).status, 304);
+  assert.equal(fetched.length, count);
+  await db.prepare("UPDATE posts SET comments = 92 WHERE id = 'hn:55'").run();
+  assert.equal((await (await request(alias)).json()).generatedAt, original.generatedAt);
+  assert.equal(fetched.length, count);
+
+  const newcomer = sources.findIndex(({ url }) => !original.sources.some((source) => source.url === url));
+  advance(1000);
+  await db.prepare("UPDATE posts SET comments = 140 WHERE id = ?").bind("hn:" + (41 + newcomer)).run();
+  const replacement = await (await request(alias)).json();
+  assert.notEqual(replacement.generatedAt, original.generatedAt);
+  assert(replacement.sources.some(({ url }) => url === sources[newcomer].url));
+  assert.equal(fetched[count], sources[newcomer].url);
+  await db.prepare("UPDATE topic_article_selections SET members = ? WHERE request_id = ?")
+    .bind(JSON.stringify({ version: "previous-selection", pages: [] }), original.topic.id).run();
+  assert.deepEqual(await (await request(alias)).json(), replacement);
+});
+
+test("old discussions and sharing variants affect original priority only once per public thread", async (t) => {
+  const base = "https://www.nytimes.com/2026/11/20/world/river-bridge-repairs-begin.html";
+  const variants = ["", ...Array.from({ length: 9 }, (_, i) => "?smid=share" + i)];
+  const sources = [...variants.map((suffix) => ({ ...bridgeSources[0], url: base + suffix })), bridgeSources[1]];
+  const { request, path, db, index, publish, fetched, advance } = await articleFixture(t, { sources, publisherStatus: () => 403 });
+  await db.prepare("UPDATE posts SET url = 'https://lobste.rs/s/shared?utm_source=' || id, comments = 10 WHERE id <> 'hn:51'").run();
+  await db.prepare("UPDATE posts SET comments = 150 WHERE id = 'hn:51'").run();
+  const historical = { id: "hn:older", url: "https://news.ycombinator.com/item?id=801", comments: 175, postedAt: START - DAY };
+  const privateLink = { id: "hn:private", url: "https://reports.internal/801", comments: 9000, postedAt: START + DAY };
+  const unpublished = { id: "hn:pending", url: "https://news.ycombinator.com/item?id=802", comments: 9000, postedAt: START + DAY };
+  const newer = Array.from({ length: 13 }, (_, i) => ({ id: "hn:extra" + i, url: "https://news.ycombinator.com/item?id=" + (900 + i),
+    comments: 1, postedAt: START + 1000 + i }));
+  await db.prepare(`INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments)
+    SELECT value->>'id', p.id, 'hn', '', 'Bridge discussion', value->>'url', value->>'postedAt', value->>'comments'
+    FROM json_each(?) JOIN pages AS p WHERE p.url = ?`)
+    .bind(JSON.stringify([historical, privateLink, unpublished, ...newer]), sources[9].url).run();
+  index.pages[9].posts.push(...[historical, privateLink, ...newer].map(({ id, comments }) => [id, comments]));
+  await publish();
+
+  const first = await (await request(path)).json();
+  assert.equal(fetched[0], base);
+  assert.deepEqual(first.sources.find(({ url }) => url === base).discussions.map(({ url }) => url), newer.slice(-12).reverse().map(({ url }) => url));
+  const count = fetched.length;
+  advance(1000);
+  await db.prepare("UPDATE posts SET comments = 75 WHERE id = ?").bind(historical.id).run();
+  const revised = await (await request(path)).json();
+  assert.equal(fetched[count], bridgeSources[1].url);
+  assert.notEqual(revised.generatedAt, first.generatedAt);
+  assert.deepEqual(revised.sources.map(({ id, url }) => [id, url]), first.sources.map(({ id, url }) => [id, url]));
+});
+
+test("the source cap keeps independent publishers and distinguishes an original from its own discussion", async (t) => {
+  const local = Array.from({ length: 13 }, (_, i) => ({ ...bridgeSources[0], url: `https://journal.example.org/river-report-${i}` }));
+  const forum = { ...bridgeSources[0], url: "https://civicforum.example.org/t/repairs" };
+  const { request, path, db, index, publish, fetched } = await articleFixture(t, {
+    sources: [...local, ...bridgeSources, forum], publisherStatus: () => 403,
+  });
+  await db.prepare("UPDATE posts SET comments = 200 - CAST(substr(id, 4) AS INTEGER) WHERE page_id IN (SELECT id FROM pages WHERE domain = 'journal.example.org')").run();
+  await db.prepare("UPDATE posts SET comments = 2000, url = ? WHERE id = 'hn:56'").bind(forum.url).run();
+  const later = Array.from({ length: 13 }, (_, i) => "later" + i);
+  await db.prepare(`INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments)
+    SELECT 'hn:' || j.value, p.id, 'hn', '', 'Discussion', 'https://news.ycombinator.com/item?id=' || j.value, ?, 1
+    FROM json_each(?) AS j JOIN pages AS p WHERE p.url = ?`).bind(START + 1000, JSON.stringify(later), forum.url).run();
+  index.pages.at(-1).posts.push(...later.map((id) => ["hn:" + id, 1]));
+  await publish();
+  const article = await (await request(path)).json();
+  const selected = new Set(article.sources.map(({ url }) => url));
+  assert.equal(selected.size, 12);
+  for (const { url } of bridgeSources) assert(selected.has(url));
+  assert(!selected.has(forum.url));
+  assert.equal(fetched[0], local[0].url);
+  assert(!fetched.includes(forum.url));
 });
 
 test("an expired article lease can be reclaimed without its late writer replacing the winner", { timeout: 15_000 }, async (t) => {

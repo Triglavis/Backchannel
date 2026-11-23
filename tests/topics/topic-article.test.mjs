@@ -92,7 +92,8 @@ test("rejects ungrounded prose and preserves the attributed source excerpts", as
     const { article, status } = await generate({ fetcher, ai: { run: async () => ({ response: invalid }) } });
     assert.equal(status, "rejected");
     assert.equal(article.method, "coverage");
-    assert.equal(article.sections.length, 1);
+    assert(article.sections.every(({ paragraphs }) => paragraphs.every(({ citations }) =>
+      citations.every(({ sourceId, excerpt }) => (sourceId === "s1" ? bridgeHTML : ferryHTML).includes(excerpt)))));
     assert.equal(article.sections[0].paragraphs.length, 1);
     assert(article.sections[0].paragraphs[0].citations.length);
     assert.doesNotMatch(JSON.stringify(article.sections), /23 changes|beachfront|different\.example/);
@@ -529,4 +530,325 @@ test("a price comparison alone does not establish a realized loss, and a failed 
     assert.equal((await generate({ fetcher, ai: { run: async () => ({ response: make(item.bad) }) } })).status, "rejected");
     assert.equal((await generate({ fetcher, ai: { run: async () => ({ response: make(item.good) }) } })).status, "synthesis");
   }
+});
+
+test("most discussed originals survive both caps regardless of input order, while reprints and repeat publishers share the fetch budget", async () => {
+  const cold = Array.from({ length: 13 }, (_, i) => ({
+    url: "https://desk" + i + ".org/transport", title: "Local transport coverage " + i, posts: [],
+  }));
+  const post = (id, comments) => ({ source: "hn", url: "https://news.ycombinator.com/item?id=" + id, comments });
+  const hot = { url: "https://reporter.org/repairs", title: "Harbor footbridge reconstruction contract approved", posts: [post(30, 49), post(20, 60)] };
+  const copy = { ...hot, url: "https://syndicate.org/repairs", posts: [post(40, 98)] };
+  const repeated = { ...hot, url: "https://reporter.org/another-piece", title: "Traffic disruption report",
+    posts: [post(50, 63), post(50, 63)] };
+  const aggregated = { url: "https://engineers.org/findings", title: "Bridge engineering inspection",
+    replyCount: 105, discussionCount: 17, posts: [post(60, 2)] };
+  const unranked = { url: "https://news.ycombinator.com/item?id=4", posts: [post(4, 900)] };
+  const input = [...cold, copy, repeated, unranked, hot, aggregated];
+  const select = async (pages) => {
+    const fetched = [];
+    const article = await buildTopicArticle(topic, pages, { now, fetcher: async (url) => {
+      fetched.push(url);
+      return html(url === hot.url ? bridgeHTML : "<title>Publisher notice</title>");
+    } });
+    assert.equal(article.sources.length, 12);
+    assert.equal(fetched.length, 8);
+    assert.deepEqual(fetched.slice(0, 2), [hot.url, aggregated.url]);
+    assert(!fetched.includes(copy.url) && !fetched.includes(repeated.url) && !fetched.includes(unranked.url));
+    const cited = article.sections[0].paragraphs[0].sourceIds[0];
+    assert.equal(article.sources.find(({ id }) => id === cited).url, hot.url);
+    assert.deepEqual(articleModule.articleFetchKeys(topic, pages), fetched.map((url) => new URL(url).host + new URL(url).pathname));
+    return fetched;
+  };
+  assert.deepEqual(await select(input), await select(input.toReversed()));
+});
+
+test("a publisher's detailed public article yields a cited lead and additional facts even during a model outage", async () => {
+  const lead = "Harbor engineers closed the footbridge after corrosion weakened the eastern deck.";
+  const cost = "The city council approved $4.2 million to replace the damaged steel beams.";
+  const access = "The ferry operator added two late crossings for hospital staff during the repairs.";
+  const unrelated = "The city council purchased a fleet of private helicopters for the mayor.";
+  const first = '<meta property="og:type" content="article"><title>Harbor footbridge repairs begin</title>' +
+    '<article class="promo"><p>Read our collection of headlines from around the world.</p></article>' +
+    '<main><div data-testid="article-body"><p>' + lead + '</p><p>' + cost + '</p>' +
+    '<aside><p>' + unrelated + '</p></aside></div></main><footer><p>' + unrelated + '</p></footer>';
+  const second = '<title>Ferry changes during harbor footbridge repairs</title><article><p>' + access + '</p></article>';
+  const { article, status } = await generate({ fetcher: async (url) => html(url === bridge.url ? first : second), ai: { run() { throw Error("offline"); } } });
+  assert.equal(status, "unavailable");
+  const body = article.sections.flatMap(({ paragraphs }) => paragraphs);
+  assert.equal(article.method, "coverage");
+  for (const [fact, id] of [[lead, "s1"], [cost, "s1"], [access, "s2"]]) {
+    const paragraph = body.find(({ text }) => text.includes(fact));
+    assert(paragraph, fact);
+    assert.deepEqual(paragraph.citations, [{ sourceId: id, excerpt: fact }]);
+  }
+  assert.doesNotMatch(JSON.stringify(body), /private helicopters|collection of headlines|commenter/i);
+});
+
+test("reads past the opening of a flat schema.org articleBody and connects image references only to its cited article", async () => {
+  const intro = "Harbor engineers closed the footbridge to rebuild the deck after inspecting each corroded joint.";
+  const early = "The bridge project brought local steelworkers back to the harbor after a winter of delays.";
+  const process = "Bridge workers measured the deck supports and placed braces beneath the damaged eastern span.";
+  const last = "Harbor inspectors will publish the final load test before commuters can return to the bridge.";
+  const first = '<script type="application/ld+json">' + JSON.stringify({ "@context": "https://schema.org", "@graph": [
+    { "@type": "WebPage", "@id": bridge.url, mainEntity: { "@id": bridge.url + "#story" } },
+    { "@type": "NewsArticle", "@id": bridge.url + "#story", mainEntityOfPage: { "@id": bridge.url },
+      headline: "Harbor footbridge repairs begin", articleBody: [intro, early, process, early, last].join(" "),
+      image: { "@id": bridge.url + "#main-image" }, publisher: { name: "Harbor Gazette" } },
+    { "@type": "ImageObject", "@id": bridge.url + "#main-image", contentUrl: "/photos/harbor-span.jpg",
+      caption: "Workers brace the eastern span.", width: 1200, height: 750 },
+    { "@type": "NewsArticle", url: "https://another.org/fishing", headline: "Fishing update", image: "https://another.org/fish.jpg" },
+  ] }) + '</script>';
+  const other = '<meta property="og:site_name" content="Coast Ledger"><meta name="twitter:card" content="summary_large_image">' +
+    '<meta property="og:image" content="https://cdn.coast.org/ferry.jpg"><meta property="og:image:alt" content="The ferry leaving the pier.">' + ferryHTML;
+  let input;
+  const { article, status } = await generate({ fetcher: async (url) => html(url === bridge.url ? first : other),
+    ai: { run(_, options) {
+      input = JSON.parse(options.messages[1].content);
+      const source = input.documents.find(({ id }) => id === "s1");
+      const end = Object.entries(source.passages).find(([, text]) => text.includes(last))?.[0];
+      return { response: { sections: [{ heading: "Load tests and ferry crossings", paragraphs: [{ sentences: [
+        { text: "Harbor inspectors will release a final load test before commuters return.", evidence: [{ sourceId: "s1", passage: end }] },
+        point("The ferry is keeping evening service through the footbridge repairs.", "s2", ferryHours),
+      ] }] }], events: [] } };
+    } } });
+  assert.match(JSON.stringify(input.documents), /publish the final load test/);
+  assert.equal(status, "synthesis");
+  assert.deepEqual(article.images, [
+    { url: "https://harbor.example.org/photos/harbor-span.jpg", alt: "Workers brace the eastern span.", sourceId: "s1" },
+    { url: "https://cdn.coast.org/ferry.jpg", alt: "The ferry leaving the pier.", sourceId: "s2" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(input), /https?:\/\/|fishing|#main-image/);
+});
+
+test("only representative public HTTPS images associated with readable cited coverage can be displayed", async () => {
+  const excluded = ["http://cdn.coast.org/deck.jpg", "https://printer.local/photo.jpg", "https://127.0.0.1/picture.jpg",
+    "https://reader:secret@cdn.coast.org/story.jpg", "https://photos.coast.org:3000/bridge.jpg", "data:image/svg+xml,a",
+    "https://cdn.coast.org/assets/news-logo.png", "https://cdn.coast.org/track/1x1.gif"];
+  for (const src of excluded) {
+    const { article } = await generate({ fetcher: async () => html('<meta property="og:image" content="' + src + '">' + bridgeHTML) }, [bridge]);
+    assert.deepEqual(article.images, [], src);
+  }
+  const page = '<meta property="og:image" content="/logo.png"><meta property="og:image:width" content="64">' +
+    '<meta property="og:image" content="/press/river.jpg"><meta property="og:image:width" content="1200">' + bridgeHTML;
+  const { article } = await generate({ fetcher: async () => html(page) }, [bridge]);
+  assert.deepEqual(article.images, [{ sourceId: "s1", url: "https://harbor.example.org/press/river.jpg", alt: "" }]);
+  const unrelated = '<title>Weather forecast in the mountains</title><meta property="og:image" content="/weather.jpg">' +
+    '<article><p>Climbers reached the summit at dawn after a cold night in the mountains.</p></article>';
+  const sparse = await generate({ fetcher: async (url) => url === bridge.url ? new Response(null, { status: 403 }) : html(unrelated) });
+  assert.deepEqual(sparse.article.images, []);
+  assert.deepEqual(sparse.article.sections, []);
+});
+
+test("paywalled structured bodies, marked private snippets, and disallowed image previews stay outside reporting", async () => {
+  const restricted = "Harbor engineers approved the secret underwater rail project after reviewing private documents.";
+  const paid = '<script type="application/ld+json">' + JSON.stringify({ "@type": "NewsArticle", headline: bridgeTitle,
+    isAccessibleForFree: "False", description: bridgeDeck, articleBody: restricted, image: "https://cdn.coast.org/secret.jpg" }) +
+    '</script><article><div data-nosnippet><p>' + restricted + '</p></div></article>';
+  const marked = '<title>Harbor footbridge repairs</title><meta name="robots" content="max-image-preview:none">' +
+    '<meta property="og:image" content="/hero.jpg"><article><p>' + bridgeDeck + '</p><section data-nosnippet><p>' + restricted + '</p></section></article>';
+  for (const doc of [paid, marked]) {
+    const { article } = await generate({ fetcher: async () => html(doc) }, [bridge]);
+    assert.doesNotMatch(JSON.stringify(article), /secret underwater/);
+    assert.deepEqual(article.images, []);
+    assert.match(JSON.stringify(article.sections), /eastern deck/);
+  }
+  const result = await generate({ fetcher: async () => new Response(bridgeHTML, { headers: { "content-type": "text/html", "x-robots-tag": "nosnippet" } }) }, [bridge]);
+  assert.deepEqual(result.article.sections, []);
+  assert.deepEqual(result.article.images, []);
+});
+
+test("syndicated copies sharing a third canonical URL cannot count as separate voices or supply multiple photos", async () => {
+  const original = "https://wire.org/harbor-repairs";
+  const sample = (heading, note, photo) => '<link rel="canonical" href="' + original + '"><title>' + heading +
+    '</title><meta property="og:image" content="' + photo + '"><article><p>' + bridgeDeck + '</p><p>' + note + '</p></article>';
+  const docs = [sample("Harbor repair crews move in", "Harbor engineers will inspect the joints when the tide recedes.", "/day-one.jpg"),
+    sample("Deck replacement planned for November", "The ferry operators added an evening sailing for families on the eastern bank.", "/day-two.jpg")];
+  const { article } = await generate({ fetcher: async (url) => html(docs[url === bridge.url ? 0 : 1]) });
+  assert.deepEqual(article.sections[0].paragraphs[0].sourceIds, ["s1"]);
+  assert.equal(article.images.length, 1);
+  assert.equal(article.images[0].sourceId, "s1");
+  assert.equal(article.sources.length, 2);
+});
+
+test("originals with the same summary but different firsthand details reach the synthesis together", async () => {
+  const close = "Engineers closed the eastern span on November 19, 2026, after finding damaged steel.";
+  const later = "Harbor crews will open a temporary walkway beside the ferry terminal on Friday.";
+  const doc = (passage) => '<title>Harbor footbridge repair schedule</title><meta name="description" content="' +
+    bridgeDeck + '"><article><p>' + passage + '</p></article>';
+  const { article, status } = await generate({ fetcher: async (url) => html(doc(url === bridge.url ? close : later)),
+    ai: { run: async () => ({ response: { sections: [{ heading: "Closing and alternate access", paragraphs: [{ sentences: [
+      point("Engineers closed the eastern span after finding damaged steel.", "s1", close),
+      point("Harbor crews plan a temporary walkway beside the ferry terminal.", "s2", later),
+    ] }] }], events: [] } }) } });
+  assert.equal(status, "synthesis");
+  assert.deepEqual(article.sections[0].paragraphs[0].sourceIds, ["s1", "s2"]);
+});
+
+test("a temporary publisher failure keeps a partial synthesis retryable while readers retain its cited facts", async () => {
+  const missing = { url: "https://letter.org/bridge", title: "Harbor repair drawings", replyCount: 800, posts: [] };
+  const partial = await generate({ fetcher: async (url) => url === missing.url ? new Response(null, { status: 503 }) : fetcher(url),
+    ai: { run: async () => ({ response: draft() }) } }, [bridge, ferry, missing]);
+  assert.equal(partial.article.method, "synthesis");
+  assert.equal(partial.status, "unavailable");
+  const recovered = await generate({ fetcher: async (url) => url === missing.url ? html("<title>Public notice</title>") : fetcher(url),
+    ai: { run: async () => ({ response: draft() }) } }, [bridge, ferry, missing]);
+  assert.equal(recovered.status, "synthesis");
+});
+
+test("a short valid synthesis still carries specific unreported details from a well-documented original", async () => {
+  const cost = "The city council approved $4.2 million to replace the damaged steel beams.";
+  const crossings = "The ferry operator scheduled two extra crossings for hospital staff during the repairs.";
+  const doc = bridgeHTML.replace("</article>", "<p>" + cost + "</p><p>" + crossings + "</p></article>");
+  const answer = { sections: [{ heading: "Deck repairs", paragraphs: [{ sentences: [
+    point("The Harbor Gazette reports that the eastern deck needs replacing before the footbridge reopens.", "s1", bridgeDeck),
+  ] }] }], events: [] };
+  const { article, status } = await generate({ fetcher: async () => html(doc), ai: { run: () => ({ response: answer }) } }, [bridge]);
+  assert.equal(status, "synthesis");
+  const paragraphs = article.sections.flatMap(({ paragraphs }) => paragraphs);
+  assert.match(paragraphs[0].text, /needs replacing/);
+  assert(paragraphs.some((p) => p.text.includes("$4.2 million") && p.citations.some((cite) => cite.excerpt === cost)));
+  assert(paragraphs.every((p) => p.sourceIds.length));
+});
+
+test("site-wide social cards yield to the article's lead figure, with the publisher's own image description", async () => {
+  const brand = '<meta property="og:site_name" content="NVIDIA Newsroom"><meta property="og:image" content="/media/sites/219/images/social-image.jpg">' +
+    '<meta property="og:image:alt" content="NVIDIA Newsroom">';
+  const figure = '<figure><picture><img src="/media/harbor-span.webp" alt="Steel supports beneath the old span."></picture></figure>';
+  const { article } = await generate({ fetcher: async () => html(brand + bridgeHTML.replace("<article>", "<article>" + figure)) }, [bridge]);
+  assert.deepEqual(article.images, [{ url: "https://harbor.example.org/media/harbor-span.webp", alt: "Steel supports beneath the old span.", sourceId: "s1" }]);
+  const generic = await generate({ fetcher: async () => html(brand + bridgeHTML) }, [bridge]);
+  assert.deepEqual(generic.article.images, []);
+  const structured = '<script type="application/ld+json">' + JSON.stringify({ "@type": "NewsArticle", headline: bridgeTitle,
+    image: "https://media.photos.org/harbor.webp" }) + '</script>';
+  const described = await generate({ fetcher: async () => html(structured + '<meta property="og:image" content="https://media.photos.org/harbor.webp">' +
+    '<meta property="og:image:alt" content="A crane lifts the first beam.">' + bridgeHTML) }, [bridge]);
+  assert.equal(described.article.images[0].alt, "A crane lifts the first beam.");
+});
+
+test("live coverage contributes updates about this story when a longer article on the page covers another event", async () => {
+  const cold = Array.from({ length: 6 }, (_, i) => '<p>Officers assigned a new patrol to the mountain district after survey number ' + i + '.</p>').join("");
+  const budget = "Harbor officials approved a $7 million loan for the footbridge repairs at a council meeting.";
+  const path = "Harbor staff opened an accessible footbridge detour for cyclists and wheelchair users.";
+  const live = '<script type="application/ld+json">' + JSON.stringify({ "@type": "LiveBlogPosting", headline: "Harbor footbridge repairs",
+    description: bridgeDeck }) + '</script><main><article>' + cold + '</article><article><p>' + budget + '</p></article>' +
+    '<article><p>' + path + '</p></article></main>';
+  const { article } = await generate({ fetcher: async () => html(live) }, [bridge]);
+  const body = article.sections.flatMap(({ paragraphs }) => paragraphs).map(({ text }) => text).join(" ");
+  assert.match(body, /\$7 million/);
+  assert.match(body, /wheelchair users/);
+  assert.doesNotMatch(body, /mountain district/);
+});
+
+test("follow-up paragraphs prefer new details in the original body to other publishers' opening recaps", async () => {
+  const subject = { id: "story:maple", label: "Maple board reinstates Dana Shore as chief executive" };
+  const announced = "Maple reinstated Dana Shore as chief executive after a board vote on Monday.";
+  const restores = "Dana Shore was appointed to lead Maple again following a decision by the directors on Monday.";
+  const returns = "The Maple board confirmed the return of Dana Shore to the role of chief executive.";
+  const vote = "All nine directors signed the resolution after reviewing an independent audit.";
+  const price = "Maple shares rose 18% after the board announced its decision.";
+  const pages = [bridge, ferry, { url: "https://recorder.org/board", posts: [] }];
+  const docs = [[announced, vote], [restores, price], [returns]];
+  const article = await buildTopicArticle(subject, pages, { now, fetcher: async url => html('<title>' + subject.label +
+    '</title><article>' + docs[pages.findIndex(p => p.url === url)].map(s=>'<p>'+s+'</p>').join('') + '</article>') });
+  const details = article.sections.slice(1).flatMap(({ paragraphs }) => paragraphs).map(({ text }) => text);
+  assert(details.some((text) => text.includes(vote)));
+  assert(details.some((text) => text.includes(price)));
+  assert(details.every((text) => !text.includes(restores) && !text.includes(returns) && !text.includes(announced)));
+});
+
+test("public discussion identity agrees with the displayed links and ignores unpublished or local inputs", () => {
+  const post = { source: "hn", url: "https://news.ycombinator.com/item?id=19&utm_source=s" };
+  assert.equal(articleModule.articleDiscussionKey(post), "news.ycombinator.com/item?id=19");
+  for (const input of [{ ...post, source: " " }, { ...post, url: "https://intranet.local/board" }, undefined]) {
+    assert.equal(articleModule.articleDiscussionKey(input), "");
+    assert.deepEqual(articleModule.articleDiscussions([input]), []);
+  }
+});
+
+test("the named primary announcement leads a live expert's speculation even when the analyst repeats the entire topic label", async () => {
+  const subject = { id: "story:aster", label: "Aster reinstates Dana Shore as CEO, board says" };
+  const primary = { url: "https://aster.org/news/leadership", posts: [] };
+  const statement = "Aster reinstated Dana Shore as chief executive and a member of its board effective immediately.";
+  const comment = "The Aster board must have been under enormous pressure to reinstate Dana Shore as CEO, says a former director.";
+  const doc = (title, text) => '<title>' + title + '</title><article><p>' + text + '</p></article>';
+  const article = await buildTopicArticle(subject, [bridge, primary], { now, fetcher: async url => html(
+    url === primary.url ? doc("Aster leadership announcement", statement) : doc(subject.label, comment)) });
+  assert(article.sections[0].paragraphs[0].text.includes(statement));
+  assert.deepEqual(article.sections[0].paragraphs[0].sourceIds, ["s2"]);
+});
+
+test("a fallback never presents a completed sale or inferred loss contradicted by the specific transaction terms", async () => {
+  const subject = { id: "story:sale", label: "Orchard buys the Orchard Bank division" };
+  const agreement = "Orchard agreed to buy the bank division for $3 billion pending regulatory approval.";
+  const schedule = "The companies expect the transaction to close next spring after the public review.";
+  const claim = "Orchard bought the bank division and the seller will take a massive loss on its original purchase price.";
+  const documents = ['<title>Orchard Bank sale terms</title><article><p>' + agreement + '</p><p>' + schedule + '</p></article>',
+    '<title>Orchard buys the bank division</title><article><p>Orchard has a long history of buying similar businesses in the banking industry.</p><p>' + claim + '</p></article>'];
+  const article = await buildTopicArticle(subject, [bridge, ferry], { now, fetcher: async url => html(documents[url === bridge.url ? 0 : 1]) });
+  const output = article.sections.flatMap(({ paragraphs }) => paragraphs).map(({ text }) => text).join(" ");
+  assert(output.includes(agreement));
+  assert.doesNotMatch(output, /massive loss|bought the bank division/i);
+});
+
+test("an independent opening with a new price survives repeat-headline filtering, ahead of colour and calls to the reader", async () => {
+  const subject = { id: "story:mill", label: "Orchard buys Harbor Mill for $3 billion" };
+  const deal = "Orchard agreed to buy Harbor Mill for $3 billion subject to regulatory approval.";
+  const price = "Harbor Mill cost $12 billion in 2021, four times the price in the Orchard deal.";
+  const color = "There is an eerie quiet outside Harbor Mill on the day of the Orchard deal.";
+  const ask = "When you visit Harbor Mill, please tell us how it felt to hear this announcement!";
+  const page = (parts) => "<title>" + subject.label + "</title><article>" + parts.map(p=>"<p>"+p+"</p>").join("") + "</article>";
+  const article = await buildTopicArticle(subject, [bridge, ferry], { now, fetcher: async url =>
+    html(url === bridge.url ? page([deal, color, ask]) : page([price])) });
+  const text = article.sections.flatMap(({ paragraphs })=>paragraphs).map(p=>p.text).join(" ");
+  assert(text.includes(deal) && text.includes(price));
+  assert.doesNotMatch(text, /eerie quiet|please tell us/);
+});
+
+test("abandoned quotations and dangling references stay out of supplemental reporting", async () => {
+  const scope = { id: "story:alpha", label: "Harbor launches a browser for Linux" };
+  const lead = "The Harbor browser is now available for Linux and macOS as a preview.";
+  const detail = "Users can report broken sites from the browser's built-in feedback menu.";
+  const orphan = "“We have every confidence that Harbor will lead the industry into a new era.";
+  const dangling = "You can download it for Linux and macOS.";
+  const source = '<title>Harbor browser preview for Linux</title><article>' + [lead, detail, orphan, dangling]
+    .map(value=>'<p>'+value+'</p>').join('') + '</article>';
+  const article = await buildTopicArticle(scope, [bridge], { now, fetcher: async () => html(source) });
+  const body = article.sections.flatMap(s=>s.paragraphs).map(p=>p.text).join(" ");
+  assert(body.includes(lead) && body.includes(detail));
+  assert.doesNotMatch(body, /every confidence|download it/);
+});
+
+test("two articles from one publisher cannot satisfy the independent-source requirement when another publisher is available", async () => {
+  const secondDesk = { url: "https://harbor.example.org/costs", posts: [] };
+  const cost = "Harbor engineers approved a new steel order for the deck repairs.";
+  const texts = new Map([[bridge.url, bridgeDeck], [secondDesk.url, cost], [ferry.url, ferryHours]]);
+  const fetcher = async url => html('<meta property="og:site_name" content="' +
+    (url === ferry.url ? "Coast Ledger" : "Harbor Gazette") + '"><title>Harbor repair notes</title><article><p>' + texts.get(url) + '</p></article>');
+  const thin = { sections: [{ heading: "Replacing steel", paragraphs: [{ sentences: [
+    point("The Harbor Gazette reports that the eastern deck must be replaced.", "s1", bridgeDeck),
+    point("Engineers approved new steel for the deck repairs.", "s2", cost),
+  ] }] }], events: [] };
+  const ai = { run: async () => ({ response: thin }) };
+  const mixed = await generate({ fetcher, ai }, [bridge, secondDesk, ferry]);
+  assert.equal(mixed.status, "rejected");
+  const singlePublisher = await generate({ fetcher, ai }, [bridge, secondDesk]);
+  assert.equal(singlePublisher.status, "synthesis");
+  thin.sections[0].paragraphs[0].sentences[0].text = "The eastern deck must be replaced.";
+  assert.equal((await generate({ fetcher, ai }, [bridge, secondDesk])).status, "rejected");
+});
+
+test("a public share query preserves the canonical article's access and snippet limits", async () => {
+  const restricted = "Harbor engineers confirmed that the confidential project would repair the eastern deck in June.";
+  const page = { ...bridge, url: bridge.url + "?ref=frontpage" };
+  const markup = '<link rel="canonical" href="' + bridge.url + '"><title>Harbor repair schedule</title>' +
+    '<meta name="description" content="' + bridgeDeck + '"><script type="application/ld+json">' +
+    JSON.stringify({ "@type": "NewsArticle", url: bridge.url, headline: "Harbor repair schedule", isAccessibleForFree: false, articleBody: restricted }) +
+    '</script><article><p>' + restricted + '</p></article>';
+  const paid = await generate({ fetcher: async () => html(markup) }, [page]);
+  assert.doesNotMatch(JSON.stringify(paid.article), /confidential project/);
+  const restrictedPreview = bridgeHTML + '<meta name="robots" content="max-snippet: 32">';
+  const limited = await generate({ fetcher: async () => html(restrictedPreview) }, [bridge]);
+  assert(limited.article.sources[0].excerpt.length <= 32);
+  assert.deepEqual(limited.article.sections, []);
 });

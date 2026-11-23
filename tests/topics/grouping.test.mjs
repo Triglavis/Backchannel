@@ -1,12 +1,55 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { groupPages } from "../../topics/grouping.mjs";
+import { reinstatement, otherDevelopments } from "./leadership-fixture.mjs";
 
 const NOW = Date.parse("2026-11-21T07:30:00Z");
 
 function page(id, title, options = {}) {
   return { id, title, domain: id + ".example", postedAt: NOW, posts: [{ id: "hn:" + id }], ...options };
 }
+
+test("reinstatement reporting, reactions, and market consequences name one event", () => {
+  const pages = [...reinstatement, ...otherDevelopments].map((title, i) => page(String(i), title, {
+    vector: [1], domain: i === 1 || i === 5 ? "finance.example" : "paper" + i + ".example",
+  }));
+  pages.push(page("archive", reinstatement[0], { url: "https://archive.example/2022/11/21/reinstatement" }));
+  const groups = groupPages(pages);
+  const story = groups.find(({ pageIds }) => pageIds.includes("0"));
+  assert.deepEqual(story.pageIds.toSorted(), reinstatement.map((_, i) => String(i)));
+  assert([reinstatement[0], reinstatement[3]].includes(story.label), story.label);
+  assert.equal(groups.length, 2 + otherDevelopments.length);
+  assert.deepEqual(groupPages(pages.toReversed()), groups);
+});
+
+test("return to a named leadership role distinguishes the person, organization, office, and time", () => {
+  const pages = [
+    "Harbor Labs reinstates Mira Vale as chief executive",
+    "Investors celebrate Mira Vale’s return to Harbor Labs",
+    "Harbor Labs shares rise after Vale returns as CEO",
+    "Harbor Labs brings Mira Vale back as CEO",
+    "Mira Vale is back as Harbor Labs CEO",
+    "Harbor Labs reinstates Mira Vale as CFO",
+    "Meridian Labs brings Mira Vale back as CEO",
+    "Harbor Labs reinstates Tara Vale as chief executive",
+    "Harbor Labs reinstates Mira Vale as chief executive",
+  ].map((title, i) => page(String(i), title, { publishedAt: i === 8 ? NOW - 7 * 86_400_000 : NOW }));
+  pages.push(page("finance", "Mira Vale returns to Harbor Labs as chief financial officer"));
+  const groups = groupPages(pages);
+  const story = groups.find(({ pageIds }) => pageIds.includes("0"));
+  assert.deepEqual(story.pageIds.toSorted(), ["0", "1", "2", "3", "4"]);
+  assert.equal(groups.length, 5);
+  assert.deepEqual(groups.find(({ pageIds }) => pageIds.includes("5")).pageIds.toSorted(), ["5", "finance"]);
+});
+
+test("a freight market reaction corroborates the grounding decision while a route approval stays separate", () => {
+  const groups = groupPages([
+    page("regulator", "FAA grounds Meridian cargo jets after engine failure"),
+    page("market", "Freight prices climb after FAA grounds Meridian cargo jets"),
+    page("route", "FAA authorizes Meridian cargo jets on new Chile route"),
+  ]);
+  assert.deepEqual(groups.map(({ pageIds }) => pageIds.toSorted()).sort(), [["market", "regulator"], ["route"]]);
+});
 
 test("cross-publisher paraphrases share a specific headline and one primary story", () => {
   const pages = [

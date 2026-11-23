@@ -48,6 +48,82 @@ const STATUS_NOISE = new Set("status designation classification official officia
 const EDITORIAL_FOLLOWUP = /[.!?:]\s+(?:(?:here['’]s|here (?:is|are))\s+(?:how|what|why|who)\b|what (?:now|next|it means|that means|happens next)\b)/i;
 const MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split(" ");
 
+const OFFICE_TERMS = new Set("board chair chairman chairwoman chief company director executive firm officer president".split(" "));
+
+const RETURN_ACTION = /\b(?:reinstat(?:e[ds]?|ement|ing)|returns?|returned|bring(?:s|ing)?|brought|back)\b/i;
+const RETURN_ROLE = /\b(?:CEO|CFO|CTO|COO|chief (?:executive|financial|technology|operating)(?: officer)?|president|chair(?:man|woman|person)?|director|head coach|manager)\b/gi;
+const RETURN_WORD = String.raw`\p{Lu}[\p{L}\p{M}\d]*(?:['-]\p{Lu}[\p{L}\p{M}\d]*)*`;
+const RETURN_NAME = RETURN_WORD + "(?:\\s+(?:(?:of|and|the)\\s+)?" + RETURN_WORD + "){0,5}";
+const RETURN_FIRST = new RegExp("^(" + RETURN_NAME + ")(?![\\p{L}\\d-])", "u");
+const RETURN_LAST = new RegExp("(?:^|[^\\p{L}\\d'-])(" + RETURN_NAME + ")$", "u");
+const RETURN_OWNER = new RegExp("(" + RETURN_NAME + ")(?:'s)?\\s+(?:'[^']{1,32}'\\s+)?(?:board|decision|denies|plans|considers|may|might|could|will|stock|shares|skyrockets?|surges?|soars?|rallies|jumps?|live updates)\\b", "gu");
+
+export function leadershipReturn(title) {
+  if (!RETURN_ACTION.test(title)) return null;
+  const text = title.normalize("NFKC").replace(/[’‘]/g, "'")
+    .replace(/\b(?:a|after|amid|and|as|at|back|before|board|by|chief|decision|for|from|get|has|have|in|is|it|live updates|of|on|says|shares|stock|the|to|with)\b/gi, (word) => word.toLowerCase());
+  const action = /\breinstat(?:e[ds]?|ement|ing)\b/i.exec(text) || RETURN_ACTION.exec(text);
+  const verb = action[0].toLowerCase();
+  const before = text.slice(0, action.index).trimEnd();
+  const after = text.slice(action.index + verb.length).trimStart();
+  const first = (part) => RETURN_FIRST.exec(part)?.[1] || "";
+  const last = (part) => RETURN_LAST.exec(part)?.[1] || "";
+  let person = "", organization = "", tail = after;
+  const subject = before.replace(/'s$|\s+(?:(?:has|have|had) been|is|was|gets?|got)$/i, "").trimEnd();
+  if (/^reinstat(?:es?|ing)$/.test(verb) || /^(?:bring|brought)/.test(verb) || verb === "reinstated" && first(after)) {
+    const object = after.replace(/^back\s+/i, "");
+    const owner = first(object);
+    const possessive = owner && object.slice(owner.length).startsWith("'s ");
+    person = possessive ? first(object.slice(owner.length + 3)) : owner;
+    organization = possessive ? owner : "";
+    tail = person ? object.slice((possessive ? owner.length + 3 : 0) + person.length).trimStart() : after;
+    if (/^(?:bring|brought)/.test(verb) && !/^back\b/i.test(after) && !/^back\b/i.test(tail)) return null;
+    tail = tail.replace(/^back\s*/i, "");
+    organization ||= last(subject);
+  } else {
+    person = last(subject);
+    if (verb === "back" && !/^as\b/i.test(after)) return null;
+    const owner = person && /'s\s*$/.exec(subject.slice(0, -person.length));
+    if (owner) organization = last(subject.slice(0, owner.index));
+  }
+  if (!person) return null;
+  if (/^return/.test(verb) && /^to\s+/i.test(after)) {
+    const destination = after.replace(/^to\s+/i, "");
+    organization = first(destination);
+    tail = destination.slice(organization.length).trimStart();
+    if (!organization || !before.endsWith("'s") && !/^as\s/i.test(tail) || /^(?:for|to)\s/i.test(tail)) return null;
+  }
+  const roleText = /^as\s+(?:(?:the|its|interim|acting|permanent)\s+)*/i.exec(tail);
+  const office = roleText ? tail.slice(roleText[0].length).split(/\s+(?:after|amid|as|at|for|from|of|on|while|with)\b|[;:|.!?]/i)[0] : "";
+  const roles = [...office.matchAll(RETURN_ROLE)].map(([word]) => {
+    const role = word.toLowerCase();
+    return ({ executive: "ceo", financial: "cfo", technology: "cto", operating: "coo" })[role.split(" ")[1]] || role;
+  });
+  if (roles.length) {
+    const role = office.match(RETURN_ROLE)[0];
+    const employer = office.slice(0, office.indexOf(role)).trim();
+    organization ||= first(employer) || first(tail.replace(/^as\s+.+?\s+(?:of|at|for)\s+/i, ""));
+  }
+  organization ||= [...before.matchAll(RETURN_OWNER)].at(-1)?.[1] || (verb === "reinstatement" && [...after.matchAll(RETURN_OWNER)][0]?.[1]) || "";
+  if (!organization || organization === person || /^return|^back/.test(verb) && !roles.length && !before.endsWith("'s")) return null;
+  const roleClaim = before.split(/[;:!?]/).at(-1);
+  const stated = !/\b(?:may|might|could|should|would|will|whether|if|unless|not|never|den(?:y|ies|ied)|reject(?:s|ed)?|against|urges?|asks?|wants?|hopes?|plans?|consider(?:s|ing)?|rumou?red|potential|possible)\b|n't\b/i.test(roleClaim) &&
+    !/\?\s*$/.test(text) && !/\s+(?:if|unless|pending)\s/i.test(tail.split(/[,;:.!]/)[0]);
+  const direct = [organization, person].some((name) => text.toLowerCase().startsWith(name.toLowerCase() + " ")) &&
+    !/\b(?:after|as|on|live updates|return|shares|stock)\b|[;:]/i.test(subject);
+  const year = /\b(?:in|during)\s+((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/.exec(text);
+  return { person: person.toLowerCase(), organization: organization.toLowerCase(), roles, stated, direct,
+    explicit: verb.startsWith("reinstat"), year: year && Number(year[1] || year[2]) };
+}
+
+export function sameLeadershipReturn(a, b) {
+  if (!a || !b || !a.stated || !b.stated || a.organization !== b.organization ||
+    a.year && b.year && a.year !== b.year ||
+    a.roles.length && b.roles.length && !a.roles.some((role) => b.roles.includes(role))) return false;
+  return a.person === b.person || !b.person.includes(" ") && a.person.endsWith(" " + b.person) ||
+    !a.person.includes(" ") && b.person.endsWith(" " + a.person);
+}
+
 function titleWords(title) {
   return title.match(/[\p{L}\p{N}]+/gu) || [];
 }
@@ -85,7 +161,7 @@ export function informativeTopicAlias(label, storyLabel) {
   const content = words.filter((word) => !FUNCTION_WORDS.has(word));
   if (!content.length || /^(?:loses|regains|retains|confirms|suggests|reveals)$/.test(words.at(-1))) return false;
   if (content.some((word) => REPORTING_VERB.test(word)) && content.every((word) => REPORTING_SOURCE.test(word) || REPORTING_VERB.test(word))) return false;
-  return !storyLabel || !statusChange(eventSpelling(label)) || compatibleStatusTitles(storyLabel, label);
+  return !storyLabel || !statusChange(eventSpelling(label)) || compatibleStoryTitles(storyLabel, label);
 }
 
 const TOPIC_ORDER = { story: 0, topic: 1, coverage: 2 };
@@ -96,7 +172,7 @@ function labelKey(label) {
 
 function relatedTopics(left, right, shared) {
   if (left.curated || right.curated) return false;
-  if (left.kind !== "topic" && right.kind !== "topic" && !compatibleStatusTitles(left.label, right.label)) return false;
+  if (left.kind !== "topic" && right.kind !== "topic" && !compatibleStoryTitles(left.label, right.label)) return false;
   const sameKind = left.kind === right.kind;
   const exact = left.phrase === right.phrase;
   if (left.kind === "coverage" || right.kind === "coverage") {
@@ -120,7 +196,7 @@ function relatedHeadlines(left, right) {
 }
 
 export function relatedStoryTitles(left, right) {
-  return compatibleStatusTitles(left, right) && relatedHeadlines(facts({ title: left.normalize("NFKC") }), facts({ title: right.normalize("NFKC") }));
+  return compatibleStoryTitles(left, right) && relatedHeadlines(facts({ title: left.normalize("NFKC") }), facts({ title: right.normalize("NFKC") }));
 }
 
 export function coalesceTopics(topics) {
@@ -301,8 +377,10 @@ function sameStatusChange(left, right) {
     sharedCount(left.attribute, right.attribute) === left.attribute.size);
 }
 
-export function compatibleStatusTitles(left, right) {
+export function compatibleStoryTitles(left, right) {
   if (left === right) return true;
+  const aReturn = leadershipReturn(left), bReturn = leadershipReturn(right);
+  if (aReturn || bReturn) return sameLeadershipReturn(aReturn, bReturn);
   const a = statusChange(eventSpelling(left));
   const b = statusChange(eventSpelling(right));
   return (!a && !b) || sameStatusChange(a, b);
@@ -356,14 +434,16 @@ function eventPage(page) {
   for (const number of item.lower.filter((word) => /^\d+$/.test(word))) headlineTerms.add(number);
   for (const number of otherWords.filter((word) => /^\d+$/.test(word))) contextEvidence.add(number);
   const status = statusChange(normalized);
-  const eventAt = [page.publishedAt, status && datedArticlePath(page.url), page.firstPostedAt, page.postedAt]
+  const leadership = leadershipReturn(title);
+  const eventAt = [page.publishedAt, (status || leadership) && datedArticlePath(page.url), page.firstPostedAt, page.postedAt]
     .map((value) => typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN).find(Number.isFinite);
   const years = new Set(Array.from(title.matchAll(/\b(?:in|during)\s+(?:\p{L}+\s+)?((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/giu),
     ([, described, dated]) => described || dated));
   return {
     ...item, articleKey: publisherArticleKey(page.url), heading: item.lower.join(" "),
     eventTerms, actions, details, contextTerms, marketMove, marketNames, versions,
-    names: headline.names, incident, stage: offeringStage(title), status, eventAt, years, instructional: INSTRUCTIONAL.test(title),
+    names: headline.names, incident, stage: offeringStage(title), status, leadership, hasOffice: Boolean(title.match(RETURN_ROLE)),
+    eventAt, years, instructional: INSTRUCTIONAL.test(title),
     headlineTerms, contextEvidence, namedEvidence, qualified: QUALIFIED_CLAIM.test(title),
   };
 }
@@ -394,6 +474,17 @@ function eventScore(left, right) {
   const matchingStatus = sameStatusChange(left.status, right.status);
   const elapsed = Math.abs(left.eventAt - right.eventAt);
   const sameHeadline = left.heading === right.heading && left.eventTerms.size >= 2;
+  if (left.leadership && right.leadership || left.leadership?.explicit || right.leadership?.explicit ||
+    left.leadership?.roles.length || right.leadership?.roles.length) {
+    if (elapsed > EVENT_WINDOW) return 0;
+    if (left.leadership?.year && !right.leadership?.year && left.leadership.year !== new Date(right.eventAt).getUTCFullYear() ||
+      right.leadership?.year && !left.leadership?.year && right.leadership.year !== new Date(left.eventAt).getUTCFullYear()) return 0;
+    if (sameLeadershipReturn(left.leadership, right.leadership)) {
+      return 3 + Number(left.leadership.person === right.leadership.person) +
+        Number(Boolean(left.leadership.roles.length && right.leadership.roles.length));
+    }
+    return sameHeadline ? 2 : 0;
+  }
   if (left.status || right.status) {
     const [dated, other] = left.years.size ? [left, right] : [right, left];
     if (dated.years.size && !other.years.size && !dated.years.has(String(new Date(other.eventAt).getUTCFullYear()))) return 0;
@@ -408,6 +499,8 @@ function eventScore(left, right) {
   if (sameHeadline) return 2;
   if (left.domain === right.domain && (!left.articleKey || left.articleKey !== right.articleKey)) return 0;
   if (left.stage && right.stage && left.stage !== right.stage) return 0;
+  if ((left.hasOffice || right.hasOffice) && sharedCount(left.names, right.names) >= 2 &&
+    ![...left.eventTerms].some((term) => right.eventTerms.has(term) && !left.names.has(term) && !right.names.has(term) && !OFFICE_TERMS.has(term))) return 0;
 
   const matchesAction = sharedCount(left.actions, right.actions);
   if ((left.actions.size || right.actions.size) && !matchesAction) return 0;
@@ -514,6 +607,16 @@ function storyGroup(cluster, subjects) {
       headings.sort((a, b) => titleWords(a.text).length - titleWords(b.text).length);
       lead = headings[0].page;
       label = headings[0].text;
+      pages.splice(pages.indexOf(lead), 1);
+      pages.unshift(lead);
+    }
+  }
+  if (pages.length > 1 && lead.leadership) {
+    const reports = pages.filter(({ leadership }) => leadership?.direct && leadership.roles.length);
+    reports.sort((a, b) => Number(b.leadership.explicit) - Number(a.leadership.explicit) || a.title.length - b.title.length);
+    if (reports.length) {
+      lead = reports[0];
+      label = lead.title;
       pages.splice(pages.indexOf(lead), 1);
       pages.unshift(lead);
     }

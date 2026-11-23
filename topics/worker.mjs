@@ -2,7 +2,8 @@ import { canonicalURL, fetchFeeds, topicPageEvidence, usableTopicTitle } from ".
 import { groupPages } from "./grouping.mjs";
 import { buildTopicsIndex, resolvePublishedTopic, retainedEvidenceKeys, RETENTION_MS } from "./index.mjs";
 import { addTopicArtwork } from "./artwork.mjs";
-import { ARTICLE_PIPELINE_VERSION, MAX_ARTICLE_SOURCES, articleDiscussions, articleSourceKey, buildTopicArticle } from "./article.mjs";
+import { ARTICLE_PIPELINE_VERSION, MAX_ARTICLE_SOURCES, articleDiscussionKey, articleDiscussions, articleFetchKeys,
+  articleSourceKey, buildTopicArticle, isArticlePublisher } from "./article.mjs";
 import { articleMembers } from "./article-membership.mjs";
 import { prepareTopicDecision } from "./decisions.mjs";
 import { serveTopicReviewPage } from "./review-page.mjs";
@@ -15,7 +16,9 @@ const INTEREST_WINDOW_PER_FEED = 4;
 const COVERAGE_PAGE_SIZE = 48;
 const COVERAGE_PAGE_BYTES = 4 * 1024 * 1024;
 const ARTICLE_BYTES = 192 * 1024;
-const ARTICLE_SELECTION_VERSION = ARTICLE_PIPELINE_VERSION + "/members-v1";
+const ARTICLE_SELECTION_VERSION = ARTICLE_PIPELINE_VERSION + "/public-discussion-rank-v2";
+const ARTICLE_THREAD_BATCH = 4096;
+const ARTICLE_LOOKUP_BYTES = 1024 * 1024;
 const ARTICLE_LEASE_MS = 45_000;
 const ARTICLE_WAIT_MS = 900;
 const ARTICLE_RETRY_MS = 15 * 60_000;
@@ -464,66 +467,147 @@ async function articleCandidates(db, index, topic) {
   const members = eligible.map((page) => ({ ...page, family: articleSourceKey("https://" + page.key) })).filter(({ family }) => family)
     .sort((a, b) => a.family.localeCompare(b.family) || a.key.length - b.key.length || a.key.localeCompare(b.key));
   const ids = await Promise.all(members.map(({ key }) => fingerprint(key)));
+  const stored = new Map();
+  for (const batch of batches(ids, 512)) {
+    const { results } = await db.prepare("SELECT p.id, p.url FROM json_each(?) AS ids JOIN pages AS p ON p.id = ids.value")
+      .bind(JSON.stringify(batch)).all();
+    for (const { id, url } of results) stored.set(id, url);
+  }
   const families = new Map();
-  return members.map(({ key, family, posts, topicIds }, i) => {
-    if (!families.has(family)) families.set(family, families.size);
-    return { key, id: ids[i], family: families.get(family), threads: posts?.map(([id]) => id) ?? null,
-      priority: topicIds.includes(topic.id) ? 0 : 1 };
-  });
+  const byPage = new Map();
+  for (const [i, { key, family, topicIds, posts }] of members.entries()) {
+    const id = ids[i], url = stored.get(id);
+    if (!url || canonicalURL(url)?.key !== key) continue;
+    if (!families.has(family)) families.set(family, { id: families.size, key: family, threads: new Map() });
+    const group = families.get(family);
+    const candidate = { id, url, family: group.id, threads: [], discussionOnly: !isArticlePublisher(url), priority: topicIds.includes(topic.id) ? 0 : 1 };
+    byPage.set(id, { candidate, group, key, host: new URL(url).host, allowed: posts && new Set(posts.map(([id]) => id)) });
+  }
+  const remember = (entry, post) => {
+    const key = articleDiscussionKey(post);
+    if (!key) return;
+    const { group, candidate } = entry;
+    if (key === entry.key || (key.startsWith(entry.host + "/") && articleSourceKey(post.url) === group.key)) candidate.discussionOnly = true;
+    if (!group.threads.has(key)) group.threads.set(key, group.threads.size);
+    candidate.threads.push([post.id, group.threads.get(key)]);
+  };
+  const published = new Set([...byPage.values()].flatMap(({ allowed }) => allowed ? [...allowed] : []));
+  for (const batch of batches([...published], ARTICLE_THREAD_BATCH)) {
+    let offset = 0;
+    while (offset < batch.length) {
+      const { results } = await db.prepare(`
+        WITH matches AS (
+          SELECT ids.key AS ordinal, s.id, s.page_id, s.url, s.source, row_number() OVER by_id AS position,
+            SUM(length(CAST(s.id || s.page_id || s.url || s.source AS BLOB)) + 96) OVER by_id AS bytes
+          FROM json_each(?) AS ids JOIN posts AS s ON s.id = ids.value WINDOW by_id AS (ORDER BY ids.key)
+        )
+        SELECT ordinal, id, page_id, url, source FROM matches WHERE bytes <= ? OR position = 1 ORDER BY ordinal
+      `).bind(JSON.stringify(batch.slice(offset)), ARTICLE_LOOKUP_BYTES).all();
+      if (!results.length) break;
+      for (const post of results) {
+        const entry = byPage.get(post.page_id);
+        if (entry?.allowed?.has(post.id)) remember(entry, post);
+      }
+      offset += results.at(-1).ordinal + 1;
+    }
+  }
+  const legacy = [...byPage].filter(([, entry]) => !entry.allowed).map(([id]) => id);
+  if (legacy.length) {
+    let cursor = 0;
+    while (true) {
+      const { results } = await db.prepare(`
+        SELECT s.rowid, s.id, s.page_id, s.url, s.source FROM json_each(?) AS pages JOIN posts AS s ON s.page_id = pages.value
+        WHERE s.rowid > ? ORDER BY s.rowid LIMIT ?
+      `).bind(JSON.stringify(legacy), cursor, 512).all();
+      for (const post of results) remember(byPage.get(post.page_id), post);
+      if (results.length < 512) break;
+      cursor = results.at(-1).rowid;
+    }
+  }
+  return [...byPage.values()].map(({ candidate }) => candidate);
+}
+
+function articleThreadQuery(db, candidates, query) {
+  const chunks = [];
+  let rows = [], bytes = 2;
+  for (const [ordinal, { id, url, family, threads, priority, discussionOnly }] of candidates.entries()) {
+    for (const group of threads.length ? batches(threads, 512) : [[]]) {
+      const row = JSON.stringify([ordinal, id, url, family, group, priority, +discussionOnly]);
+      const size = utf8.encode(row).byteLength + 1;
+      if (rows.length && bytes + size > ARTICLE_LOOKUP_BYTES) {
+        chunks.push("[" + rows.join(",") + "]");
+        rows = [];
+        bytes = 2;
+      }
+      rows.push(row);
+      bytes += size;
+    }
+  }
+  chunks.push("[" + rows.join(",") + "]");
+  const inputs = chunks.map(() => "SELECT value FROM json_each(?)").join(" UNION ALL ");
+  return db.prepare(`WITH inputs AS (${inputs}), wanted AS MATERIALIZED (
+    SELECT i.value->>0 AS ordinal, p.id, p.domain, i.value->>3 AS family, i.value->>4 AS threads,
+      i.value->>5 AS priority, i.value->>6 AS discussion_only
+    FROM inputs AS i JOIN pages AS p ON p.id = i.value->>1 AND p.url = i.value->>2
+  ), copies AS (
+    SELECT w.family, s.id, s.posted_at, s.comments,
+      MIN(s.posted_at) OVER (PARTITION BY w.family, thread.value->>1) AS first_shared,
+      ROW_NUMBER() OVER (PARTITION BY w.family, thread.value->>1 ORDER BY s.changed_at DESC, s.posted_at DESC, s.id) AS copy
+    FROM wanted AS w CROSS JOIN json_each(w.threads) AS thread CROSS JOIN posts AS s ON s.id = thread.value->>0 AND s.page_id = w.id
+  ), ${query}`).bind(...chunks);
 }
 
 async function articleEvidence(db, wanted) {
   if (!wanted.length) return { pages: [], selected: [] };
-  const parameters = wanted.map(({ id, family, threads, priority }) => [id, family, threads, priority]);
-  const { results } = await db.prepare(`
-    WITH wanted AS (
-      SELECT key AS ordinal, value->>0 AS id, value->>1 AS family, value->>2 AS threads, value->>3 AS priority FROM json_each(?)
-    ), candidates AS MATERIALIZED (
-      SELECT w.ordinal, w.family, w.priority, p.id, p.domain, ${FIRST_ARTICLE_SHARE} AS first_shared
-      FROM wanted AS w JOIN pages AS p ON p.id = w.id
+  const { results } = await articleThreadQuery(db, wanted, `
+    activity AS (
+      SELECT family, MIN(first_shared) AS shared, COUNT(*) AS discussions,
+        MIN(9007199254740991, TOTAL(CASE WHEN comments BETWEEN 0 AND 9007199254740991 AND typeof(comments) = 'integer' THEN comments END)) AS replies
+      FROM copies WHERE copy = 1 GROUP BY family
+    ), members AS (
+      SELECT DISTINCT ordinal, id, domain, family, priority, discussion_only FROM wanted
     ), families AS (
-      SELECT family, MIN(priority) AS priority, MIN(domain) AS domain, MIN(first_shared) AS shared FROM candidates GROUP BY family
+      SELECT w.family, MIN(w.priority) AS priority, MIN(w.domain) AS domain, MAX(w.discussion_only) AS discussion_only,
+        a.shared, COALESCE(a.discussions, 0) AS discussions, COALESCE(a.replies, 0) AS replies
+      FROM members AS w LEFT JOIN activity AS a ON a.family = w.family GROUP BY w.family
     ), ranked AS (
-      SELECT *, row_number() OVER (PARTITION BY priority, domain ORDER BY shared DESC, family) AS publisher_rank FROM families
+      SELECT *, row_number() OVER (PARTITION BY discussion_only, domain ORDER BY replies DESC, discussions DESC, priority, shared DESC, family) AS publisher_rank
+      FROM families
     ), picked AS (
-      SELECT * FROM ranked ORDER BY priority, publisher_rank, shared DESC, family LIMIT ?
+      SELECT * FROM ranked ORDER BY discussion_only, publisher_rank, replies DESC, discussions DESC, priority, shared DESC, family LIMIT ${MAX_ARTICLE_SOURCES}
     ), variants AS (
-      SELECT c.ordinal, c.id, p.family, p.shared, p.priority, p.publisher_rank,
-        row_number() OVER (PARTITION BY c.family ORDER BY c.priority, c.ordinal) AS variant
-      FROM picked AS p JOIN candidates AS c ON c.family = p.family
+      SELECT w.ordinal, w.id, f.family, f.shared, f.priority, f.discussion_only, f.replies, f.discussions,
+        row_number() OVER (PARTITION BY w.family ORDER BY w.priority, w.ordinal) AS variant
+      FROM picked AS f JOIN members AS w ON w.family = f.family
     )
-    SELECT v.ordinal, v.family, v.shared, p.url, p.domain, p.title, p.description
+    SELECT v.ordinal, v.family, v.shared, v.discussion_only, v.replies, v.discussions, p.url, p.domain, p.title, p.description
     FROM variants AS v JOIN pages AS p ON p.id = v.id WHERE v.variant <= 8
-    ORDER BY v.priority, v.publisher_rank, v.shared DESC, v.family, v.variant
-  `).bind(JSON.stringify(parameters), MAX_ARTICLE_SOURCES).all();
+    ORDER BY v.priority, v.shared DESC, v.family, v.variant
+  `).all();
 
   const pages = new Map();
-  const selected = [];
-  for (const { ordinal, family, shared, url, domain, title, description } of results) {
+  for (const { ordinal, family, shared, discussion_only, replies, discussions, url, domain, title, description } of results) {
     const member = wanted[ordinal];
-    if (canonicalURL(url)?.key !== member.key || !articleSourceKey(url)) continue;
     let page = pages.get(family);
     if (!page) {
-      page = { url, domain, title, description, formal: member.priority === 0, firstPostedAt: shared, postedAt: shared, alternateTitles: [], posts: [] };
+      page = { url, domain, title, description, formal: member.priority === 0, discussionOnly: !!discussion_only,
+        replyCount: replies, discussionCount: discussions, firstPostedAt: shared, postedAt: shared, alternateTitles: [], posts: [] };
       pages.set(family, page);
     } else {
       if (member.priority === 0) page.formal = true;
       page.alternateTitles.push(title);
       if (!usableTopicTitle(page.description, domain) && usableTopicTitle(description, domain)) page.description = description;
     }
-    selected.push(wanted[ordinal]);
   }
+  const selected = wanted.filter(({ family }) => pages.has(family));
   if (!selected.length) return { pages: [], selected };
-  const threads = await db.prepare(`
-    WITH wanted AS (SELECT value->>'id' AS id, value->>'family' AS family, value->>'threads' AS allowed FROM json_each(?)), copies AS (
-      SELECT w.family, s.*, row_number() OVER (PARTITION BY w.family, s.url ORDER BY s.posted_at DESC, s.changed_at DESC, s.id) AS copy
-      FROM wanted AS w JOIN posts AS s ON s.page_id = w.id
-      WHERE w.allowed IS NULL OR s.id IN (SELECT value FROM json_each(w.allowed))
-    ), ranked AS (
-      SELECT *, row_number() OVER (PARTITION BY family ORDER BY posted_at DESC, id) AS rank FROM copies WHERE copy = 1
+  const threads = await articleThreadQuery(db, selected, `
+    ranked AS (
+      SELECT family, id, row_number() OVER (PARTITION BY family ORDER BY posted_at DESC, id) AS rank FROM copies WHERE copy = 1
     )
-    SELECT family, id, source, title, url, posted_at AS postedAt, comments FROM ranked WHERE rank <= 12 ORDER BY family, rank
-  `).bind(JSON.stringify(selected)).all();
+    SELECT r.family, s.id, s.source, s.title, s.url, s.posted_at AS postedAt, s.comments
+    FROM ranked AS r JOIN posts AS s ON s.id = r.id WHERE r.rank <= 12 ORDER BY r.family, r.rank
+  `).all();
   for (const { family, ...post } of threads.results) {
     const page = pages.get(family);
     if (!page.posts.length) page.postedAt = post.postedAt;
@@ -534,13 +618,14 @@ async function articleEvidence(db, wanted) {
 
 async function readArticleInput(db, id) {
   const lookup = await db.prepare(`
-    SELECT g.generation, s.topic_id, s.label, s.members, EXISTS(SELECT 1 FROM topics_index WHERE id = 1) AS published
+    SELECT g.generation, s.topic_id, s.label, s.members, EXISTS(SELECT 1 FROM topics_index WHERE id = 1) AS published,
+      COALESCE((SELECT MAX(changed_at) FROM posts), 0) AS changed_at
     FROM topic_article_publication AS g LEFT JOIN topic_article_selections AS r ON r.request_id = ? AND r.generation = g.generation
     LEFT JOIN topic_article_selections AS s ON s.request_id = r.topic_id AND s.generation = g.generation WHERE g.id = 1
   `).bind(id).first();
   const cached = lookup.members && JSON.parse(lookup.members);
   let topic, pages;
-  if (cached?.version === ARTICLE_SELECTION_VERSION) {
+  if (cached?.version === ARTICLE_SELECTION_VERSION && (cached.partialSince === undefined || cached.partialSince === lookup.changed_at)) {
     topic = { id: lookup.topic_id, label: lookup.label };
     ({ pages } = await articleEvidence(db, cached.pages));
   } else {
@@ -551,8 +636,10 @@ async function readArticleInput(db, id) {
     const evidence = await articleEvidence(db, candidates);
     pages = evidence.pages;
     if (lookup.published && pages.length) {
-      const families = new Set(evidence.selected.map(({ family }) => family));
-      const members = JSON.stringify({ version: ARTICLE_SELECTION_VERSION, pages: candidates.filter(({ family }) => families.has(family)) });
+      let members = JSON.stringify({ version: ARTICLE_SELECTION_VERSION, pages: candidates });
+      if (utf8.encode(members).byteLength > ARTICLE_BYTES) {
+        members = JSON.stringify({ version: ARTICLE_SELECTION_VERSION, pages: evidence.selected, partialSince: lookup.changed_at });
+      }
       if (utf8.encode(members).byteLength <= ARTICLE_BYTES) {
         const addresses = [topic.id, ...Object.keys(index.redirects || {}).filter((alias) => index.redirects[alias] === topic.id)];
         await db.prepare(`
@@ -565,7 +652,7 @@ async function readArticleInput(db, id) {
       }
     }
   }
-  const revision = await fingerprint(JSON.stringify([ARTICLE_PIPELINE_VERSION, topic.id, topic.label,
+  const revision = await fingerprint(JSON.stringify([ARTICLE_SELECTION_VERSION, topic.id, topic.label, articleFetchKeys(topic, pages),
     pages.map(({ url, title, domain, formal, description, firstPostedAt }) => [url, title, domain, formal, description, firstPostedAt])]));
   return { topic, pages, revision, generation: lookup.generation };
 }
@@ -612,6 +699,20 @@ async function articleResponse(request, input, row) {
   return new Response(body, { headers });
 }
 
+function reportingCoverage(article) {
+  const paragraphs = article.sections.flatMap((section) => section.paragraphs);
+  const sources = new Set(paragraphs.flatMap((paragraph) => paragraph.sourceIds));
+  return [sources.size, Number(article.method === "synthesis"), paragraphs.length, article.images?.length || 0, article.timeline.length];
+}
+
+function keepStoredReporting(body, candidate) {
+  const prior = reportingCoverage(JSON.parse(body)), next = reportingCoverage(candidate);
+  for (let i = 0; i < prior.length; i++) {
+    if (prior[i] !== next[i]) return prior[i] > next[i];
+  }
+  return true;
+}
+
 async function generateArticle(request, env, id, input, owner, claim) {
   const db = env.TOPICS_DB;
   let body = claim.body;
@@ -625,8 +726,8 @@ async function generateArticle(request, env, id, input, owner, claim) {
     const content = JSON.stringify(article);
     const hasParagraphs = article.sections.some(({ paragraphs }) => paragraphs.length);
     if (article.sources.length && (hasParagraphs || article.method === "coverage") && utf8.encode(content).byteLength <= ARTICLE_BYTES) {
-      body = content;
       retry = status === "unavailable" || status === "rejected";
+      if (!retry || !body || !keepStoredReporting(body, article)) body = content;
     }
   } catch (error) {
     console.warn("Topic article generation unavailable", error.name);

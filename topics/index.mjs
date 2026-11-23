@@ -1,5 +1,5 @@
 import { canonicalURL, publisherArticleKey, topicPageEvidence, usableTopicTitle } from "./feeds.mjs";
-import { coalesceTopics, compatibleStatusTitles, groupPages, informativeTopicAlias, relatedStoryTitles } from "./grouping.mjs";
+import { coalesceTopics, compatibleStoryTitles, groupPages, informativeTopicAlias, leadershipReturn, relatedStoryTitles, sameLeadershipReturn } from "./grouping.mjs";
 import { topicArtworkFitsEdition } from "./artwork.mjs";
 import { applyTopicDecisions } from "./decisions.mjs";
 
@@ -51,7 +51,7 @@ function aliasKey(label) {
 
 function appendAliases(topic, previous) {
   if (!topic.curated && !previous.curated && topic.kind !== "topic" && previous.kind !== "topic" &&
-    !compatibleStatusTitles(topic.label, previous.label)) return;
+    !compatibleStoryTitles(topic.label, previous.label)) return;
   topic.aliases = [...(topic.aliases || []), previous.label, ...(previous.aliases || [])];
 }
 
@@ -100,6 +100,11 @@ function selectRetainedWindow(groups, selected, limit, now) {
   }
 }
 
+function returnCandidateKey(title) {
+  const claim = leadershipReturn(title);
+  return claim?.stated ? claim.organization + "\n" + claim.person.split(" ").at(-1) : "";
+}
+
 export function retainedEvidenceKeys(index, timestamps, now, limit = MAX_RETAINED_EVIDENCE) {
   const stories = new Map(index.topics.filter(({ kind, curated }) => kind !== "topic" && !curated)
     .map((topic) => [topic.id, { topic, keys: [] }]));
@@ -112,25 +117,38 @@ export function retainedEvidenceKeys(index, timestamps, now, limit = MAX_RETAINE
   }
   const invalid = [];
   const multiple = [];
+  const returns = new Map();
   for (const story of stories.values()) {
     if (story.keys.some((key) => !usableRetainedTitle(story.topic.label, key))) invalid.push(story);
-    else if (story.keys.length > 1) multiple.push(story);
+    else {
+      const key = returnCandidateKey(story.topic.label);
+      if (key && story.keys.length) {
+        if (!returns.has(key)) returns.set(key, { keys: [] });
+        returns.get(key).keys.push(...story.keys);
+      }
+      if (story.keys.length > 1) multiple.push(story);
+    }
   }
   multiple.sort((a, b) => a.topic.label.localeCompare(b.topic.label));
   const selected = new Set();
   selectRetainedWindow(invalid, selected, limit, now);
+  selectRetainedWindow([...returns.values()].sort((a, b) => b.keys.length - a.keys.length), selected, limit, now);
   selectRetainedWindow(multiple, selected, limit, now);
   return [...selected];
 }
 
 function comparisonPages(sourcePages, snapshot) {
-  const pages = new Map(sourcePages.map((page) => [page.id, page]));
+  const sources = new Map(sourcePages.map((page) => [page.id, page]));
   const current = new Map(snapshot.pages.map((page) => [page.id, page]));
-  const groups = snapshot.topics.filter(({ kind, pageIds }) => kind !== "topic" && pageIds?.length > 1)
-    .sort((a, b) => Number(b.pageIds.some((id) => pages.has(id))) - Number(a.pageIds.some((id) => pages.has(id))));
-  for (const { pageIds } of groups) {
+  const sourceEvents = new Map(sourcePages.map((page) => [page.id, returnCandidateKey(page.title)]));
+  const events = new Set([...sourceEvents.values()].filter(Boolean));
+  const groups = snapshot.topics.filter(({ kind, pageIds }) => kind !== "topic" && pageIds?.length);
+  const matching = groups.filter(({ label }) => events.has(returnCandidateKey(label)));
+  const active = new Set(matching.map(({ label }) => returnCandidateKey(label)));
+  const pages = new Map(sourcePages.filter(({ id }) => active.has(sourceEvents.get(id))).map((page) => [page.id, page]));
+  const add = ({ pageIds }) => {
     const extra = pageIds.filter((id) => !pages.has(id));
-    if (extra.length > MAX_RETAINED_EVIDENCE - pages.size) continue;
+    if (extra.length > MAX_RETAINED_EVIDENCE - pages.size) return;
     for (const id of extra) {
       const page = current.get(id);
       const key = page && canonicalURL(page.url)?.key;
@@ -139,7 +157,14 @@ function comparisonPages(sourcePages, snapshot) {
         pages.set(id, { ...page, key, postedAt, posts: page.posts || [] });
       }
     }
+  };
+  for (const group of matching) add(group);
+  for (const page of sourcePages) {
+    if (pages.size >= MAX_RETAINED_EVIDENCE) break;
+    if (!pages.has(page.id)) pages.set(page.id, page);
   }
+  for (const group of groups.filter(({ pageIds }) => pageIds.length > 1)
+    .sort((a, b) => Number(b.pageIds.some((id) => sources.has(id))) - Number(a.pageIds.some((id) => sources.has(id))))) add(group);
   return [...pages.values()];
 }
 
@@ -173,9 +198,8 @@ function articleCopyGroups(definitions, assignments, members) {
   return groups;
 }
 
-function reconcilePublishedStories({ definitions, assignments, sourcePages, detached, redirects, snapshot, retained }) {
+function reconcilePublishedStories({ definitions, assignments, sourcePages, detached, redirects, snapshot, history }) {
   const members = topicMembers(assignments);
-  const historical = topicMembers(retained);
   const archived = new Set(sourcePages.map(({ id }) => id));
   const eligible = archived.size ? comparisonPages(sourcePages, snapshot).filter(({ key }) => {
     const page = assignments.get(key);
@@ -195,14 +219,23 @@ function reconcilePublishedStories({ definitions, assignments, sourcePages, deta
     if (!prior.size && ![...grouped].some((key) => detached.has(key))) continue;
     // Reclassify a sound published story only when all of its links support the same development.
     if ([...prior].some((id) => [...members.get(id)].some((key) => !grouped.has(key)))) continue;
-    const existing = [...prior].sort((a, b) => (historical.get(b)?.size || 0) - (historical.get(a)?.size || 0) ||
-      members.get(b).size - members.get(a).size || a.localeCompare(b));
-    const id = existing.find((id) => definitions.get(id).kind === "story" || group.kind === "coverage") || group.id;
+    const claim = leadershipReturn(group.label);
+    if (claim?.stated && grouped.size > 1) for (const [id, previous] of history) {
+      if (!sameLeadershipReturn(claim, previous.leadership) || [...previous.keys].some((key) => !grouped.has(key)) ||
+        [...(members.get(id) || [])].some((key) => !grouped.has(key))) continue;
+      prior.add(id);
+    }
+    const existing = [...prior].sort((a, b) => (history.get(b)?.keys.size || 0) - (history.get(a)?.keys.size || 0) ||
+      (members.get(b)?.size || 0) - (members.get(a)?.size || 0) || a.localeCompare(b));
+    const definition = (id) => definitions.get(id) || history.get(id)?.topic;
+    const id = existing.find((id) => definition(id).kind === "story" || group.kind === "coverage") || group.id;
     if (!prior.has(id) && members.has(id)) continue;
-    const former = prior.has(id) ? definitions.get(id) : undefined;
+    const former = prior.has(id) ? definition(id) : undefined;
     const topic = { ...former, id, kind: former?.kind || group.kind, label: group.label, aliases: group.aliases };
+    redirects.delete(id);
     for (const old of prior) {
-      appendAliases(topic, definitions.get(old));
+      appendAliases(topic, definition(old));
+      if (history.has(old) && history.get(old).topic !== definition(old)) appendAliases(topic, history.get(old).topic);
       if (old !== id) {
         redirects.set(old, id);
         members.delete(old);
@@ -232,12 +265,13 @@ function retainStoryIds(definitions, retained, live) {
       const topic = definitions.get(candidate);
       const size = current.get(candidate).size;
       if (!topic || topic.kind === "topic") continue;
-      if (!former.curated && !topic.curated && !compatibleStatusTitles(former.label, topic.label)) continue;
+      if (!former.curated && !topic.curated && !compatibleStoryTitles(former.label, topic.label)) continue;
       const exact = [former.label, ...(former.aliases || [])].some((label) => aliasKey(label) === aliasKey(topic.label));
       const contained = shared >= 2 && shared === Math.min(members.size, size);
       const corroborated = shared >= 2 && shared * 2 > Math.max(members.size, size) &&
         (exact || relatedStoryTitles(former.label, topic.label));
-      const single = Math.min(members.size, size) === 1 && (former.curated || exact);
+      const single = Math.min(members.size, size) === 1 && (former.curated || exact ||
+        sameLeadershipReturn(leadershipReturn(former.label), leadershipReturn(topic.label)));
       if (contained || corroborated || single) candidates.push({ id, candidate, shared, similarity: shared / Math.max(members.size, size) });
     }
   }
@@ -282,8 +316,11 @@ function migrateRetainedTopics(definitions, retained, live) {
     const matches = live.get(shared[0]).topicIds.filter((replacement) => {
       const currentTopic = definitions.get(replacement);
       const current = liveMembers.get(replacement);
-      if (!currentTopic || (formerTopic.kind === "topic") !== (currentTopic.kind === "topic") ||
-        shared.length < current.size * 0.75 || !shared.every((key) => current.has(key)) ||
+      if (!currentTopic || currentTopic.curated || (formerTopic.kind === "topic") !== (currentTopic.kind === "topic") ||
+        !shared.every((key) => current.has(key))) return false;
+      if (formerTopic.kind !== "topic" && shared.length === previous.size &&
+        sameLeadershipReturn(leadershipReturn(formerTopic.label), leadershipReturn(currentTopic.label))) return true;
+      if (shared.length < current.size * 0.75 ||
         (shared.length < 2 && aliasKey(formerTopic.label) !== aliasKey(currentTopic.label))) return false;
       return coalesceTopics([
         { ...formerTopic, pageIds: [...previous] }, { ...currentTopic, pageIds: [...current] },
@@ -327,6 +364,7 @@ export function buildTopicsIndex(snapshot, previous, decisions = [], threadUpdat
   const live = new Map();
   const redirects = new Map();
   const detached = new Set();
+  const history = new Map();
 
   if (previous) {
     const published = JSON.parse(previous.body);
@@ -343,8 +381,12 @@ export function buildTopicsIndex(snapshot, previous, decisions = [], threadUpdat
     for (const [id, target] of Object.entries(published.redirects || {})) {
       if (!retired.has(id) && !retired.has(target)) redirects.set(id, target);
     }
+    const historical = topicMembers(retained);
     for (const topic of published.topics) {
       if (retired.has(topic.id)) continue;
+      const keys = historical.get(topic.id);
+      if (keys) history.set(topic.id, { topic, keys, leadership: !topic.curated && topic.kind !== "topic" &&
+        ![...keys].some((key) => retained.get(key).reviewed) && leadershipReturn(topic.label) });
       const active = definitions.get(topic.id);
       if (active) {
         appendAliases(active, topic);
@@ -382,7 +424,7 @@ export function buildTopicsIndex(snapshot, previous, decisions = [], threadUpdat
     }
   }
   const manualImages = applyTopicDecisions(definitions, assignments, decisions, redirects);
-  reconcilePublishedStories({ definitions, assignments, sourcePages: previous?.sourcePages || [], detached, redirects, snapshot, retained });
+  reconcilePublishedStories({ definitions, assignments, sourcePages: previous?.sourcePages || [], detached, redirects, snapshot, history });
   const members = topicMembers(assignments);
   const consolidated = coalesceTopics([...definitions.values()].filter(({ id }) => members.has(id))
     .map((topic) => ({ ...topic, pageIds: [...members.get(topic.id)] })));
