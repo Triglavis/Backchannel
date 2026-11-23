@@ -3274,9 +3274,9 @@ test("opening a topic clears its unread dot across Reader views and reloads whil
 
 const observatory = { id: "story:telescope-mirror", label: "Observatory mirror repairs", kind: "story" };
 
-function launchTwoVisitTopics({ stored, ...options } = {}) {
+function launchTwoVisitTopics({ stored, redirects, ...options } = {}) {
 	const mirror = { ...guide, id: 9363, url: "https://optics.example.org/mirror", title: "New mirror arrives at the hilltop observatory" };
-	const fixture = { ...catalog, topics: [...catalog.topics, observatory], pages: [...catalog.pages,
+	const fixture = { ...catalog, redirects, topics: [...catalog.topics, observatory], pages: [...catalog.pages,
 		{ key: "plain.example.org/post/262", topicIds: [observatory.id] },
 		{ key: "optics.example.org/mirror", topicIds: [observatory.id] },
 	] };
@@ -3289,6 +3289,42 @@ function launchTwoVisitTopics({ stored, ...options } = {}) {
 		responses: [{ match: (url) => url === catalogURL, json: fixture }],
 	});
 }
+
+test("a visit to a former public topic survives its redirect and a later catalog without aliases", async (t) => {
+	const old = "story:former-observatory-coverage";
+	const otherAlias = "story:older-mirror-report";
+	const redirects = { [old]: observatory.id, [otherAlias]: observatory.id };
+	const seen = { "hn:9360": now - 60 };
+	const visitsKey = "HNewhere:topic_visits";
+	const app = await launchTwoVisitTopics({ redirects, stored: {
+		[visitsKey]: { [old]: true }, "HNewhere:seen_comments": seen, "HNewhere:app_browse_topics": true,
+	} });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	const list = page.locator("#app-list-body");
+	await page.goto("https://backchnnl.app/");
+	await rail(page, "all").click();
+	const canonical = list.locator('[data-shared-topic="' + observatory.id + '"]');
+	await canonical.waitFor();
+	assert.equal(await canonical.getAttribute("aria-description"), "Read");
+	await expectTopicStatus(topic(list, "Extension permissions"), "Unread");
+	assert.equal(app.store.get(visitsKey)[observatory.id], true);
+	assert.equal(app.store.get(visitsKey)[otherAlias], undefined);
+
+	delete redirects[old];
+	delete redirects[otherAlias];
+	app.store.delete(catalogKey);
+	await page.reload();
+	await rail(page, "all").click();
+	await expectTopicStatus(canonical, "Read");
+	await expectTopicStatus(topic(list, "Extension permissions"), "Unread");
+	assert.deepEqual(app.store.get(catalogKey).data.redirects, {});
+	await page.getByRole("tab", { name: "By link", exact: true }).click();
+	await list.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+	assert.equal(await list.locator(".app-row.is-unread").count(), 3);
+	assert.deepEqual(app.store.get("HNewhere:seen_comments"), seen);
+	assert.deepEqual(app.errors, []);
+});
 
 test("direct and search visits mark their own topics independently of earlier article reads", async () => {
 	let releaseVisit;

@@ -50101,11 +50101,21 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	async function applyAppTopicVisits({ topics, active }, isCurrent) {
 		if (!isCurrent() || (!active && !topics?.length)) return;
 		const visits = (await load(APP_TOPIC_VISITS_KEY, {})) || {};
-		if (!isCurrent() || (!active && !Object.keys(visits).length)) return;
+		if (!isCurrent()) return;
+		const successors = new Set();
+		if (!active) {
+			const saved = Object.keys(visits);
+			if (!saved.length) return;
+			const redirects = sharedTopicCache?.index?.redirects;
+			if (redirects?.size) for (const id of saved) {
+				const canonical = redirects.get(id);
+				if (canonical && visits[id]) successors.add(canonical);
+			}
+		}
 		const missing = new Set();
 		for (const group of active ? [active] : topics) {
 			const ids = appTopicVisitIds(group);
-			group.visited = Boolean(active) || ids.some((id) => visits[id]);
+			group.visited = Boolean(active) || ids.some((id) => visits[id] || successors.has(id));
 			if (!group.visited) continue;
 			for (const id of ids) {
 				if (!visits[id]) missing.add(id);
