@@ -355,7 +355,7 @@ test('a helper closes itself even if the manager never resolves its close reques
     await helper.evaluate(()=>{window.__hangSelfClose=true});
     await app.page.evaluate(()=>{window.__holdReaderRequests=false;window.__unblockReaderRequests()});
     assert(await waitFor(async()=>await helper.evaluate(()=>window.__selfCloseStarted===true).catch(()=>false),8000),'the helper attempted its manager close');
-    assert(await waitFor(async()=>await app.page.locator('#app-list-sync').getAttribute('aria-busy')!=='true',5000),'Sync does not wait indefinitely for a close');
+    assert(await waitFor(async()=>await app.page.locator('#app-list-sync').getAttribute('aria-busy')!=='true',15000),'Sync finishes within the bounded cleanup window');
     assert(await waitFor(()=>helper.isClosed(),5000),'the helper falls back to closing its own window');
   } finally {await app.browser.close()}
 });

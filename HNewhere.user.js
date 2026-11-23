@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.19
+// @version      1.6.19.1
 // @license      GPL-3.0-or-later
 // @copyright    2026 Triglavis LLC
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -64,11 +64,14 @@
 // @connect      cdn.syndication.twimg.com
 // @connect      lobste.rs
 // @connect      en.wikipedia.org
+// @connect      commons.wikimedia.org
 // @connect      lemmy.world
 // @connect      mastodon.social
 // @connect      www.tootfinder.ch
 // @connect      api.hypothes.is
 // @connect      api.github.com
+// @connect      topics.backchnnl.app
+// @connect      backchannel-topics.triglavis-llc.workers.dev
 // @connect      *
 // @run-at       document-end
 // ==/UserScript==
@@ -439,6 +442,8 @@
 		sources: undefined,
 		frontPageMode: undefined,
 		frontPageTopics: [],
+		frontPageIncludeTopLinks: false,
+		hiddenTopics: [],
 		sourceRefreshMinutes: 5,
 		theme: "auto",
 		buttonRadius: undefined,
@@ -555,16 +560,18 @@
 		if (!hasAccountSyncSession(account)) return write();
 		const scope = accountScopedPreference(key);
 		if (scope && key !== scope + account.account) return write();
-		const changed = await withSharedStorageLock("account-storage", async (lease) => {
-			const before = await GM.getValue(key, null);
-			const changed = !accountValuesEqual(accountEditValue(key, before), accountEditValue(key, value));
-			if (changed && await load(ACCOUNT_EDIT_KEY, null) !== account.account) {
-				await lease.commit(() => GM.setValue(ACCOUNT_EDIT_KEY, account.account));
-			}
-			await lease.commit(write);
-			return changed;
-		});
+		const changed = await withSharedStorageLock("account-storage", (lease) => writeAccountValue(lease, account, key, value, write));
 		if (changed) queueAccountEditSync();
+	}
+
+	async function writeAccountValue(lease, account, key, value, write) {
+		const before = await GM.getValue(key, null);
+		const changed = !accountValuesEqual(accountEditValue(key, before), accountEditValue(key, value));
+		if (changed && await load(ACCOUNT_EDIT_KEY, null) !== account.account) {
+			await lease.commit(() => GM.setValue(ACCOUNT_EDIT_KEY, account.account));
+		}
+		await lease.commit(write);
+		return changed;
 	}
 
 	async function save(key, value) {
@@ -750,6 +757,7 @@
 			merged.annotationsWhenSidebarClosed = false;
 		}
 		merged.sourceRefreshMinutes = normalizeSourceRefreshMinutes(merged.sourceRefreshMinutes);
+		merged.hiddenTopics = normalizeTopicLabels(merged.hiddenTopics);
 
 		if (syncAppearancePreferences(merged)) {
 			reapplyThemes();
@@ -761,29 +769,32 @@
 		return merged;
 	}
 
-	async function saveSettings(patch) {
-		const next = {
-			...(await loadSettings()),
-			...patch,
-		};
-		next.sourceRefreshMinutes = normalizeSourceRefreshMinutes(next.sourceRefreshMinutes);
+	let settingsWrite = Promise.resolve();
 
-		await save(STORAGE.settings, next);
-		redditReadSourceOn = Boolean(next.sources?.reddit);
-		xSourceOn = Boolean(next.sources?.x);
-		updateSourceReadScope(next);
+	function saveSettings(patch) {
+		settingsWrite = settingsWrite.catch(() => {}).then(async () => {
+			const current = await loadSettings();
+			const changes = typeof patch === "function" ? patch(current) : patch;
+			const next = { ...current, ...changes };
+			next.sourceRefreshMinutes = normalizeSourceRefreshMinutes(next.sourceRefreshMinutes);
 
-		if (syncAppearancePreferences(next)) {
-			reapplyThemes();
-		}
-		if (["sources", "frontPageMode", "frontPageTopics"].some((key) => Object.prototype.hasOwnProperty.call(patch, key))) {
-			frontPageCacheEpoch++;
-			frontPageLoads.clear();
-			frontPageJobs.clear();
-		}
-		scheduleFrontPageRefresh();
+			await save(STORAGE.settings, next);
+			redditReadSourceOn = Boolean(next.sources?.reddit);
+			xSourceOn = Boolean(next.sources?.x);
+			updateSourceReadScope(next);
 
-		return next;
+			if (syncAppearancePreferences(next)) {
+				reapplyThemes();
+			}
+			if (["sources", "frontPageMode", "frontPageTopics", "frontPageIncludeTopLinks"].some((key) => Object.hasOwn(changes, key))) {
+				frontPageCacheEpoch++;
+				frontPageLoads.clear();
+				frontPageJobs.clear();
+			}
+			scheduleFrontPageRefresh();
+			return next;
+		});
+		return settingsWrite;
 	}
 
 	function siteKey() {
@@ -1504,7 +1515,6 @@
 
 	function cardMenuItems(doc, { inTag = false } = {}) {
 		const items = [];
-		const watched = Boolean(doc?.collected) && !doc.collected.unwatched;
 		const web = /^https?:\/\//i.test(String(doc?.url || ""));
 
 		if (web && !inTag) {
@@ -1512,19 +1522,15 @@
 			items.push({ id: "tab", label: "Open in new tab" });
 		}
 
+		items.push({ id: "delete", label: "Delete" });
+
 		if (doc?.fresh && !inTag) {
 			items.push({ id: "seen", label: "Mark as seen" });
-		}
-
-		if (web || doc?.collected) {
-			items.push(watched ? { id: "unwatch", label: "Unwatch" } : { id: "watch", label: "Watch" });
 		}
 
 		if (web && !inTag) {
 			items.push({ id: "copy", label: "Copy link" });
 		}
-
-		items.push({ id: "delete", label: "Delete" });
 
 		return items;
 	}
@@ -1648,7 +1654,7 @@
 				: []),
 		];
 
-		return { title: "In your Collection", unwatched: Boolean(doc.collected?.unwatched), dates, changes, yours };
+		return { title: "In your Collection", dates, changes, yours };
 	}
 
 	function collectionTagItemHTML(item) {
@@ -1706,6 +1712,14 @@
 		return look && typeof look === "object" ? look : null;
 	}
 
+	function lookMetadata(look) {
+		const plain = (value, limit) => typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, limit).trimEnd() : "";
+		const description = plain(look?.description, 360);
+		const section = plain(look?.section, 80);
+
+		return { ...(description && { description }), ...(section && { section }) };
+	}
+
 	function safeLook(look) {
 		if (!look || typeof look !== "object") {
 			return null;
@@ -1730,6 +1744,7 @@
 			color: color(text(look.color)),
 			icon: address(text(look.icon)),
 			site: plain(text(look.site)),
+			...lookMetadata(look),
 			at: Number(look.at) || 0,
 		};
 	}
@@ -1776,21 +1791,23 @@
 		return before !== after;
 	}
 
+	function collectedPreviewOnOpen(entry) {
+		return entry?.previewOnOpen === true || entry?.unwatched === true;
+	}
+
 	function collectedDue(entries, now, interval) {
 		return (Array.isArray(entries) ? entries : []).filter(
 			(entry) =>
 				entry &&
-				!entry.unwatched &&
 				!collectedIsFresh(entry) &&
 				(entry.misses || 0) < COLLECTED_MISS_CEILING &&
 				now - (entry.checkedAt || 0) >= interval,
-		);
+		).sort((a, b) => (a.checkedAt || 0) - (b.checkedAt || 0));
 	}
 
 	function collectedIsFresh(entry) {
 		return Boolean(
 			entry &&
-				!entry.unwatched &&
 				entry.foundAt &&
 				!(Number(entry.seenAt) >= Number(entry.foundAt)),
 		);
@@ -1825,31 +1842,10 @@
 	}
 
 	function markCollectedSeen(entries, key, now) {
+		const keys = key instanceof Set ? key : new Set([key]);
 		return (Array.isArray(entries) ? entries : []).map((entry) =>
-			entry?.key === key && collectedIsFresh(entry) ? { ...entry, seenAt: now } : entry,
+			keys.has(entry?.key) && collectedIsFresh(entry) ? { ...entry, seenAt: now } : entry,
 		);
-	}
-
-	function withWatched(entries, key, watched) {
-		const list = Array.isArray(entries) ? entries : [];
-
-		if (!list.some((entry) => entry?.key === key)) {
-			return list;
-		}
-
-		return list.map((entry) => {
-			if (entry?.key !== key) {
-				return entry;
-			}
-
-			if (!watched) {
-				return { ...entry, unwatched: true };
-			}
-
-			const { unwatched, ...rest } = entry;
-
-			return { ...rest, misses: 0 };
-		});
 	}
 
 	function migrateQueueKeys(entries, normalize) {
@@ -1949,8 +1945,14 @@
 			Boolean(folder) ||
 			saved.some((entry) => normalizeURL(entry.url || "") === key) ||
 			index.some((entry) => normalizeURL(entry.url || "") === key);
+		if (!kept) {
+			return;
+		}
 
-		if (!kept || lookFor(looks, key) || (folder && folderAddresses(folder).some((each) => lookFor(looks, each)))) {
+		const knownKey = [...folderAddresses(folder), key].find((each) => lookFor(looks, each));
+		const { description, section } = lookMetadata(lookFor(looks, knownKey));
+
+		if (description && section) {
 			return;
 		}
 
@@ -1958,7 +1960,15 @@
 			await new Promise((resolve) => (page.defaultView || page).addEventListener("load", resolve, { once: true }));
 		}
 
-		await rememberLook(folder?.url || url, pageLook(page));
+		if (knownKey) {
+			const metadata = pageLookMetadata(page);
+
+			if (metadata.description || metadata.section) {
+				await rememberLookForKey(knownKey, metadata, { onlyMissing: true });
+			}
+		} else {
+			await rememberLookIfMissing(folder?.url || url, pageLook(page));
+		}
 	}
 
 	let collectedArrival = { key: "", keys: new Set(), at: 0, before: Promise.resolve(null) };
@@ -1967,12 +1977,13 @@
 		const addresses = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
 		const key = addressKey(addresses[0] || "");
 		let before = null;
-		const arrived = mutateCollected((entries) => {
-			const result = arriveAtCollected(entries, addresses, now);
-
-			before = result.before;
-
-			return result.before ? result.entries : undefined;
+		const arrived = loadCollected().then((entries) => {
+			if (!folderKeyFor(addresses, entries)) return;
+			return mutateCollected((current) => {
+				const result = arriveAtCollected(current, addresses, now);
+				before = result.before;
+				return result.before ? result.entries : undefined;
+			});
 		}).then(
 			() => before,
 			() => null,
@@ -2080,9 +2091,12 @@
 		return rememberLook(url, look, { onlyMissing: true });
 	}
 
-	function rememberLook(url, look, { onlyMissing = false } = {}) {
+	function rememberLook(url, look, options) {
+		return rememberLookForKey(normalizeURL(url), look, options);
+	}
+
+	function rememberLookForKey(key, look, { onlyMissing = false } = {}) {
 		const write = async () => {
-			const key = normalizeURL(url);
 			const safe = key ? safeLook(look) : null;
 
 			if (!safe) {
@@ -2091,15 +2105,22 @@
 
 			const looks = await loadLooks();
 			const known = lookFor(looks, key);
+			const preserveLook = onlyMissing && known;
+			const previousMetadata = lookMetadata(known);
+			const incomingMetadata = lookMetadata(safe);
+			const metadata = preserveLook ? { ...incomingMetadata, ...previousMetadata } : { ...previousMetadata, ...incomingMetadata };
+			const image = preserveLook && !known.image ? safe.image : "";
 
-			if (onlyMissing && known && (known.image || !safe.image)) {
+			if (preserveLook && !image && metadata.description === previousMetadata.description && metadata.section === previousMetadata.section) {
 				return;
 			}
 
-			const next = { ...(onlyMissing && known ? { ...known, image: safe.image } : safe), at: Date.now() };
+			const next = { ...(preserveLook ? known : safe), ...(image && { image }), ...metadata, at: Date.now() };
 
 			await save(LOOKS_KEY, keptLooks({ ...looks, [key]: next }));
-			paintCardLook(key, next);
+			if (!preserveLook || image) {
+				paintCardLook(key, next);
+			}
 		};
 
 		lookWrites = lookWrites.then(write, write);
@@ -2112,34 +2133,833 @@
 		return entries;
 	}
 
+	function parseBookmarkHTML(html, now = Date.now()) {
+		if (!/^\s*<!doctype\s+netscape-bookmark-file-1\s*>/i.test(html)) {
+			throw new Error("invalid-bookmark-file");
+		}
+
+		const template = document.createElement("template");
+		template.innerHTML = html;
+		const bookmarks = [];
+		let skipped = 0;
+
+		for (const link of template.content.querySelectorAll("dt > a[href]")) {
+			const href = link.getAttribute("href").trim();
+			let url;
+			try {
+				url = /^https?:\/\//i.test(href) ? new URL(href) : null;
+			} catch {
+				url = null;
+			}
+			if (!url || url.username || url.password || isHiddenSite(url.href)) {
+				skipped++;
+				continue;
+			}
+
+			const site = hostLabel(url.href);
+			const seconds = link.getAttribute("add_date") || "";
+			const addedAt = /^\d+$/.test(seconds) ? Number(seconds) * 1000 : 0;
+			bookmarks.push({
+				key: normalizeURL(url.href),
+				url: url.href,
+				title: link.textContent.replace(/\s+/g, " ").trim() || site || url.href,
+				site,
+				addedAt: addedAt > 0 && addedAt <= now ? addedAt : now,
+				previewOnOpen: true,
+			});
+		}
+
+		return { bookmarks, skipped };
+	}
+
+	function previewBookmarkImport({ bookmarks, skipped }, documents) {
+		const held = new Set();
+		for (const doc of documents) {
+			for (const address of [doc.key, doc.url, ...folderAddresses(doc.collected),
+				...(doc.discussions || []).map((entry) => entry.url),
+				...(doc.quotes || []).map((entry) => entry.url),
+				...(doc.noteDocuments || []).map((entry) => entry.url)]) {
+				const key = addressKey(address);
+				if (key) held.add(key);
+			}
+		}
+
+		const additions = [];
+		for (const bookmark of bookmarks) {
+			if (held.has(bookmark.key)) continue;
+			held.add(bookmark.key);
+			additions.push(bookmark);
+		}
+		return { additions, duplicates: bookmarks.length - additions.length, skipped };
+	}
+
+	let collectionWrites = Promise.resolve();
+
+	function withCollectionStorage(task, required = typeof GM.listValues === "function") {
+		const run = async () => {
+			let changed = false;
+			try {
+				return await withSharedStorageLock("account-storage", async (lease) => {
+					const account = await GM.getValue(ACCOUNT_SYNC_KEY, null);
+					const write = async (key, value) => {
+						const store = () => GM.setValue(key, value);
+						if (hasAccountSyncSession(account) && accountPortableStoreKey(key)) {
+							changed = await writeAccountValue(lease, account, key, value, store) || changed;
+						} else {
+							await lease.commit(store);
+						}
+					};
+					return task(write, account);
+				}, { required });
+			} finally {
+				if (changed) queueAccountEditSync();
+			}
+		};
+		const turn = collectionWrites.then(run, run);
+		collectionWrites = turn;
+		return turn;
+	}
+
 	async function loadCollected() {
-		let stored = await load(STORAGE.collected, null);
+		const stored = await load(STORAGE.collected, null);
+		if (stored !== null || await load(COLLECTED_MIGRATED_KEY, false)) {
+			return Array.isArray(stored) ? stored.filter((entry) => entry?.key) : [];
+		}
+		return withCollectionStorage(loadCollectedForWrite);
+	}
+
+	async function loadCollectedForWrite(write) {
+		let stored = await GM.getValue(STORAGE.collected, null);
 
 		if (stored === null && !(await load(COLLECTED_MIGRATED_KEY, false))) {
 			const [legacy, saved, notedIndex] = await Promise.all([
-				load(COLLECTED_LEGACY_KEY, null),
-				load(STORAGE.saved, []),
-				load(NOTES_INDEX_KEY, []),
+				GM.getValue(COLLECTED_LEGACY_KEY, null),
+				GM.getValue(STORAGE.saved, []),
+				GM.getValue(NOTES_INDEX_KEY, []),
 			]);
 
 			stored = adoptCollectedDocuments(migrateCollectedEntries(legacy), saved, notedIndex, Date.now());
-			await save(STORAGE.collected, stored);
-			await save(COLLECTED_MIGRATED_KEY, true);
+			await write(STORAGE.collected, stored);
+			await write(COLLECTED_MIGRATED_KEY, true);
 
 			if (legacy !== null) {
-				await save(COLLECTED_LEGACY_KEY, []);
+				await write(COLLECTED_LEGACY_KEY, []);
 			}
 		}
 
 		return Array.isArray(stored) ? stored.filter((entry) => entry?.key) : [];
 	}
 
-	async function saveCollected(entries) {
-		await save(STORAGE.collected, entries);
-		return entries;
+	function mutateCollected(mutate) {
+		return withCollectionStorage(async (write) => {
+			const next = await mutate(await loadCollectedForWrite(write));
+			if (next !== undefined) await write(STORAGE.collected, next);
+			return next;
+		});
 	}
 
-	const mutateCollected = serializeMutations(loadCollected, saveCollected);
+	async function bookmarkImportIdentity(session) {
+		const current = session === undefined ? await GM.getValue(ACCOUNT_SYNC_KEY, null) : session;
+		return { account: current?.account || null, owner: await accountDataOwner(current) };
+	}
+
+	function applyBookmarkImport(parsed, identity) {
+		return accountSyncLock(() => withCollectionStorage(async (write, account) => {
+			if (!accountValuesEqual(identity, await bookmarkImportIdentity(account))) throw new Error("bookmark-import-owner-changed");
+
+			const folders = await loadCollectedForWrite(write);
+			const snapshot = await readAccountSnapshot(identity.account);
+			const { saved, notes } = snapshot.collection;
+			const notesByKey = new Map(notes.map((entry) => [entry.key, { version: 1, notes: entry.notes }]));
+			const documents = collectDocuments(saved, notes, notesByKey, folders);
+			const { additions, duplicates, skipped } = previewBookmarkImport(parsed, documents);
+			const syncReady = hasAccountSyncSession(account) && account.expiresAt > Date.now() &&
+				!account.keyBackupPending && identity.owner === account.account;
+
+			if (!additions.length) return { added: 0, duplicates, skipped, syncReady };
+
+			snapshot.collection.folders.push(...additions);
+			await compressAccountDocument(snapshot);
+			if (!accountValuesEqual(identity, await bookmarkImportIdentity())) throw new Error("bookmark-import-owner-changed");
+			const importBatch = accountBase64(crypto.getRandomValues(new Uint8Array(16)));
+			const imported = additions.map((entry) => ({ ...entry, importBatch }));
+			await write(STORAGE.collected, [...folders, ...imported]);
+			return { added: imported.length, imported, duplicates, skipped, syncReady };
+		}, true));
+	}
+
+	function undoBookmarkImport(imported, identity) {
+		return accountSyncLock(() => withCollectionStorage(async (write, account) => {
+			if (!accountValuesEqual(identity, await bookmarkImportIdentity(account))) throw new Error("bookmark-import-owner-changed");
+
+			const folders = await GM.getValue(STORAGE.collected, []);
+			if (!Array.isArray(folders)) return 0;
+			const batch = accountRecordMap(imported, "key");
+			const unchanged = folders.filter((entry) => {
+				const original = batch.get(entry?.key);
+				if (!original || entry.importBatch !== original.importBatch) return false;
+				const { checkedAt, marks, misses, foundAt, count, ...saved } = entry;
+				return accountValuesEqual(saved, original);
+			});
+			if (!unchanged.length) return 0;
+
+			const [saved, notes, keys] = await Promise.all([
+				GM.getValue(STORAGE.saved, []),
+				GM.getValue(NOTES_INDEX_KEY, []),
+				GM.listValues(),
+			]);
+			const retained = new Set((Array.isArray(saved) ? saved : []).filter((entry) => entry?.key).map((entry) => savedFolderKey(entry, folders)));
+			for (const note of notedDocuments(notes)) retained.add(notedFolderKey(note, folders));
+
+			const storedKeys = new Set(keys);
+			const removable = await Promise.all(unchanged.filter((entry) => !retained.has(entry.key)).map(async (entry) => {
+				const noteKey = noteStorageKey({ kind: "url", id: entry.key });
+				return storedKeys.has(noteKey) && keptNotes(await GM.getValue(noteKey, null)).length ? null : entry;
+			}));
+			const removed = new Set(removable.filter(Boolean));
+			if (!removed.size) return 0;
+			if (!accountValuesEqual(identity, await bookmarkImportIdentity())) throw new Error("bookmark-import-owner-changed");
+			await write(STORAGE.collected, folders.filter((entry) => !removed.has(entry)));
+			return removed.size;
+		}, true));
+	}
+
+	async function exportBookmarks() {
+		const seen = new Set();
+		const links = [];
+		for (const doc of await loadCollectionDocuments()) {
+			if (!/^https?:\/\//i.test(doc.url)) continue;
+			const key = normalizeURL(doc.url);
+			if (!key || seen.has(key)) continue;
+			seen.add(key);
+			const added = Math.floor(Number(doc.collected?.addedAt || doc.touched) / 1000);
+			const date = Number.isFinite(added) && added > 0 ? ` ADD_DATE="${added}"` : "";
+			links.push(`    <DT><A HREF="${escapeHTML(doc.url)}"${date}>${escapeHTML(doc.title || doc.url)}</A>`);
+		}
+		if (!links.length) {
+			showToast("No bookmarks to export");
+			return;
+		}
+		const html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Backchannel bookmarks</TITLE>
+<H1>Backchannel bookmarks</H1>
+<DL><p>
+${links.join("\n")}
+</DL><p>
+`;
+		downloadFile(html, "text/html;charset=utf-8", "backchannel-bookmarks.html");
+	}
+
+	function collectionSettingsHTML(reader) {
+		return `
+<div data-app-section="collection">
+${reader ? `<section id="collection-import-settings" class="settings-group" aria-labelledby="collection-import-heading">
+<h3 id="collection-import-heading" class="settings-subheading">Import</h3>
+<div class="appearance-row settings-action-row">
+<div class="appearance-row-hint">Import your bookmarks from other services</div>
+<button id="collection-import-open" class="settings-button" type="button">Choose file…</button>
+</div>
+</section>` : ""}
+<section class="settings-group" aria-labelledby="collection-export-heading">
+<h3 id="collection-export-heading" class="settings-subheading">Export</h3>
+<div class="appearance-row settings-action-row">
+<div class="appearance-row-text"><div class="appearance-row-label">Export bookmarks</div>
+<div class="appearance-row-hint">Download saved page links in browser bookmark format.</div></div>
+<button id="settings-bookmarks-export" class="settings-button" type="button">Download HTML</button>
+</div>
+<div class="appearance-row settings-action-row">
+<div class="appearance-row-text"><div class="appearance-row-label">Export notes</div>
+<div class="appearance-row-hint"><span id="settings-notes-count">0 notes</span> in a JSON file.</div></div>
+<button id="settings-notes-export" class="settings-button" type="button">Download JSON</button>
+</div>
+</section>
+</div>`;
+	}
+
+	function bookmarkImportHTML() {
+		return `
+<input id="bookmark-import-file" type="file" accept="text/html,.html,.htm" hidden>
+<dialog id="bookmark-import" aria-labelledby="bookmark-import-title">
+	<h2 id="bookmark-import-title">Import bookmarks</h2>
+	<p id="bookmark-import-name"></p>
+	<dl id="bookmark-import-summary" hidden>
+		<dt>New links</dt><dd id="bookmark-import-new"></dd>
+		<dt>Duplicates</dt><dd id="bookmark-import-duplicates"></dd>
+		<dt>Skipped links</dt><dd id="bookmark-import-skipped"></dd>
+	</dl>
+	<p id="bookmark-import-fields" hidden>Imports include links, titles, and saved dates. Folder names, tags, and descriptions are skipped. Backchannel checks saved links for new discussions using your enabled sources.</p>
+	<p id="bookmark-import-status" role="status"></p>
+	<div class="bookmark-import-actions">
+		<button id="bookmark-import-cancel" class="settings-button" type="button" autofocus>Cancel</button>
+		<button id="bookmark-import-confirm" class="settings-button settings-button--primary" type="button" hidden>Import</button>
+	</div>
+</dialog>`;
+	}
+
+	function openBookmarkImport() {
+		const input = appState?.ui.shadow.getElementById("bookmark-import-file");
+		if (!input) return;
+		input.value = "";
+		input.click();
+	}
+
+	function wireBookmarkImport(shadow) {
+		const find = (name) => shadow.getElementById("bookmark-import-" + name);
+		const input = find("file");
+		const dialog = shadow.getElementById("bookmark-import");
+		const status = find("status");
+		const summary = find("summary");
+		const fields = find("fields");
+		const confirm = find("confirm");
+		const cancel = find("cancel");
+		let selection = null;
+		let busy = false;
+		let generation = 0;
+
+		const paint = ({ additions, duplicates, skipped }) => {
+			find("new").textContent = String(additions);
+			find("duplicates").textContent = String(duplicates);
+			find("skipped").textContent = String(skipped);
+			summary.hidden = fields.hidden = false;
+			confirm.hidden = !additions;
+			confirm.textContent = `Import ${pluralize(additions, "link")}`;
+			status.textContent = additions ? "" : "There are no new links to import.";
+		};
+
+		const showError = (error) => {
+			confirm.hidden = true;
+			status.textContent = {
+				"invalid-bookmark-file": "Choose a bookmark HTML export. For Safari, unzip the export and choose the bookmarks HTML file.",
+				"bookmark-file-too-large": "This file is too large. Choose a bookmark HTML file smaller than 32 MB.",
+				"bookmark-too-many-links": "This file has more than 10,000 bookmarks. Split it into smaller exports.",
+				"snapshot-too-large": "Adding these links would make your library too large to sync. Try a smaller export.",
+				"bookmark-import-owner-changed": "The local library or account changed. Open the file again to check your links.",
+				"Shared storage coordination is unavailable": "Backchannel couldn’t coordinate storage for this import. Try again or update your userscript manager.",
+			}[error.message] || "Couldn't import bookmarks. Try again.";
+		};
+
+		shadow.getElementById("collection-import-open").onclick = openBookmarkImport;
+		cancel.onclick = () => dialog.close();
+		dialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+		dialog.addEventListener("close", () => { generation++; selection = null; });
+
+		input.onchange = async () => {
+			const file = input.files?.[0];
+			if (!file || dialog.open) return;
+			const request = ++generation;
+			selection = null;
+			find("name").textContent = file.name;
+			summary.hidden = fields.hidden = confirm.hidden = true;
+			status.textContent = "Reading bookmarks…";
+			dialog.showModal();
+			try {
+				if (file.size > 32 * 1024 * 1024) throw new Error("bookmark-file-too-large");
+				const [html, identity, documents] = await Promise.all([file.text(), bookmarkImportIdentity(), loadCollectionDocuments()]);
+				if (request !== generation || !dialog.open) return;
+				const parsed = parseBookmarkHTML(html);
+				if (parsed.bookmarks.length + parsed.skipped > 10000) throw new Error("bookmark-too-many-links");
+				const preview = previewBookmarkImport(parsed, documents);
+				selection = { parsed, identity };
+				paint({ ...preview, additions: preview.additions.length });
+			} catch (error) {
+				if (request === generation && dialog.open) showError(error);
+			}
+		};
+
+		confirm.onclick = async () => {
+			if (!selection || busy) return;
+			busy = confirm.disabled = cancel.disabled = true;
+			status.textContent = "Importing bookmarks…";
+			const { parsed, identity } = selection;
+			try {
+				const result = await applyBookmarkImport(parsed, identity);
+				if (!result.added) {
+					paint({ ...result, additions: 0 });
+					return;
+				}
+				dialog.close();
+				closeAppSettings();
+				chooseAppView("collection", true);
+				refreshCollectionViews().catch(console.error);
+				const next = result.syncReady ? "They’ll sync with your account." : "Saved on this device. Sign in to sync across devices.";
+				showToast(`Imported ${pluralize(result.added, "link")}. ${next}`, {
+					duration: 12000,
+					action: {
+						label: "Undo",
+						onAct: async () => {
+							try {
+								const removed = await undoBookmarkImport(result.imported, identity);
+								refreshCollectionViews().catch(console.error);
+								showToast(removed ? `Removed ${pluralize(removed, "imported link")}.` : "No unchanged imported links to remove.");
+							} catch (error) {
+								showToast(error.message === "bookmark-import-owner-changed"
+									? "The local library or account changed. The import couldn't be undone."
+									: "Couldn't undo the bookmark import.");
+							}
+						},
+					},
+				});
+			} catch (error) {
+				showError(error);
+			} finally {
+				busy = confirm.disabled = cancel.disabled = false;
+			}
+		};
+	}
+
+	function topicReportHTML() {
+		return `
+<dialog id="topic-report" aria-labelledby="topic-report-heading" aria-describedby="topic-report-hint">
+	<h2 id="topic-report-heading">Report incorrect topic</h2>
+	<p id="topic-report-hint">Send this link, its displayed topic, and any suggestion to Backchannel for review.</p>
+	<div class="topic-report-link">
+		<strong id="topic-report-title"></strong>
+		<div id="topic-report-url"></div>
+	</div>
+	<p id="topic-report-assignment">Shown under <strong id="topic-report-topic"></strong></p>
+	<form id="topic-report-form" method="dialog">
+		<div id="topic-report-field">
+			<label for="topic-report-suggestion">Suggested topic (optional)</label>
+			<input id="topic-report-suggestion" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="Search or type a topic" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="topic-report-matches">
+			<div id="topic-report-matches" class="dropdown" role="listbox" aria-label="Matching topics" hidden></div>
+		</div>
+		<p id="topic-report-status" role="status"></p>
+		<div class="topic-report-actions">
+			<button id="topic-report-cancel" class="settings-button" type="button" autofocus>Cancel</button>
+			<button id="topic-report-send" class="settings-button settings-button--primary" type="submit">Send report</button>
+		</div>
+	</form>
+</dialog>`;
+	}
+
+	async function loadTopicReportChoices() {
+		const [index, settings] = await Promise.all([loadSharedTopicIndex(), loadSettings()]);
+		const shared = [...(index?.topics.values() || [])].filter((group) =>
+			group.kind === "topic" || index.topicPages.get(group.id)?.size > 1);
+		const local = await loadReaderFrontPageTopicGroups(settings, { index, includeStories: true });
+		return [...shared, ...local.filter((group) => readerTopicHasSubject(group) || group.rows.length > 1)];
+	}
+
+	function wireTopicReportLookup(input, list, assignedTopic) {
+		const topics = new Map();
+		const assigned = topicFilterKey(assignedTopic || "");
+		let active = -1;
+		let dismissed = false;
+
+		const focusOption = (index) => {
+			list.children[active]?.setAttribute("aria-selected", "false");
+			active = index;
+			const option = list.children[index];
+			if (!option) {
+				input.removeAttribute("aria-activedescendant");
+				return;
+			}
+			option.setAttribute("aria-selected", "true");
+			input.setAttribute("aria-activedescendant", option.id);
+			option.scrollIntoView({ block: "nearest" });
+		};
+		const hide = () => {
+			focusOption(-1);
+			list.hidden = true;
+			input.setAttribute("aria-expanded", "false");
+		};
+		const choose = (name) => {
+			input.value = name;
+			dismissed = true;
+			hide();
+		};
+		const render = () => {
+			const query = topicFilterKey(input.value);
+			if (!query || dismissed || input.getRootNode().activeElement !== input) return hide();
+			const terms = query.split(" ");
+			const matches = [...topics.values()].filter(({ key, aliases }) =>
+				[key, ...aliases].some((name) => terms.every((term) => name.includes(term))))
+				.sort((a, b) => Number(b.key.startsWith(query)) - Number(a.key.startsWith(query)) || a.label.localeCompare(b.label))
+				.slice(0, 8);
+			focusOption(-1);
+			list.replaceChildren(...matches.map(({ label }, index) => {
+				const option = document.createElement("button");
+				option.type = "button";
+				option.id = list.id + "-" + index;
+				option.className = "dropdown-item";
+				option.tabIndex = -1;
+				option.dataset.topic = label;
+				option.setAttribute("role", "option");
+				option.setAttribute("aria-selected", "false");
+				option.textContent = topicDisplayName(label);
+				option.onmousedown = (event) => event.preventDefault();
+				option.onclick = () => choose(label);
+				return option;
+			}));
+			list.hidden = matches.length === 0;
+			input.setAttribute("aria-expanded", String(!list.hidden));
+		};
+		const add = (choices) => {
+			for (const { label, aliases = [] } of choices) {
+				const key = topicFilterKey(label);
+				if (!key || key === assigned || label.length > input.maxLength) continue;
+				if (!topics.has(key)) topics.set(key, { key, label, aliases: new Set() });
+				for (const alias of aliases) topics.get(key).aliases.add(topicFilterKey(alias));
+			}
+			render();
+		};
+
+		input.oninput = input.onfocus = () => { dismissed = false; render(); };
+		input.onblur = hide;
+		input.onkeydown = (event) => {
+			if (event.isComposing) return;
+			if (event.key === "Escape" && !list.hidden) {
+				event.preventDefault();
+				event.stopPropagation();
+				dismissed = true;
+				hide();
+			} else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+				if (list.hidden) {
+					dismissed = false;
+					render();
+				}
+				if (list.hidden) return;
+				event.preventDefault();
+				const count = list.children.length;
+				const next = event.key === "ArrowDown" ? active + 1 : active < 0 ? count - 1 : active - 1;
+				focusOption((next + count) % count);
+			} else if (event.key === "Enter" && active >= 0 && !list.hidden) {
+				event.preventDefault();
+				choose(list.children[active].dataset.topic);
+			}
+		};
+		add(TOPICS);
+		return {
+			add, hide,
+			close() {
+				hide();
+				input.oninput = input.onfocus = input.onblur = input.onkeydown = null;
+				list.replaceChildren();
+			},
+		};
+	}
+
+	async function openTopicReport({ title, url, topic }, opener) {
+		const shadow = appState?.ui.shadow;
+		const dialog = shadow?.getElementById("topic-report");
+		if (!dialog || appNativeDialogOpen(shadow)) return;
+		const find = (name) => shadow.getElementById("topic-report-" + name);
+		const form = find("form");
+		const field = find("field");
+		const suggestion = find("suggestion");
+		const lookup = wireTopicReportLookup(suggestion, find("matches"), topic);
+		const status = find("status");
+		const cancel = find("cancel");
+		const send = find("send");
+		let signIn = false;
+		const current = () => dialog.open && dialog.onclose === close;
+		const sessionToken = async () => {
+			const session = await load(ACCOUNT_SYNC_KEY, null);
+			return session?.expiresAt > Date.now() ? session.token : null;
+		};
+		const requireSignIn = () => {
+			lookup.hide();
+			signIn = field.hidden = true;
+			send.textContent = "Sign in";
+			status.textContent = "Sign in to report this link.";
+		};
+		function close() {
+			if (dialog.open || dialog.onclose !== close) return;
+			dialog.onclose = dialog.oncancel = form.onsubmit = cancel.onclick = null;
+			lookup.close();
+			suggestion.value = "";
+			if (dialog.returnValue === "sign-in") openAppSettingsSection("account");
+			else if (opener.isConnected) opener.focus({ preventScroll: true });
+		}
+
+		find("title").textContent = title;
+		find("url").textContent = url;
+		find("assignment").hidden = !topic;
+		find("topic").textContent = topic;
+		field.hidden = cancel.disabled = false;
+		status.textContent = "";
+		send.textContent = "Send report";
+		send.disabled = true;
+		dialog.returnValue = "";
+		dialog.onclose = close;
+		dialog.oncancel = (event) => { if (cancel.disabled) event.preventDefault(); };
+		cancel.onclick = () => dialog.close();
+		form.onsubmit = async (event) => {
+			event.preventDefault();
+			if (send.disabled) return;
+			if (signIn) {
+				dialog.close("sign-in");
+				return;
+			}
+			lookup.hide();
+			send.disabled = cancel.disabled = true;
+			status.textContent = "Sending report…";
+			try {
+				const token = await sessionToken();
+				if (!token) {
+					requireSignIn();
+					return;
+				}
+				const response = await fetch(SHARED_TOPIC_REPORT_URL, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+					body: JSON.stringify({ url, topic, suggestedTopic: suggestion.value.trim() }),
+					credentials: "omit", referrerPolicy: "strict-origin",
+					cache: "no-store", redirect: "error", signal: AbortSignal.timeout(12000),
+				});
+				if (!current()) return;
+				if (response.status === 401) requireSignIn();
+				else if (response.status === 429) status.textContent = "Too many reports. Try again in a minute.";
+				else if (response.status === 204) {
+					dialog.close();
+					showToast("Link reported for topic review.");
+				} else {
+					status.textContent = "Couldn’t send the report. Try again.";
+				}
+			} catch {
+				if (current()) status.textContent = "Couldn’t send the report. Try again.";
+			} finally {
+				if (dialog.onclose === close) send.disabled = cancel.disabled = false;
+			}
+		};
+		dialog.showModal();
+		const token = await sessionToken();
+		if (!current()) return;
+		if (!token) requireSignIn();
+		else loadTopicReportChoices().then((choices) => {
+			if (current() && !signIn) lookup.add(choices);
+		}).catch(console.error);
+		send.disabled = false;
+	}
+
+	function readingListShareHTML() {
+		return `
+<dialog id="reading-list-share" aria-labelledby="reading-list-share-heading">
+	<div class="reading-list-share-heading"><h2 id="reading-list-share-heading">Share reading list</h2><button class="app-head-icon" type="button" data-share-close aria-label="Close preview">${APP_CLOSE_ICON}</button></div>
+	<label class="reading-list-share-title" for="reading-list-share-title">List title</label>
+	<input id="reading-list-share-title" type="text" autofocus>
+	<div class="reading-list-share-options" role="group" aria-label="Include in reading list">
+		<label><input id="reading-list-share-discussions" type="checkbox" checked>Discussion links</label>
+		<label><input id="reading-list-share-quotes" type="checkbox">Saved quotes</label>
+		<label><input id="reading-list-share-notes" type="checkbox">My notes</label>
+	</div>
+	<div class="reading-list-share-preview" role="region" aria-label="Reading list preview" tabindex="0">
+		<h3 id="reading-list-share-preview-title"></h3>
+		<ol id="reading-list-share-pages"></ol>
+	</div>
+	<footer>
+		<span id="reading-list-share-count"></span>
+		<div class="reading-list-share-actions">
+			<button class="settings-button" type="button" data-share-close>Cancel</button>
+			<button id="reading-list-share-copy" class="settings-button settings-button--primary" type="button">Copy Markdown</button>
+		</div>
+	</footer>
+	<p id="reading-list-share-status" role="status"></p>
+	<textarea id="reading-list-share-markdown" aria-label="Generated Markdown" readonly hidden></textarea>
+</dialog>`;
+	}
+
+	function readingListShareURL(value) {
+		if (!/^https?:\/\//i.test(String(value || ""))) return "";
+		try {
+			const url = new URL(value);
+			return url.username || url.password ? "" : url.href;
+		} catch {
+			return "";
+		}
+	}
+
+	function readingListSharePages(entries, documents, rows, discoveries, open) {
+		const byKey = new Map(documents.map((doc) => [doc.key, doc]));
+		return entries.flatMap((entry) => {
+			const url = readingListShareURL(entry.url);
+			if (!url) return [];
+			const key = normalizeURL(url);
+			const doc = byKey.get(entry.key) || byKey.get(key);
+			const addresses = [...new Set([key, doc?.key, normalizeURL(doc?.url), ...folderAddresses(doc?.collected)].filter(Boolean))];
+			const discussions = new Map();
+			const addDiscussion = (story) => {
+				const source = story?.source;
+				if (!source || (story.kind && story.kind !== "discussion")) return;
+				const id = String(story.id || parseSourceKey(story.key)?.id || "");
+				const address = readingListShareURL(discussionURL(story) || threadAddress(source, id) ||
+					(source === "reddit" && /^[a-z0-9]+$/i.test(id) ? `https://www.reddit.com/comments/${id}/` : ""));
+				if (!address) return;
+				const label = getSource(source)?.label || story.label || story.site || source;
+				const identity = id ? sourceKey(source, id) : address;
+				if (!discussions.has(identity)) discussions.set(identity, { url: address, title: `${label} discussion` });
+			};
+			for (const address of addresses) {
+				const row = rows.get(address) || (address === key ? entry.frontRow : null);
+				for (const story of [row?.story, ...(row?.also || [])]) addDiscussion(story);
+				if (open?.key === address) open.stories.forEach(addDiscussion);
+				for (const hit of discoveries[address]?.results || []) {
+					if (/^\d+$/.test(String(hit?.objectID))) addDiscussion(algoliaDiscussion(hit));
+				}
+			}
+			doc?.discussions.forEach(addDiscussion);
+			return [{
+				url,
+				title: entry.title || doc?.title || url,
+				site: hostLabel(url),
+				discussions: [...discussions.values()],
+				quotes: (doc?.quotes || []).map((quote) => String(quote.text || quote.title || "").trim()).filter(Boolean),
+				notes: (doc?.notes || []).map((note) => String(note.text || "").trim()).filter(Boolean),
+			}];
+		});
+	}
+
+	function readingListMarkdownText(text) {
+		return text
+			.replace(/[\\[\]`*_!#<>&~|]/g, "\\$&")
+			.replace(/^(?:-{3,}|=+)$/, "\\$&")
+			.replace(/^([+-]|\d+[.)])(?=\s)/, (prefix) => prefix.replace(/[+.)-]$/, "\\$&"));
+	}
+
+	function readingListMarkdownLink({ title, url }) {
+		const label = readingListMarkdownText(String(title).replace(/\s+/g, " ").trim());
+		const address = url.replace(/\\/g, "\\\\")
+			.replace(/&(?=(?:#\d+|#x[\da-f]+|[a-z][a-z\d]+);)/gi, "\\&");
+		return `[${label}](${/[()]/.test(address) ? `<${address}>` : address})`;
+	}
+
+	function readingListMarkdown(title, pages, options) {
+		const lines = [`# ${readingListMarkdownText(title)}`, ""];
+		const textLines = (text) => text.split(/\r\n?|\n/).map((line) => readingListMarkdownText(line.trim()));
+		for (const page of pages) {
+			lines.push(`- ${readingListMarkdownLink(page)}`);
+			if (options.discussions) {
+				for (const discussion of page.discussions) lines.push(`  - ${readingListMarkdownLink(discussion)}`);
+			}
+			if (options.quotes) {
+				for (const quote of page.quotes) {
+					lines.push("", ...textLines(quote).map((line) => `  > ${line}`));
+				}
+			}
+			if (options.notes) {
+				for (const note of page.notes) {
+					const [first, ...rest] = textLines(note);
+					lines.push(`  - Note: ${first}`, ...rest.map((line) => `    ${line}`));
+				}
+			}
+		}
+		return lines.join("\n");
+	}
+
+	async function openReadingListShare(entries, opener) {
+		const state = appState;
+		const shadow = state?.ui.shadow;
+		const dialog = shadow?.getElementById("reading-list-share");
+		if (!dialog || appNativeDialogOpen(shadow) || !entries.length) return;
+		const find = (name) => shadow.getElementById("reading-list-share-" + name);
+		const title = find("title");
+		const checkboxes = Object.fromEntries(["discussions", "quotes", "notes"].map((name) => [name, find(name)]));
+		const list = find("pages");
+		const copy = find("copy");
+		const count = find("count");
+		const markdown = find("markdown");
+		const status = find("status");
+		const current = () => dialog.open && dialog.onclose === close;
+		const rows = state.rowsByURL;
+		const open = renderedFor && renderedFor === state.open?.key ? { key: renderedFor, stories: renderedDiscussions } : null;
+		let pages = [];
+		let revision = 0;
+		let copying = false;
+		let feedback = "";
+
+		function close() {
+			if (dialog.open || dialog.onclose !== close) return;
+			dialog.onclose = dialog.oninput = copy.onclick = null;
+			pages = [];
+			list.replaceChildren();
+			for (const node of [find("preview-title"), count, status]) node.textContent = "";
+			title.value = "";
+			markdown.hidden = true;
+			markdown.value = "";
+			if (opener?.isConnected) opener.focus({ preventScroll: true });
+		}
+
+		const listTitle = () => title.value.trim() || "Reading list";
+		const options = () => Object.fromEntries(Object.entries(checkboxes).map(([name, box]) => [name, box.checked]));
+		const renderMarkdown = () => readingListMarkdown(listTitle(), pages, options());
+		const update = () => {
+			revision++;
+			find("preview-title").textContent = listTitle();
+			const include = options();
+			const items = pages.map((page) => {
+				const item = document.createElement("li");
+				const name = document.createElement("strong");
+				name.textContent = page.title;
+				const meta = document.createElement("small");
+				meta.textContent = [page.site, ...(include.discussions ? page.discussions.map((discussion) => discussion.title) : [])].filter(Boolean).join(" · ");
+				item.append(name, meta);
+				if (include.quotes) {
+					for (const text of page.quotes) {
+						const quote = document.createElement("blockquote");
+						quote.textContent = text;
+						item.append(quote);
+					}
+				}
+				if (include.notes) {
+					for (const text of page.notes) {
+						const note = document.createElement("p");
+						note.textContent = "Note: " + text;
+						item.append(note);
+					}
+				}
+				return item;
+			});
+			list.replaceChildren(...items);
+			if (!markdown.hidden) markdown.value = renderMarkdown();
+			count.textContent = pluralize(pages.length, "link");
+			status.textContent = feedback;
+			copy.disabled = !pages.length;
+		};
+
+		title.value = "Reading list";
+		title.autofocus = !appIsPhone();
+		checkboxes.discussions.checked = true;
+		checkboxes.quotes.checked = checkboxes.notes.checked = false;
+		markdown.hidden = copy.disabled = true;
+		markdown.value = count.textContent = "";
+		feedback = "Preparing preview…";
+		update();
+		dialog.onclose = close;
+		dialog.oninput = (event) => { if (event.target !== markdown) update(); };
+		for (const button of dialog.querySelectorAll("[data-share-close]")) button.onclick = () => dialog.close();
+		copy.onclick = async () => {
+			if (copying) return;
+			const copiedRevision = revision;
+			copying = true;
+			try {
+				await copyText(renderMarkdown());
+				if (current() && revision === copiedRevision) {
+					markdown.hidden = true;
+					markdown.value = "";
+					status.textContent = "Markdown copied.";
+				}
+			} catch {
+				if (current()) {
+					markdown.value = renderMarkdown();
+					markdown.hidden = false;
+					status.textContent = "Clipboard unavailable. Copy the selected text.";
+					markdown.focus();
+					markdown.select();
+				}
+			} finally {
+				copying = false;
+			}
+		};
+		dialog.showModal();
+
+		const [library, cached] = await Promise.allSettled([loadCollectionDocuments(), load(DISCOVERY_CACHE_KEY, null)]);
+		if (!current()) return;
+		pages = readingListSharePages(entries, library.value || [], rows, keptDiscoveries(cached.value, Date.now()), open);
+		feedback = !pages.length ? "No shareable links selected." : pages.length < entries.length ? "Some selected links couldn’t be included." : "";
+		if (library.status === "rejected") feedback = [feedback, "Saved details couldn’t load."].filter(Boolean).join(" ");
+		update();
+	}
 
 	async function cleanupRetiredArticleIdentity() {
 		const key = "HNewhere:retired_identity_cleaned";
@@ -2164,8 +2984,6 @@
 			return;
 		}
 
-		await loadCollected();
-
 		const read = async (key) => {
 			try {
 				const value = (await GM.getValue(key, null)) ?? [];
@@ -2175,32 +2993,36 @@
 				return { ok: false };
 			}
 		};
-		const [folders, saved, index] = await Promise.all([
-			read(STORAGE.collected),
-			read(STORAGE.saved),
-			read(NOTES_INDEX_KEY),
-		]);
+		await withCollectionStorage(async (write) => {
+			if (await load(COLLECTION_FILED_KEY, false)) return;
+			await loadCollectedForWrite(write);
+			const [folders, saved, index] = await Promise.all([
+				read(STORAGE.collected),
+				read(STORAGE.saved),
+				read(NOTES_INDEX_KEY),
+			]);
 
-		if (!folders.ok || !saved.ok || !index.ok) {
-			console.error("Backchannel collection repair could not read its stores");
-			return;
-		}
+			if (!folders.ok || !saved.ok || !index.ok) {
+				console.error("Backchannel collection repair could not read its stores");
+				return;
+			}
 
-		const filed = fileSavedItems(saved.value, index.value, folders.value, Date.now());
+			const filed = fileSavedItems(saved.value, index.value, folders.value, Date.now());
 
-		if (JSON.stringify(filed.folders) !== JSON.stringify(folders.value)) {
-			await saveCollected(filed.folders);
-		}
+			if (JSON.stringify(filed.folders) !== JSON.stringify(folders.value)) {
+				await write(STORAGE.collected, filed.folders);
+			}
 
-		if (JSON.stringify(filed.saved) !== JSON.stringify(saved.value)) {
-			await storeSavedItems(filed.saved);
-		}
+			if (JSON.stringify(filed.saved) !== JSON.stringify(saved.value)) {
+				await write(STORAGE.saved, filed.saved);
+			}
 
-		if (JSON.stringify(filed.notedIndex) !== JSON.stringify(index.value)) {
-			await save(NOTES_INDEX_KEY, filed.notedIndex);
-		}
+			if (JSON.stringify(filed.notedIndex) !== JSON.stringify(index.value)) {
+				await write(NOTES_INDEX_KEY, filed.notedIndex);
+			}
 
-		await save(COLLECTION_FILED_KEY, true);
+			await write(COLLECTION_FILED_KEY, true);
+		});
 	}
 
 	const orphanTraceTried = new Set();
@@ -3700,6 +4522,8 @@
 			id: story.short_id,
 			url: story.url,
 			title: story.title || "",
+			description: textExcerpt(story.description_plain || story.description, 360),
+			tags: Array.isArray(story.tags) ? story.tags.filter((tag) => typeof tag === "string" && tag.length <= 40).slice(0, 12) : [],
 			by: story.submitter_user || "",
 			score: story.score ?? 0,
 			time: Math.floor(new Date(story.created_at).getTime() / 1000) || 0,
@@ -3718,6 +4542,8 @@
 			id: post.id,
 			url: post.url || "",
 			title: post.name || "",
+			description: textExcerpt(post.embed_description || post.body, 360),
+			community: typeof view.community?.name === "string" ? view.community.name.slice(0, 100) : "",
 			by: view.creator?.name || "",
 			score: view.counts?.score ?? 0,
 			time: Math.floor(new Date(post.published).getTime() / 1000) || 0,
@@ -3741,6 +4567,34 @@
 			site: post.subreddit_name_prefixed || "r/" + (post.subreddit || ""),
 			permalink: "https://www.reddit.com" + (post.permalink || ""),
 		};
+	}
+
+	function pageLookMetadata(page) {
+		const content = (selectors) => {
+			for (const selector of selectors) {
+				const value = page.querySelector(selector)?.getAttribute("content")?.trim();
+
+				if (value) return value;
+			}
+
+			return "";
+		};
+
+		return lookMetadata({
+			description: content([
+				'meta[property="og:description" i]',
+				'meta[name="og:description" i]',
+				'meta[name="twitter:description" i]',
+				'meta[property="twitter:description" i]',
+				'meta[name="description" i]',
+			]),
+			section: content([
+				'meta[property="article:section" i]',
+				'meta[name="article:section" i]',
+				'meta[itemprop~="articleSection" i]',
+				'meta[name="section" i]',
+			]),
+		});
 	}
 
 	function pageLook(page) {
@@ -3785,6 +4639,7 @@
 			color: headingStyle?.color || text,
 			icon,
 			site: meta('meta[property="og:site_name"]') || host,
+			...pageLookMetadata(page),
 			at: Date.now(),
 		};
 	}
@@ -3818,6 +4673,7 @@
 			color: "",
 			icon: resolve(icon),
 			site: meta('meta[property="og:site_name"]') || host,
+			...pageLookMetadata(page),
 			at: Date.now(),
 		};
 	}
@@ -3960,6 +4816,7 @@
 			id: normalizeURL(url),
 			url,
 			title: link?.title || "",
+			description: textExcerpt(link?.description, 360),
 			by: "",
 			score: Number(today.accounts) || 0,
 			time: Number(today.day) || 0,
@@ -4968,7 +5825,7 @@
 			const existing = key ? byURL.get(key) : null;
 
 			if (existing) {
-				existing.also.push(entry.story);
+				mergeFrontPageDiscussion(existing, entry.story);
 				continue;
 			}
 
@@ -4982,6 +5839,26 @@
 		}
 
 		return merged;
+	}
+
+	function mergeFrontPageDiscussion(row, story) {
+		const match = story.source && story.id != null && story.id !== "" ?
+			[row.story, ...row.also].findIndex((other) => other.source === story.source && String(other.id) === String(story.id)) : -1;
+		if (match === -1) {
+			row.also.push(story);
+			return;
+		}
+		const original = match === 0 ? row.story : row.also[match - 1];
+		const interests = [...new Set([...(original.interests || []), ...(story.interests || []), story.topic])]
+			.filter((interest) => interest && interest !== original.topic);
+		if (!interests.length) return;
+		const updated = { ...original, interests };
+		if (match === 0) row.story = updated;
+		else row.also[match - 1] = updated;
+	}
+
+	function storyCarriesTopic(story, id) {
+		return story?.topic === id || Boolean(story?.interests?.includes(id));
 	}
 
 	function isOffSiteLink(url, selfHosts = [], selfPaths = []) {
@@ -6205,7 +7082,7 @@ ${
 		if (!settings.sources?.reddit || cooldown?.until > Date.now()) return { error: "not-needed" };
 		const paths = [];
 		if (!batch.reuseFresh && (batch.feedOnly || appState || isBrowsing(sidebarUI))) {
-			const feeds = frontPageFeeds(settings, frontPageSourceIds(settings), enabledSourceIds(settings, registeredSourceIds()));
+			const feeds = frontPageFeedsForView(settings, activeFrontPageView());
 			for (const feed of feeds.filter((feed) => feed.source === "reddit")) {
 				const cached = await load(frontPageFeedKey(feed), null);
 				if (cached?.status !== "window" && cached?.retryAt > Date.now()) continue;
@@ -6481,7 +7358,7 @@ ${
 			const readyForFeed = async (entry) => {
 				if (!options.feedOnly || !entry?.ok || !Array.isArray(entry.feedKeys) || !entry.feedKeys.length) return false;
 				const settings = await loadSettings();
-				const feeds = frontPageFeeds(settings, frontPageSourceIds(settings), enabledSourceIds(settings, registeredSourceIds())).filter((feed) => feed.source === "reddit");
+				const feeds = frontPageFeedsForView(settings, activeFrontPageView()).filter((feed) => feed.source === "reddit");
 				const keys = frontPageStorageKeys(feeds);
 				if (JSON.stringify(keys) !== JSON.stringify(entry.feedKeys)) return false;
 				const caches = await Promise.all(keys.map((key) => load(key, null)));
@@ -9108,26 +9985,6 @@ button {
 		await refreshArticleAnnotations();
 	}
 
-	function syncNewCommentsFirstControl(ui, entries, settings) {
-		const control = ui?.shadow?.querySelector("#sort-new-first");
-
-		if (!control) {
-			return;
-		}
-
-		const unread = entries.some((entry) => entry.unread);
-
-		control.hidden = !unread;
-		control.classList.toggle("is-on", Boolean(settings.newCommentsFirst));
-		control.setAttribute("aria-pressed", String(Boolean(settings.newCommentsFirst)));
-
-		const separator = ui.shadow.querySelector("#sort-sep");
-
-		if (separator) {
-			separator.hidden = !unread;
-		}
-	}
-
 	function removeNoteAffordance() {
 		document.querySelector("[data-hnewhere-note-add]")?.remove();
 	}
@@ -9396,12 +10253,8 @@ button {
 		return documents;
 	}
 
-	function downloadJSON(payload, name) {
-		const href = URL.createObjectURL(
-			new Blob([JSON.stringify(payload, null, 2)], {
-				type: "application/json",
-			}),
-		);
+	function downloadFile(text, type, name) {
+		const href = URL.createObjectURL(new Blob([text], { type }));
 		const link = document.createElement("a");
 
 		link.href = href;
@@ -9422,7 +10275,7 @@ button {
 			return payload;
 		}
 
-		downloadJSON(payload, notesExportName(now));
+		downloadFile(JSON.stringify(payload, null, 2), "application/json", notesExportName(now));
 
 		return payload;
 	}
@@ -9852,10 +10705,13 @@ button {
 		const interval = sourceRefreshInterval(settings);
 		if (!interval) return false;
 		const entries = await loadCollected();
-		const due = collectedDue(entries, Date.now(), Math.max(COLLECTED_CHECK_INTERVAL_MS, interval)).slice(
-			0,
-			COLLECTED_CHECK_BATCH,
-		);
+		const due = collectedDue(entries, Date.now(), Math.max(COLLECTED_CHECK_INTERVAL_MS, interval))
+			.filter(({ url }) => {
+				if (!url || isHiddenSite(url)) return false;
+				const { username, password } = new URL(url);
+				return !username && !password;
+			})
+			.slice(0, COLLECTED_CHECK_BATCH);
 
 		if (!due.length) {
 			return false;
@@ -9872,7 +10728,7 @@ button {
 				misses: answered ? 0 : (entry.misses || 0) + 1,
 			};
 
-			patches.set(entry.key, patch);
+			patches.set(entry.key, { before: entry, patch });
 
 			if (changed) {
 				const found = await discoverAll([entry.url], settings);
@@ -9884,9 +10740,13 @@ button {
 			}
 		}
 
-		const merged = await mutateCollected((current) =>
-			current.map((entry) => (patches.has(entry.key) ? { ...entry, ...patches.get(entry.key) } : entry)),
-		);
+		const merged = await mutateCollected((current) => current.map((entry) => {
+			const result = patches.get(entry.key);
+			if (!result) return entry;
+			const { before, patch } = result;
+			return entry.addedAt === before.addedAt && entry.url === before.url &&
+				entry.checkedAt === before.checkedAt && entry.importBatch === before.importBatch ? { ...entry, ...patch } : entry;
+		}));
 
 		return freshCollectedCount(merged) > 0;
 	}
@@ -9923,15 +10783,17 @@ button {
 		);
 	}
 
-	function scheduleCollectedChecks(settings) {
+	let collectedChecks = null;
+
+	function scheduleCollectedChecks() {
 		const run = () => {
-			loadSettings().then(checkCollected)
+			if (collectedChecks) return;
+			collectedChecks = loadSettings().then(checkCollected)
 				.then((found) => {
-					if (found) {
-						refreshCollectionSignal().catch(console.error);
-					}
+					if (found) return refreshCollectionViews();
 				})
-				.catch(console.error);
+				.catch(console.error)
+				.finally(() => { collectedChecks = null; });
 		};
 
 		if (typeof requestIdleCallback === "function") {
@@ -10514,7 +11376,7 @@ button {
 	}
 
 	function frontPageMode(settings) {
-		return settings?.frontPageMode === "topics" && frontPageTopicIds(settings).length
+		return settings?.frontPageMode === "topics" && (frontPageTopicIds(settings).length || settings.frontPageIncludeTopLinks === true)
 			? "topics"
 			: "sources";
 	}
@@ -10548,11 +11410,17 @@ button {
 			}
 		}
 
-		return feeds.length ? feeds : topLinks;
+		if (!feeds.length) return topLinks;
+		if (settings.frontPageIncludeTopLinks === true) {
+			const included = new Set(feeds.filter(({ kind }) => kind === "front").map(({ source }) => source));
+			feeds.push(...topLinks.filter(({ source }) => !included.has(source)));
+		}
+		return feeds;
 	}
 
 	function bskyFeedStories(items) {
 		const byKey = new Map();
+		const seen = new Set();
 
 		for (const item of items || []) {
 			const post = item?.post;
@@ -10560,36 +11428,38 @@ button {
 			const url = external?.uri || "";
 			const key = normalizeURL(url);
 
-			if (!key || !isOffSiteLink(url, ["bsky.app"])) {
+			if (!post?.uri || seen.has(post.uri) || !key || !isOffSiteLink(url, ["bsky.app"])) {
 				continue;
 			}
 
+			seen.add(post.uri);
 			const time = Math.floor(Date.parse(post.indexedAt) / 1000) || 0;
 			const score = (post.likeCount || 0) + (post.repostCount || 0);
-			const existing = byKey.get(key);
-
-			if (existing) {
-				existing.score += score;
-				existing.descendants += post.replyCount || 0;
-				existing.time = Math.min(existing.time, time);
-				continue;
-			}
-
 			const rkey = String(post.uri || "").split("/").pop();
-
-			byKey.set(key, {
+			const story = {
 				source: "bsky",
 				key,
 				id: post.uri,
 				url,
 				title: external.title || hostLabel(url),
+				description: textExcerpt(external.description, 360),
 				by: post.author?.handle || "",
 				score,
 				time,
 				descendants: post.replyCount || 0,
 				site: hostLabel(url),
 				permalink: post.author?.handle && rkey ? `https://bsky.app/profile/${post.author.handle}/post/${rkey}` : "",
-			});
+				frontPageThread: true,
+			};
+			const existing = byKey.get(key);
+			if (existing) {
+				(existing.frontPageThreads ??= [{ ...existing }]).push(story);
+				existing.score += story.score;
+				existing.descendants += story.descendants;
+				existing.time = Math.min(existing.time, story.time);
+			} else {
+				byKey.set(key, story);
+			}
 		}
 
 		return [...byKey.values()];
@@ -10616,6 +11486,28 @@ button {
 		);
 	}
 	// #endregion hnewhere-test-export
+
+	function frontPageFeedsForView(settings, view = "") {
+		const sources = frontPageSourceIds(settings);
+		const enabled = enabledSourceIds(settings, registeredSourceIds());
+		if (view === APP_HEADLINES.view) return frontPageFeeds({ frontPageMode: "sources" }, sources, enabled);
+		if (view.startsWith("topic:") && frontPageMode(settings) === "sources") {
+			const id = view.slice("topic:".length);
+			if (frontPageTopicIds(settings).includes(id)) {
+				return frontPageFeeds({ frontPageMode: "topics", frontPageTopics: [id] }, sources, enabled);
+			}
+		}
+		return frontPageFeeds(settings, sources, enabled);
+	}
+
+	function followedFrontPageInterests(settings) {
+		const feeds = frontPageFeeds({ ...settings, frontPageMode: "topics" }, [], enabledSourceIds(settings, registeredSourceIds()));
+		return [...new Set(feeds.map((feed) => feed.topic))];
+	}
+
+	function frontPageHasHeadlines(settings) {
+		return settings.frontPageMode === "topics" && settings.frontPageIncludeTopLinks === true && frontPageSourceIds(settings).length > 0;
+	}
 
 	async function frontPageJSON(url, field = "") {
 		const result = await requestWithMeta(url);
@@ -10695,6 +11587,24 @@ button {
 		});
 	}
 
+	function matchingFrontPageFeedKeys(feed) {
+		if (feed.kind !== "front") return [];
+		if (feed.topic) return [frontPageFeedKey({ source: feed.source, kind: "front" })];
+		const preferences = { frontPageMode: "topics", frontPageTopics: TOPICS.map(({ id }) => id) };
+		return frontPageFeeds(preferences, [], [feed.source])
+			.filter((each) => each.kind === "front")
+			.flatMap((each) => [frontPageFeedKey(each), FRONT_PAGE_FEED_KEY + `${each.topic}/${each.source}/`]);
+	}
+
+	function tagCachedFrontPageStories(stories, feed) {
+		if (!Array.isArray(stories) || feed.kind !== "front") return stories;
+		return stories.map((story) => {
+			const { topic, interests, ...untagged } = story;
+			if (topic === feed.topic && !interests?.length) return story;
+			return feed.topic ? { ...untagged, topic: feed.topic } : untagged;
+		});
+	}
+
 	function loadTopicFeed(feed, force, settings, legacy = null, { cachedOnly = false } = {}) {
 		const key = frontPageFeedKey(feed);
 		const existing = frontPageJobs.get(key);
@@ -10704,10 +11614,12 @@ button {
 		const request = ++frontPageRequestId;
 		if (!cachedOnly) frontPageLoads.set(key, request);
 		job.promise = (async () => {
-			const stored = await load(key, null);
+			const [stored, ...matches] = await Promise.all([key, ...matchingFrontPageFeedKeys(feed)].map((key) => load(key, null)));
 			const oldTopic = feed.topic && !stored ? await load(FRONT_PAGE_FEED_KEY + `${feed.topic}/${feed.source}/${feed.target || ""}`, null) : null;
-			const previous = stored || oldTopic || legacy;
-			const cached = previous ? { ...previous, status: previous.status || "ok" } : null;
+			const fetchedAt = (entry) => Number(entry?.dataFetchedAt ?? entry?.lastSuccessAt ?? entry?.timestamp) || 0;
+			const previous = matches.filter(Boolean).reduce((recent, match) => !recent || fetchedAt(match) > fetchedAt(recent) ? match : recent,
+				stored || oldTopic || legacy);
+			const cached = previous ? { ...previous, stories: tagCachedFrontPageStories(previous.stories, feed), status: previous.status || "ok" } : null;
 			const now = Date.now();
 			const savedResult = () => ({ stories: Array.isArray(cached?.stories) ? cached.stories : [], status: cached?.status || "ok", cached: Boolean(cached?.status && cached.status !== "ok" && cached.stories?.length), attempted: false, lastAttemptAt: cached?.lastAttemptAt ?? cached?.timestamp ?? 0, lastSuccessAt: cached?.lastSuccessAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), dataFetchedAt: cached?.dataFetchedAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), retryAt: cached?.retryAt || 0 });
 			if (epoch !== frontPageCacheEpoch || !cachedOnly && frontPageLoads.get(key) !== request) return { stories: [], status: "cancelled", attempted: false };
@@ -10743,7 +11655,10 @@ button {
 
 	function frontPageSnapshot(feeds, results) {
 		const lists = results.map((result) => result.stories);
-		const merged = mergeStoriesByURL(blendStories(lists.filter((list) => list.length)));
+		const blended = blendStories(lists.filter((list) => list.length));
+		const merged = mergeStoriesByURL(blended.flatMap((row) => row.story.frontPageThreads?.map((story) => ({
+			...row, story: { ...story, topic: row.story.topic },
+		})) || [row]));
 		return {
 			rows: feeds.some((feed) => feed.topic) ? liftMergedRows(merged) : merged,
 			sources: [...new Set(feeds.filter((feed, index) => lists[index].length).map((feed) => feed.source))],
@@ -10778,6 +11693,10 @@ button {
 		return isBrowsing(sidebarUI) && browseTab === "front" && !sidebarUI.browseHome?.searchOpen ? sidebarUI : null;
 	}
 
+	function activeFrontPageView() {
+		return appState?.view || sidebarUI?.browseHome?.view;
+	}
+
 	function scheduleFrontPageRefresh() {
 		const schedule = ++frontPageScheduleId;
 		window.clearTimeout(frontPageRefreshTimer);
@@ -10792,7 +11711,7 @@ button {
 		(async () => {
 			const settings = await loadSettings();
 			if (!sourceRefreshInterval(settings)) return;
-			const feeds = frontPageFeeds(settings, frontPageSourceIds(settings), enabledSourceIds(settings, registeredSourceIds()));
+			const feeds = frontPageFeedsForView(settings, activeFrontPageView());
 			if (!feeds.length) return;
 			const combined = await load(frontPageCacheKey(feeds), null);
 			const cooldown = feeds.some((feed) => feed.source === "reddit") ? await load(REDDIT_POLL_KEY, null) : null;
@@ -10838,14 +11757,29 @@ button {
 		}
 	}
 
+	async function loadDefaultFrontPageList(feeds, settings) {
+		const [snapshot, hidden] = await Promise.all([loadFrontPages({ feeds, settings, cachedOnly: true }), loadHiddenStoryKeys()]);
+		const candidates = snapshot.rows.filter((row) => !isStoryHidden(row.story, hidden));
+		const rows = settings.hiddenTopics.length
+			? (await readerFrontPageTopics(candidates, readerArticleCoverage(frontPageRowStories(candidates), settings, hidden), settings.hiddenTopics)).rows
+			: candidates;
+		return { candidates, rows };
+	}
+
+	async function loadFrontPageView(view, settings, options, paint) {
+		const feeds = frontPageFeedsForView(settings, view);
+		const defaultFeeds = frontPageFeedsForView(settings);
+		const defaultList = frontPageCacheKey(feeds) === frontPageCacheKey(defaultFeeds)
+			? null : loadDefaultFrontPageList(defaultFeeds, settings);
+		const onUpdate = async (snapshot) => paint(snapshot, await defaultList);
+		const [snapshot] = await Promise.all([loadFrontPages({ ...options, feeds, settings, onUpdate }), defaultList]);
+		return onUpdate(snapshot);
+	}
+
 	async function loadFrontPagesRequest(options, request) {
 		if (!options.force && (document.visibilityState === "hidden" || sidebarUI && !activeFrontPageUI())) options = { ...options, cachedOnly: true };
 		const settings = options.settings || (await loadSettings());
-		const feeds = frontPageFeeds(
-			settings,
-			frontPageSourceIds(settings),
-			enabledSourceIds(settings, registeredSourceIds()),
-		);
+		const feeds = options.feeds || frontPageFeedsForView(settings);
 		const redditFeed = feeds.find((feed) => feed.source === "reddit");
 		const redditCached = redditFeed ? await load(frontPageFeedKey(redditFeed), null) || await load(frontPageCacheKey(feeds), null) : null;
 
@@ -15229,10 +16163,10 @@ html[data-backchannel-installed] .chin {
 		}, VIEW_SWAP_FADE_MS);
 	}
 
-	function openStoryFromRow(story, event, { openPanel = false, focus = "" } = {}) {
+	function openStoryFromRow(story, event, { openPanel = false, focus = "", row = null } = {}) {
 		if (appState && !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) {
 			event.preventDefault();
-			openAppStory(story, { focus }).catch(console.error);
+			openAppStory(story, { focus, row }).catch(console.error);
 			if (openPanel) revealAppDiscussion();
 			return;
 		}
@@ -15259,6 +16193,10 @@ html[data-backchannel-installed] .chin {
 		});
 	}
 
+	function storyHasCommentCount(story) {
+		return !story.collective && (story.source !== "mastodon" || Boolean(story.permalink));
+	}
+
 	function renderBrowseRow(story, container, rank, options = {}) {
 		const isWriting = story.kind === "comment" || story.kind === "noted";
 		const readerRow = Boolean(appState) || options.readerRow === true;
@@ -15266,7 +16204,7 @@ html[data-backchannel-installed] .chin {
 		const inPost = story.context
 			? `in ${escapeHTML(story.context)}${story.site ? ` (${escapeHTML(story.site)})` : ""}`
 			: "";
-		const discussions = [story, ...(options.also || [])];
+		const discussions = [story, ...(options.also || [])].filter(storyHasCommentCount);
 		const totalComments = discussions.reduce((sum, each) => sum + (each.descendants || 0), 0);
 		const counted = totalComments > 0 && discussions.some((each) => Number.isFinite(each.descendants));
 		const sourceCount = new Set(discussions.map((each) => each.source || "hn")).size;
@@ -15347,7 +16285,7 @@ html[data-backchannel-installed] .chin {
 				? `${rank}.`
 				: ""
 	}</div>
-	${readerRow && !isWriting ? appRowThumbHTML(story) : ""}
+	${readerRow && !isWriting ? appRowThumbHTML(story, { look: options.look }) : ""}
 	<div class="browse-main">
 	<div class="story-title">
 	<a class="browse-title-link${isWriting ? " browse-quote" : ""}" href="${escapeHTML(story.url)}">${escapeHTML(story.title)}</a>
@@ -15362,14 +16300,12 @@ html[data-backchannel-installed] .chin {
 
 		const more = row.querySelector(".browse-more");
 
-		if (more) {
+		if (more && appState) {
+			wireAppRowMenu(row, more);
+		} else if (more) {
 			more.onclick = (event) => {
 				event.stopPropagation();
-				if (appState) {
-					openAppRowMenu(row, more);
-				} else {
-					toggleBrowseRowMenu(row, more, event.detail === 0);
-				}
+				toggleBrowseRowMenu(row, more, event.detail === 0);
 			};
 		}
 
@@ -15431,15 +16367,15 @@ html[data-backchannel-installed] .chin {
 				await mutateQueue((entries) => {
 					already = entries.some((e) => queueKey(e) === key);
 
-					return already
+					return options.inQueue || already
 						? removeFromQueue(entries, key)
 						: addToQueue(entries, story, Date.now());
 				});
 
-				paintQueued(!already);
-
-				if (already && row.parentElement?.closest("#browse-list") && browseTab === "queue") {
-					row.remove();
+				if (options.inQueue) {
+					await options.reload?.();
+				} else {
+					paintQueued(!already);
 				}
 
 				refreshQueueCount(container.getRootNode());
@@ -15489,12 +16425,7 @@ html[data-backchannel-installed] .chin {
 		}
 
 		const settings = await loadSettings();
-		frontPageAvailable =
-			frontPageFeeds(
-				settings,
-				frontPageSourceIds(settings),
-				enabledSourceIds(settings, registeredSourceIds()),
-			).length > 0;
+		frontPageAvailable = frontPageFeedsForView(settings).length > 0 || followedFrontPageInterests(settings).length > 0;
 
 		if (frontTab) {
 			frontTab.hidden = !frontPageAvailable;
@@ -15917,13 +16848,6 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 			return;
 		}
 
-		if (id === "watch" || id === "unwatch") {
-			await setCollectedWatched(doc, id === "watch");
-			showToast(id === "watch" ? "Watched" : "Unwatched");
-			await refreshCollectionViews();
-			return;
-		}
-
 		if (id === "delete") {
 			const snapshot = await removeCollectedDocument(doc);
 			const removals = [...(removalToastShowing() ? removalUndo.removals : []), { snapshot, notes: doc.notes?.length || 0 }];
@@ -15973,16 +16897,6 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 
 		await refreshNotepadInPlace();
 		await refreshCollectionTag();
-	}
-
-	async function setCollectedWatched(doc, watched) {
-		const known = (await loadCollected()).some((entry) => entry.key === doc.key);
-
-		if (known) {
-			await mutateCollected((entries) => withWatched(entries, doc.key, watched));
-		} else if (watched && doc.url) {
-			await fileSaved({ row: true, link: doc.url, title: doc.title || "", site: doc.site || "", addresses: [doc.key] });
-		}
 	}
 
 	async function removeCollectedDocument(doc) {
@@ -16056,7 +16970,7 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 
 	function removeDocumentCards(key) {
 		for (const root of cardRoots()) {
-			for (const card of root.querySelectorAll(".browse-card")) {
+			for (const card of root.querySelectorAll(".browse-card, .reader-collection-row")) {
 				if (card.dataset.documentKey === key) {
 					card.remove();
 				}
@@ -16230,17 +17144,24 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 	let cardImagesActive = 0;
 	const RESOURCE_REQUEST_TIMEOUT_MS = 15000;
 
-	function requestResource(options, timeout = RESOURCE_REQUEST_TIMEOUT_MS) {
+	function requestResource(options, timeout = RESOURCE_REQUEST_TIMEOUT_MS, signal) {
 		return new Promise((resolve) => {
+			if (signal?.aborted) {
+				resolve(null);
+				return;
+			}
 			let settled = false;
 			let handle;
 			const finish = (response) => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
+				signal?.removeEventListener("abort", cancel);
 				resolve(response);
 			};
-			const timer = setTimeout(() => { finish(null); try { handle?.abort?.(); } catch {} }, timeout);
+			const cancel = () => { finish(null); try { handle?.abort?.(); } catch {} };
+			const timer = setTimeout(cancel, timeout);
+			signal?.addEventListener("abort", cancel, { once: true });
 			try {
 				handle = GM.xmlHttpRequest({ ...options, timeout, onload: finish, onerror: () => finish(null), ontimeout: () => finish(null), onabort: () => finish(null) });
 				handle?.catch?.(() => finish(null));
@@ -16362,6 +17283,15 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 					painting.push(applyCardLook(card, look));
 				}
 			}
+			for (const row of root.querySelectorAll(".reader-collection-row")) {
+				const url = row.querySelector(".browse-title-link")?.getAttribute("href");
+				const thumb = row.querySelector(".browse-thumb-wrap");
+
+				if (thumb && (row.dataset.documentKey === key || normalizeURL(url) === key)) {
+					thumb.outerHTML = appRowThumbHTML({ url }, { look, fallbackFavicon: false });
+					fillAppRowThumbs(row);
+				}
+			}
 		}
 
 		return Promise.all(painting);
@@ -16371,7 +17301,7 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 
 	async function backfillCardLooks(documents, tried = lookBackfillTried) {
 		const due = documents
-			.filter((doc) => !doc.look && /^https?:\/\//i.test(doc.url || "") && !tried.has(doc.key))
+			.filter((doc) => !doc.look && !collectedPreviewOnOpen(doc.collected) && /^https?:\/\//i.test(doc.url || "") && !tried.has(doc.key))
 			.slice(0, LOOK_BACKFILL_PER_PASS);
 
 		await Promise.all(
@@ -16388,14 +17318,14 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 	}
 
 	function settleCardFreshness(key) {
-		for (const card of cardRoots().flatMap((root) => [...root.querySelectorAll(".browse-card.is-fresh")])) {
+		for (const card of cardRoots().flatMap((root) => [...root.querySelectorAll(".browse-card.is-fresh, .reader-collection-row.is-fresh")])) {
 			if (card.dataset.documentKey !== key) {
 				continue;
 			}
 
 			card.classList.remove("is-fresh");
 			card.querySelector(".browse-card-stamp")?.remove();
-			card.querySelector(".browse-card-new")?.remove();
+			card.querySelector(".browse-card-new, .reader-collection-new")?.remove();
 		}
 	}
 
@@ -16527,13 +17457,15 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 		}
 	}
 
-	function collectionTagElement(model, doc) {
-		const tag = document.createElement("section");
+	function collectionTagElement(model, doc, quotesOnly = false) {
+		const tag = document.createElement(quotesOnly ? "details" : "section");
 
-		tag.className = "collection-tag";
-		tag.setAttribute("aria-label", model.title);
-		tag.innerHTML = `
-<div class="collection-tag-head"><span class="collection-tag-title">${escapeHTML(model.title)}</span>${model.unwatched ? '<span class="collection-tag-chip">Unwatched</span>' : ""}</div>
+		tag.className = quotesOnly ? "collection-tag reader-saved-quotes" : "collection-tag";
+		tag.setAttribute("aria-label", quotesOnly ? "Saved quotes" : model.title);
+		tag.innerHTML = quotesOnly
+			? `<summary>Saved quotes</summary><ul class="collection-tag-yours">${model.yours.filter((item) => item.kind === "quote").map(collectionTagItemHTML).join("")}</ul>`
+			: `
+<div class="collection-tag-head"><span class="collection-tag-title">${escapeHTML(model.title)}</span></div>
 <button class="browse-card-more collection-tag-more" type="button" aria-label="Actions for this page" aria-haspopup="menu" aria-expanded="false">${MORE_ICON}</button>
 <div class="collection-tag-dates">${escapeHTML(model.dates)}</div>
 ${model.changes ? `<div class="collection-tag-changes">${escapeHTML(model.changes)}</div>` : ""}
@@ -16541,7 +17473,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 		const more = tag.querySelector(".collection-tag-more");
 
-		more.onclick = (event) => {
+		if (more) more.onclick = (event) => {
 			event.preventDefault();
 			event.stopPropagation();
 			openCardMenu(more, doc, { inTag: true, keyboard: event.detail === 0 });
@@ -16561,7 +17493,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		const body = ui?.body;
 		const doc = openCollectedDocument;
 
-		collectionTagContext = { ui, stories, seenTimes };
+		collectionTagContext = { ui, stories, seenTimes, counted };
 
 		if (!body) {
 			return;
@@ -16570,9 +17502,14 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		const arrival = doc && [doc.key, ...folderAddresses(doc.collected)].some((each) => collectedArrival.keys?.has(each)) ? collectedArrival : null;
 		const before = arrival ? await arrival.before : null;
 
-		body.querySelector(":scope > .collection-tag")?.remove();
+		if (openCollectedDocument !== doc || !body.isConnected) {
+			return;
+		}
 
-		if (!doc || openCollectedDocument !== doc || !body.isConnected) {
+		const previousTag = body.querySelector(":scope > .collection-tag");
+		const quotesOnly = appState?.view === "collection";
+		if (!doc || quotesOnly && !doc.quotes.length) {
+			previousTag?.remove();
 			return;
 		}
 
@@ -16634,10 +17571,19 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			model.changes = null;
 		}
 
-		const tag = collectionTagElement(model, doc);
-		const anchor = body.querySelector(":scope > .submission-details") || body.querySelector(":scope > .page-header");
+		const tag = collectionTagElement(model, doc, quotesOnly);
+		if (quotesOnly) {
+			if (previousTag?.dataset.collectionKey === doc.key) {
+				const previousQuotes = previousTag.querySelector(".collection-tag-yours");
+				const quotes = tag.querySelector(".collection-tag-yours");
+				if (!previousQuotes.isEqualNode(quotes)) previousQuotes.replaceWith(quotes);
+				return;
+			}
+			tag.dataset.collectionKey = doc.key;
+		}
 
-		body.querySelector(":scope > .collection-tag")?.remove();
+		const anchor = body.querySelector(":scope > .submission-details") || body.querySelector(":scope > .page-header");
+		previousTag?.remove();
 
 		if (anchor) {
 			anchor.after(tag);
@@ -16655,7 +17601,547 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 		await loadOpenCollectedDocument();
 		paintSavedMarks(context.ui.body);
-		await paintCollectionTag(context.ui, context.stories, context.seenTimes);
+		await paintCollectionTag(context.ui, context.stories, context.seenTimes, { counted: context.counted });
+	}
+
+	const READER_HEADLINE_TOPICS = {
+		world: /\b(?:united nations|un security council|nato|international criminal court)\b/i,
+		us: /\b(?:white house|u\.?s\.? (?:senate|congress)|u\.?s\.? supreme court)\b/i,
+		business: /\b(?:stock market|ipo|interest rates|quarterly earnings|venture capital)\b/i,
+		technology: /\b(?:open source|software|cybersecurity|artificial intelligence|semiconductors?|linux|javascript|browser extensions?|web extensions?)\b/i,
+		entertainment: /\b(?:emmy awards?|academy awards?|oscars|box office|film festival|video games?)\b/i,
+		sports: /\b(?:olympics?|nfl|nba|world cup|champions league|formula (?:one|1)|grand slam)\b/i,
+		science: /\b(?:astronomers?|telescope|nasa|particle physics|fossils?|scientific study)\b/i,
+		health: /\b(?:vaccines?|clinical trials?|public health|cancer treatment|mental health)\b/i,
+	};
+	const READER_HEADLINE_STOP_WORDS = new Set("a an and as at by for from in into is it of on or that the this to with".split(" "));
+	const READER_SUBJECT_STOP_WORDS = new Set([...READER_HEADLINE_STOP_WORDS,
+		..."able are be hn re ve without".split(" "),
+		..."about across after again all also another article articles back became before being blog both can could details do docs down each even every first general get getting go going guide home how index introduction just last latest link links made make many might more most much never new news no not now off once one only other our out over own page pages part post posts practical read really right said same saved say says simple still story such take than their them then there these they those time today too two under use using want way were what when where which why will work would year years you your".split(" "),
+	]);
+	const READER_SUBJECT_CUES = [
+		["Authentication", /\b(?:passkeys?|webauthn|passwordless|security keys?|two[- ]factor authentication|multi[- ]factor authentication)\b/i],
+		["Privacy & security", /\b(?:cybersecurity|phishing|malware|ransomware|hackers?|penetration test(?:ing|ers?)|pentesters?|browser fingerprinting|data breaches?|data privacy|protect(?:ing)? (?:your |user )?privacy|call records|end[- ]to[- ]end encryption|online surveillance|cve-\d{4}-\d+|ghsa(?:-[\da-z]{4}){3})\b/i],
+		["Self-hosting", /\b(?:self[- ]?host(?:ing|ed)|home ?labs?|home servers?|reverse prox(?:y|ies))\b/i],
+		["Artificial intelligence", /\b(?:ai|language models?|llms?|machine learning|neural networks?|chatbots?|chatgpt|vibe[- ]?coding|inference chips?|voice assistants?)\b/i],
+		["Databases", /\b(?:databases?|sqlite|postgresql|mysql|sql quer(?:y|ies)|query planners?|database indexes)\b/i],
+		["Networking", /\b(?:internet infrastructure|network protocols?|wireguard|dns (?:servers?|records?)|domain names?|reverse prox(?:y|ies)|data cent(?:er|re)s?|ip addresses|packet routing)\b/i],
+		["Web browsers", /\b(?:webkit|chromium|browser engines?|(?:web|mobile) browsers?|browser extensions?)\b/i],
+		["Web development", /\b(?:iframes?|html|css|stylesheets?|web development|web components?|browser apis?|dom apis?|web servers?)\b/i],
+		["Operating systems", /\b(?:unikernels?|linux|freebsd|openbsd|system calls?|operating systems?|kernel drivers?|file systems?|systemd)\b/i],
+		["Programming", /\b(?:programming|compilers?|javascript|typescript|python packages?|rust (?:code|language|crate)|rewrit(?:es?|ing|ten) in rust|ocaml|common lisp|source code|code reviews?|writing code|coding harness|software engineers?|developers? (?:into|to) architects?|garbage collect(?:ors?|ion)|mutex(?:es)?|memory saf(?:e|ety)|debuggers?|software libraries|developer tools|version control|foss|open source)\b/i],
+		["Computer hardware", /\b(?:cpu architecture|semiconductors?|(?:graphics|micro) processors?|graphics cards?|gpus?|hardware accelerators?|circuit boards?)\b/i],
+		["Design", /\b(?:typography|graphic design|product design|design systems?|user interfaces?|interface design|interaction design)\b/i],
+		["Energy", /\b(?:solar panels?|wind farms?|power grids?|battery storage|nuclear reactors?|renewable energy|electricity prices)\b/i],
+		["Weather & climate", /\b(?:climate change|global warming|heat waves?|hurricanes?|weather forecasts?|carbon emissions)\b/i],
+		["Environment", /\b(?:air pollution|pollutants?|water pollution|oil spills?|reef bleaching|deforestation|sulphur oxides?|sulfur oxides?|endangered species)\b/i],
+		["Transportation", /\b(?:public transit|high[- ]speed rail|trains? timetable|railroad tickets?|train tickets?|commuter rail|electric vehicles?|cycle lanes?)\b/i],
+		["Aviation", /\b(?:aircraft|airliners?|air traffic control|fighter jets?|mach[- ]\d+(?:\.\d+)?)\b/i],
+		["Food & cooking", /\b(?:recipes?|sourdough|baking bread|meal prep|food processing|culinary|cookbooks?|home cooking|fermentation)\b/i],
+		["Gardening", /\b(?:gardening|horticulture|houseplants?|vegetable gardens?|seedlings?|garden beds?)\b/i],
+		["Books & reading", /\b(?:novels?|book reviews?|book clubs?|e[- ]?books?|audiobooks?|literary criticism|public librar(?:y|ies))\b/i],
+		["Film & TV", /\b(?:box office|film festivals?|movie trailers?|television series|tv series|motion pictures?)\b/i],
+		["Video games", /\b(?:video games?|xbox|playstation|nintendo|steam deck|game consoles?|video game studios?|game jams?|gameplay|game modding)\b/i],
+		["Music", /\b(?:songwriting|music albums?|record labels?|album reviews?|music festivals?|music production)\b/i],
+		["Photography", /\b(?:photography|camera lenses|film cameras?|darkroom|photo editing)\b/i],
+		["Audio & video", /\b(?:midi|ffmpeg|audio (?:editing|encoders?)|video (?:codecs?|encoders?|compression|editing)|audio[- ]to[- ]midi)\b/i],
+		["Maps & geography", /\b(?:openstreetmap|cartography|geospatial data|geographic information systems?|topographic maps?)\b/i],
+		["Travel", /\b(?:travel guides?|travel itinerar(?:y|ies)|tourism|national parks?|travel insurance)\b/i],
+		["Housing", /\b(?:mortgages?|housing market|affordable housing|property taxes|rent control)\b/i],
+		["Business", /\b(?:ipos?|stocks|stock (?:markets?|prices?|trading)|investors?|venture capital|interest rates|inflation|tariffs?|bankruptcy|quarterly earnings|private equity|oligopol(?:y|ies)|antitrust|market concentration|startup funding)\b/i],
+		["Immigration", /\b(?:immigration|asylum seekers?|(?:work|student) visas?|residency permits?|undocumented (?:migrants?|immigrants?))\b/i],
+		["Education", /\b(?:school districts?|school boards?|academy trusts?|classroom teaching|school curricul(?:a|um)|university admissions?)\b/i],
+		["LGBTQ+ rights", /\b(?:lgbtq?\+? rights|transgender (?:people|rights|discrimination)|anti[- ]lgbtq?)\b/i],
+		["Politics", /\b(?:elections?|senators?|prime ministers?|parliament|congress|legislation|democrats?|republicans?|supreme court|governors?|sovereign (?:states?|cit(?:y|ies))|seasteading)\b/i],
+		["Military", /\b(?:army|navy|air force|armed forces|military bases?|defen[cs]e ministr(?:y|ies))\b/i],
+		["Mental health", /\b(?:mental health|clinical depression|bipolar disorder|psychotherapy|anxiety disorders?)\b/i],
+		["Health", /\b(?:healthcare|health care|vaccines?|clinical trials?|health insurance|cancers?|patient (?:care|records?|confidentiality)|nhs|infectious diseases?)\b/i],
+		["Space & astronomy", /\b(?:nasa|astronom(?:y|ers?)|exoplanets?|space telescopes?|rocket launches?|space missions?|satellite launches?|n[- ]body simulat(?:ors?|ions?))\b/i],
+		["Sports", /\b(?:olympics?|basketball|baseball|football|soccer|tennis|world cup|nfl|nba|champions league|quarterbacks?|touchdowns?|grand prix)\b/i],
+		["Mathematics", /\b(?:linear algebra|number theory|mathematical proofs?|differential equations?|group theory|combinatorics|riemann hypothesis|grh)\b/i],
+	];
+	const READER_COMMUNITY_SUBJECTS = new Map([
+		["fantasyfootball", "Sports"], ["fantasybaseball", "Sports"], ["fantasyhockey", "Sports"],
+		["pcmasterrace", "Video games"], ["pcgaming", "Video games"], ["indiegames", "Video games"],
+		["animalsbeingderps", "Animals"], ["aww", "Animals"], ["animalfriends", "Animals"], ["birding", "Animals"],
+		["sysadmin", "Networking"], ["homelab", "Self-hosting"], ["selfhosted", "Self-hosting"],
+		["programming", "Programming"], ["learnprogramming", "Programming"], ["gamedev", "Video games"],
+		["books", "Books & reading"], ["photography", "Photography"], ["mentalhealth", "Mental health"],
+	]);
+	const READER_LOBSTERS_SUBJECTS = new Map([
+		["compilers", "Programming"], ["programming", "Programming"], ["debugging", "Programming"], ["programming-languages", "Programming"],
+		["c", "Programming"], ["c++", "Programming"], ["rust", "Programming"], ["ocaml", "Programming"], ["java", "Programming"], ["lisp", "Programming"],
+		["linux", "Operating systems"], ["freebsd", "Operating systems"], ["unix", "Operating systems"],
+		["ai", "Artificial intelligence"], ["ml", "Artificial intelligence"],
+		["security", "Privacy & security"], ["privacy", "Privacy & security"], ["cryptography", "Privacy & security"],
+		["databases", "Databases"], ["networking", "Networking"], ["hardware", "Computer hardware"],
+		["web", "Web development"], ["browsers", "Web browsers"], ["css", "Web development"],
+		["games", "Video games"], ["math", "Mathematics"],
+	]);
+	const READER_PUBLISHER_SUBJECTS = new Map([
+		["pcgamer.com", "Video games"], ["rockpapershotgun.com", "Video games"], ["eurogamer.net", "Video games"],
+		["lwn.net", "Operating systems"], ["kernel.org", "Operating systems"], ["dev.java", "Programming"],
+		["mathoverflow.net", "Mathematics"], ["ffmpeg.org", "Audio & video"], ["windowslatest.com", "Technology"],
+		["startupschool.org", "Business"], ["lovable.dev", "Artificial intelligence"],
+	]);
+	const GITHUB_RESERVED_SECTIONS = new Set("about account apps codespaces collections contact customer-stories enterprise events explore features issues login marketplace new notifications orgs organizations pricing pulls search security settings site sponsors topics trending users".split(" "));
+	const READER_COVERAGE_WINDOW = 2 * 86400;
+	const READER_STORY_ACTIONS = [
+		["breach", /\b(?:hack(?:s|ed|ing|ers?)?|breach(?:es|ed|ing)?|compromis(?:e|es|ed|ing))\b/g],
+		["blockade", /\b(?:block(?:s|ed|ing)?|blockad(?:e|es|ed|ing)|shipping restrictions?)\b/g],
+		["airstrike", /\bair[ -]?strikes?\b/g],
+		["war", /\b(?:wars?|conflicts?)\b/g],
+		["acquisition", /\b(?:acquir(?:e|es|ed|ing)|acquisitions?|buy(?:s|ing)?|bought)\b/g],
+		["ban", /\b(?:ban(?:s|ned|ning)?|prohibit(?:s|ed|ing)?)\b/g],
+		["election", /\b(?:elections?|elect(?:s|ed|ing))\b/g],
+		["launch", /\blaunch(?:es|ed|ing)?\b/g],
+	];
+	const READER_STORY_ACTION_WORDS = new Set(READER_STORY_ACTIONS.map(([word]) => word));
+	const READER_STORY_CONTEXT = /\b(?:attack|blockade|breach|ceasefire|change|closure|decision|election|investigation|launch|negotiations?|protests?|release|revolution|sanctions?|talks|trial|war)\b/i;
+
+	function readerHeadlineTags(title, tags = new Set()) {
+		for (const { id } of TOPICS) {
+			if (READER_HEADLINE_TOPICS[id].test(title)) tags.add(id);
+		}
+		return tags;
+	}
+
+	function readerSubjectWords(text) {
+		return (String(text || "").normalize("NFKC").match(/[\p{L}\p{N}]+/gu) || []).slice(0, 30);
+	}
+
+	function readerSubjectPaths(url) {
+		try {
+			return new URL(url).pathname.split("/").filter(Boolean).slice(-3)
+				.map((part) => decodeURIComponent(part).replace(/\.[a-z0-9]{1,6}$/i, "").replace(/[-_]+/g, " "));
+		} catch {
+			return [];
+		}
+	}
+
+	function readerNamedPageSubject(value) {
+		try {
+			const url = new URL(value);
+			const parts = url.pathname.split("/").filter(Boolean);
+			const [owner, name] = parts;
+			if (url.hostname === "github.com" && /^[\da-z][\da-z-]*$/i.test(owner || "") &&
+				!GITHUB_RESERVED_SECTIONS.has(owner.toLowerCase()) && /^[\da-z_.-]+$/i.test(name || "")) {
+				return owner + "/" + name;
+			}
+			if (url.hostname.endsWith(".wikipedia.org") && owner === "wiki" && name) {
+				const title = decodeURIComponent(name).replace(/_/g, " ");
+				if (!title.includes(":") && readerSubjectWords(title).some((word) => readerSubjectWord(word.toLowerCase()))) return title;
+			}
+			const section = parts.findIndex((part) => /^(?:categor(?:y|ies)|topics?|sections?|subjects?|tags?)$/i.test(part));
+			if (section < 0 || !parts[section + 1]) return "";
+			const title = readerSubjectWords(decodeURIComponent(parts[section + 1]));
+			if (title.length <= 5 && title.every((word) => /\p{L}/u.test(word)) &&
+				title.some((word) => readerSubjectWord(word.toLowerCase()))) return readerSubjectLabel(title);
+		} catch {}
+		return "";
+	}
+
+	function readerPublisherSubject(value) {
+		try {
+			const host = new URL(value).hostname.replace(/^www\./, "");
+			return READER_PUBLISHER_SUBJECTS.get(host) || (host.startsWith("startups.") ? "Business" : "");
+		} catch {
+			return "";
+		}
+	}
+
+	function readerStorySubjectLabels(story) {
+		if (story.source === "lobsters" && Array.isArray(story.tags)) {
+			return story.tags.filter((tag) => typeof tag === "string")
+				.map((tag) => READER_LOBSTERS_SUBJECTS.get(tag.toLowerCase())).filter(Boolean);
+		}
+		const reddit = story.source === "reddit" ? /^r\/([a-z0-9_]+)$/i.exec(story.site || "")?.[1] : "";
+		const lemmy = story.source === "lemmy" && typeof story.community === "string" ? story.community.split("@")[0] : "";
+		const subject = READER_COMMUNITY_SUBJECTS.get((reddit || lemmy || "").toLowerCase());
+		return subject ? [subject] : [];
+	}
+
+	function readerSubjectWord(word) {
+		return word.length >= 2 && /\p{L}/u.test(word) && !READER_SUBJECT_STOP_WORDS.has(word);
+	}
+
+	function readerSubjectLabel(words) {
+		return words.map((word, position) => position && READER_SUBJECT_STOP_WORDS.has(word.toLowerCase())
+			? word.toLowerCase()
+			: word[0].toUpperCase() + word.slice(1)).join(" ");
+	}
+
+	function readerSubjectTerm(word) {
+		if (word.length > 4 && word.endsWith("ies")) return word.slice(0, -3) + "y";
+		if (/(?:ches|shes|sses|xes|zzes)$/.test(word)) return word.slice(0, -2);
+		return word.length > 4 && /[^sui]s$/.test(word) ? word.slice(0, -1) : word;
+	}
+
+	function readerStoryTerms(title) {
+		let text = title.normalize("NFKC").toLowerCase().replace(/[’']s\b/g, "")
+			.replace(/\bu\.s\./g, "us").replace(/\bcentres?\b/g, "center");
+		for (const [word, forms] of READER_STORY_ACTIONS) text = text.replace(forms, word);
+		return new Set(readerSubjectWords(text).filter((word) => readerSubjectWord(word) &&
+			!/^(?:reports?|reportedly|coverage|developments?)$/.test(word)).map(readerSubjectTerm));
+	}
+
+	function readerLinkSubjectGroups(items, index) {
+		const nameFor = (label) => readerSubjectWords(label).join(" ").toLowerCase();
+		const namedTopics = [...(index?.topics.values() || [])].filter((topic) => topic.kind === "topic");
+		const published = new Map(namedTopics.map((topic) => [nameFor(topic.label), topic]));
+		const aliases = new Map();
+		for (const topic of namedTopics) {
+			for (const label of topic.aliases || []) {
+				const key = nameFor(label);
+				const match = aliases.get(key);
+				aliases.set(key, match === undefined || match === topic ? topic : null);
+			}
+		}
+		for (const [key, topic] of aliases) {
+			if (topic && !published.has(key)) published.set(key, topic);
+		}
+
+		const entries = items.filter(({ url }) => !index?.reviewedPages.has(sharedTopicURLKey(url)))
+			.map((item, position) => ({ ...item, position, paths: readerSubjectPaths(item.url) }));
+		const phrases = new Map();
+		for (const entry of entries) {
+			for (const text of [...entry.titles, ...entry.paths, entry.description]) {
+				const words = readerSubjectWords(text);
+				const lower = words.map((word) => word.toLowerCase());
+				const prose = words.filter((word) => /^\p{Lu}/u.test(word)).length < words.length * .6;
+				for (let start = 0; start < words.length; start++) {
+					if (!readerSubjectWord(lower[start])) continue;
+					for (const size of [5, 4, 3, 2, 1]) {
+						const end = start + size - 1;
+						if (end >= words.length || !readerSubjectWord(lower[end])) continue;
+						const key = lower.slice(start, end + 1).join(" ");
+						const topic = published.get(key);
+						if (size === 1 && !(/[\p{Ll}\p{N}]\p{Lu}/u.test(words[start]) ||
+							(/^\p{Lu}/u.test(words[start]) && (topic || start > 0 && words[start].length >= 4)))) continue;
+						if (!phrases.has(key)) phrases.set(key, { key, topic, words: words.slice(start, end + 1), entries: [], nameOnly: false });
+						const phrase = phrases.get(key);
+						if (size > 1 && prose && !READER_STORY_CONTEXT.test(key) &&
+							words.slice(start, end + 1).every((word) => /^\p{Lu}/u.test(word) || !readerSubjectWord(word.toLowerCase()))) {
+							phrase.nameOnly = true;
+						}
+						if (phrase.entries.at(-1) !== entry) phrase.entries.push(entry);
+					}
+				}
+			}
+		}
+
+		const candidates = [...phrases.values()].filter(({ topic, entries }) => topic || entries.length > 1)
+			.sort((a, b) => Number(Boolean(b.topic)) - Number(Boolean(a.topic)) ||
+				b.entries.length - a.entries.length || b.words.length - a.words.length || a.key.localeCompare(b.key));
+		const groups = new Map();
+		const memberships = new Set();
+		const covered = new Set(entries.filter(({ url }) =>
+			index?.pages.get(sharedTopicURLKey(url))?.some((id) => index.topics.get(id).kind === "topic")));
+		const add = (topic, members) => {
+			const name = nameFor(topic.label);
+			if (!groups.has(name)) groups.set(name, { ...(published.get(name) || topic), nameOnly: topic.nameOnly, rows: new Set() });
+			const group = groups.get(name);
+			for (const entry of members) {
+				group.rows.add(entry.row);
+				covered.add(entry);
+			}
+		};
+		for (const { key, topic, words, entries: matches, nameOnly } of candidates) {
+			const membership = matches.map(({ position }) => position).join(",");
+			if (!topic && memberships.has(membership)) continue;
+			memberships.add(membership);
+			add({ ...(topic || { id: "collection-subject:" + key, label: readerSubjectLabel(words), kind: "topic" }), nameOnly }, matches);
+		}
+
+		for (const entry of entries) {
+			if (covered.has(entry)) continue;
+			const evidence = [...entry.titles, ...entry.paths, entry.description || "", entry.section || ""].join(" ");
+			const cue = READER_SUBJECT_CUES.find(([, matches]) => matches.test(evidence));
+			const section = typeof entry.section === "string" ? entry.section.trim() : "";
+			const sectionWords = readerSubjectWords(section);
+			const named = readerNamedPageSubject(entry.url);
+			const declared = sectionWords.length <= 5 && sectionWords.some((word) => readerSubjectWord(word.toLowerCase())) ? section : "";
+			const label = named || cue?.[0] || declared || entry.subjects?.[0] || readerPublisherSubject(entry.url);
+			if (label) {
+				const key = readerSubjectWords(label).join(" ").toLowerCase();
+				add(published.get(key) || { id: "reader-subject:" + key, label, kind: "topic" }, [entry]);
+				continue;
+			}
+			for (const { id, label } of TOPICS) {
+				if (entry.tags?.has(id)) add({ id: "collection-tag:" + id, label, kind: "topic" }, [entry]);
+			}
+		}
+		return [...groups.values()].map((group) => ({ ...group, rows: [...group.rows] }));
+	}
+
+	function readerCollectionSubjectGroups(documents, tagsByPage, index) {
+		return readerLinkSubjectGroups(documents.map((doc) => ({
+			row: doc,
+			url: doc.url,
+			titles: [doc.title, ...doc.discussions.slice(0, 5).map((story) => story.title)],
+			description: doc.look?.description,
+			section: doc.look?.section,
+			tags: tagsByPage.get(doc.key),
+		})), index);
+	}
+
+	function readerStorySubjectEvidence(stories) {
+		const description = stories.find((story) => typeof story.description === "string" && story.description.trim())?.description;
+		return {
+			titles: stories.map((story) => story.title),
+			description: textExcerpt(description, 360),
+			subjects: stories.flatMap(readerStorySubjectLabels),
+		};
+	}
+
+	function readerStorySubjectGroups(rows, storyFor, coverage, index) {
+		return readerLinkSubjectGroups(rows.map((row) => {
+			const stories = storyFor(row);
+			const { url, title } = stories[0];
+			const tags = coverage?.articles.get(normalizeURL(url))?.tags;
+			return { row, url, ...readerStorySubjectEvidence(stories), tags: tags || readerHeadlineTags(title) };
+		}), index);
+	}
+
+	function readerArticleCoverage(stories, settings, hiddenKeys) {
+		const enabled = new Set(enabledSourceIds(settings, registeredSourceIds()));
+		const articles = new Map();
+		const days = new Map();
+
+		for (const story of stories) {
+			if (!story?.id || !enabled.has(story.source) || !/^https?:\/\//i.test(story.url || "")) continue;
+			const key = normalizeURL(story.url);
+			if (!key) continue;
+
+			if (!articles.has(key)) articles.set(key, { host: hostLabel(story.url), stories: new Map(), tags: new Set(), headlines: [] });
+			const article = articles.get(key);
+			const community = story.source === "reddit" ? String(story.site || "").toLowerCase() : "";
+			const title = String(story.title || "");
+			for (const { id } of TOPICS) {
+				if (storyCarriesTopic(story, id) || TOPIC_FEEDS[id].reddit?.some((name) => community === "r/" + name.toLowerCase())) article.tags.add(id);
+			}
+			readerHeadlineTags(title, article.tags);
+
+			if (hiddenKeys.has(key) || isStoryHidden(story, hiddenKeys)) continue;
+			const discussion = sourceKey(story.source, story.id);
+			const cached = article.stories.get(discussion);
+			if (!cached || !cached.permalink && story.permalink) article.stories.set(discussion, story);
+
+			const time = Number(story.time);
+			if (!Number.isFinite(time) || time <= 0) continue;
+			const normalized = title.normalize("NFKC").toLowerCase().replace(/['’]/g, "");
+			const words = new Set((normalized.match(/[\p{L}\p{N}]+/gu) || []).filter((word) => word.length > 1 && !READER_HEADLINE_STOP_WORDS.has(word)));
+			if (words.size < 3) continue;
+
+			const day = Math.floor(time / 86400);
+			const numbers = (normalized.match(/\p{N}+(?:[.,]\p{N}+)*/gu) || []).join(" ");
+			const headline = { article, story, words, time, day, numbers };
+			article.headlines.push(headline);
+			if (!days.has(day)) days.set(day, []);
+			days.get(day).push(headline);
+		}
+
+		return { articles, days, enabled };
+	}
+
+	function readerHeadlineSimilarity(headline, other) {
+		if (other.numbers !== headline.numbers) return 0;
+		const shared = [...headline.words].filter((word) => other.words.has(word)).length;
+		const score = shared / (headline.words.size + other.words.size - shared);
+		return shared >= 5 && score >= .8 ? score : 0;
+	}
+
+	function readerStorySimilarity(headline, other) {
+		if (headline.numbers && other.numbers && headline.numbers !== other.numbers) return 0;
+		const left = headline.topicTerms ??= readerStoryTerms(headline.story.title);
+		const right = other.topicTerms ??= readerStoryTerms(other.story.title);
+		const terms = [...left].filter((word) => right.has(word));
+		const shared = terms.length;
+		if (shared < 3) return 0;
+		const overlap = shared / (left.size + right.size - shared);
+		const contained = shared / Math.min(left.size, right.size);
+		if (overlap >= .62 || shared >= 4 && overlap >= .37 && contained >= .67) return overlap + .5;
+		return terms.some((word) => READER_STORY_ACTION_WORDS.has(word)) && overlap >= .32 && contained >= .6 ? overlap : 0;
+	}
+
+	function relatedReaderArticles({ articles, days }, url, limit = 3, match = readerHeadlineSimilarity) {
+		const article = articles.get(normalizeURL(url));
+		const matches = new Map();
+		for (const headline of article?.headlines || []) {
+			for (let day = headline.day - 2; day <= headline.day + 2; day++) {
+				for (const other of days.get(day) || []) {
+					if (other.article.host === article.host || Math.abs(other.time - headline.time) > READER_COVERAGE_WINDOW) continue;
+					const score = match(headline, other);
+					if (score > (matches.get(other.article)?.score || 0)) matches.set(other.article, { score, story: other.story });
+				}
+			}
+		}
+
+		return [...matches].sort((a, b) => b[1].score - a[1].score)
+			.slice(0, limit)
+			.map(([article, { story }]) => {
+				const primary = sourceKey(story.source, story.id);
+				const also = [...article.stories].filter(([key]) => key !== primary).map(([, entry]) => entry);
+				return { story, also };
+			});
+	}
+
+	function frontPageRowStories(rows) {
+		return rows.flatMap(({ story, also }) => [story, ...(also || [])]);
+	}
+
+	async function loadReaderArticleCoverage(stories, settings) {
+		settings ??= await loadSettings();
+		const [snapshot, hiddenKeys] = await Promise.all([loadFrontPages({ settings, cachedOnly: true }), loadHiddenStoryKeys()]);
+		const published = frontPageRowStories(snapshot.rows);
+		const coverage = readerArticleCoverage([...published, ...stories], settings, hiddenKeys);
+		if (appState?.topicsMode) {
+			coverage.feedThreads = new Map();
+			for (const story of published) {
+				const key = sharedTopicURLKey(story.url);
+				if (!key || isStoryHidden(story, hiddenKeys)) continue;
+				if (!coverage.feedThreads.has(key)) coverage.feedThreads.set(key, []);
+				coverage.feedThreads.get(key).push(story);
+			}
+		}
+		return coverage;
+	}
+
+	async function paintAppArticleCoverage(opened) {
+		const state = appState;
+		const section = state.ui.shadow.getElementById("app-article-coverage");
+		const list = section.querySelector("ul");
+		section.hidden = true;
+		list.replaceChildren();
+
+		const rows = new Set([opened.row, ...state.rows, ...state.frontPageRows, ...(state.topicExtraRows?.values() || [])]);
+		const [settings, queued] = await Promise.all([loadSettings(), loadQueue()]);
+		const coverage = await loadReaderArticleCoverage([
+			...frontPageRowStories([...rows]), ...queued, ...state.collectionCoverageStories,
+		], settings);
+		let related = relatedReaderArticles(coverage, opened.url, settings.hiddenTopics.length ? Infinity : 3);
+		if (related.length && settings.hiddenTopics.length) {
+			const groups = await readerFrontPageTopicGroups(related, coverage, { cachedOnly: true });
+			related = filterReaderTopicRows(related, settings.hiddenTopics, groups, coverage).slice(0, 3);
+		}
+		if (state.open !== opened || !related.length) return;
+
+		for (const entry of related) {
+			const { story } = entry;
+			const item = document.createElement("li");
+			const source = getSource(story.source)?.label || sourceShortLabel(story);
+			item.innerHTML = `
+<a class="reader-related-title" href="${escapeHTML(story.url)}">${escapeHTML(story.title)}</a>
+<div>${escapeHTML(hostLabel(story.url))} · <a class="reader-related-discussion" href="${escapeHTML(story.url)}">Discussion on ${escapeHTML(source)}</a></div>`;
+			item.querySelector(".reader-related-title").onclick = (event) => openStoryFromRow(story, event, { row: entry });
+			item.querySelector(".reader-related-discussion").onclick = (event) => openStoryFromRow(story, event, { row: entry, openPanel: true });
+			list.append(item);
+		}
+		section.hidden = false;
+	}
+
+	function readerCollectionEmpty(filtered) {
+		const empty = document.createElement("div");
+		empty.className = "browse-empty reader-collection-empty";
+		if (filtered) {
+			empty.textContent = "No saved pages match this filter.";
+		} else {
+			empty.innerHTML = `<p>No saved pages yet.</p><button type="button" class="settings-byline-action">Import bookmarks</button>`;
+			empty.querySelector("button").onclick = openBookmarkImport;
+		}
+		return empty;
+	}
+
+	function readerCollectionRow(doc, tags) {
+		const row = document.createElement("div");
+		row.className = "story browse-row reader-collection-row";
+		row.classList.toggle("is-fresh", doc.fresh);
+		row.dataset.documentKey = doc.key;
+		const title = escapeHTML(doc.title);
+		const tagLabels = TOPICS.filter(({ id }) => tags.has(id)).map(({ label }) => `<span>${escapeHTML(label)}</span>`).join(", ");
+		row.innerHTML = `
+${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
+<div class="browse-main">
+	<div class="story-title">${doc.url ? `<a class="browse-title-link" href="${escapeHTML(doc.url)}">${title}</a>` : title}</div>
+	<div class="browse-site reader-collection-meta">${escapeHTML(doc.site)}${doc.fresh ? `<span class="reader-collection-new">${doc.site ? " · " : ""}${doc.found ? escapeHTML(pluralize(doc.found, "new comment")) : "New discussion"}</span>` : ""}${tagLabels ? `${doc.site || doc.fresh ? " · " : ""}${tagLabels}` : ""}</div>
+</div>
+<button class="browse-more app-head-icon" type="button" aria-label="Actions for this page" aria-haspopup="menu" aria-expanded="false">${MORE_ICON}</button>`;
+		const link = row.querySelector(".browse-title-link");
+		if (link) link.onclick = (event) => openStoryFromRow(documentStory(doc), event);
+		wireAppRowMenu(row, row.querySelector(".browse-more"), doc);
+		return row;
+	}
+
+	function readerCollectionPageTags(documents, coverage) {
+		return new Map(documents.map((doc) => [
+			doc.key,
+			readerHeadlineTags(doc.title, new Set(coverage.articles.get(normalizeURL(doc.url))?.tags)),
+		]));
+	}
+
+	function readerCollectionMatches(documents, tagsByPage, collectionFilter, collectionTagFilter) {
+		return documents.filter((doc) =>
+			(!collectionTagFilter || tagsByPage.get(doc.key).has(collectionTagFilter)) &&
+			(collectionFilter === "all" || (collectionFilter === "notes" ? doc.notes.length || doc.quotes.length : doc.fresh)));
+	}
+
+	async function renderReaderCollectionView(ui, list, isCurrent) {
+		const state = appState;
+		const documents = await loadCollectionDocuments();
+		if (!isCurrent()) return;
+		const stories = documents.flatMap((doc) => doc.discussions);
+		const coverage = await loadReaderArticleCoverage(stories);
+		if (!isCurrent()) return;
+		state.collectionCoverageStories = stories;
+
+		const tagsByPage = readerCollectionPageTags(documents, coverage);
+		state.collectionTags = new Set([...tagsByPage.values()].flatMap((tags) => [...tags]));
+		if (!state.collectionTags.has(state.collectionTagFilter)) state.collectionTagFilter = "";
+		const { collectionFilter, collectionSort, collectionLimit, collectionTagFilter } = state;
+		const matched = readerCollectionMatches(documents, tagsByPage, collectionFilter, collectionTagFilter);
+		for (const button of ui.shadow.querySelectorAll(".app-collection-filter")) {
+			button.toggleAttribute("data-filtered", collectionFilter !== "all" || collectionSort !== "activity" || Boolean(collectionTagFilter));
+		}
+		if (collectionSort === "title") matched.sort((a, b) => a.title.localeCompare(b.title));
+		if (collectionSort === "saved") matched.sort((a, b) => (b.collected?.addedAt || b.touched) - (a.collected?.addedAt || a.touched));
+		const projection = await appSavedTopicProjection(matched, (doc) => doc.url,
+			(index) => readerCollectionSubjectGroups(documents, tagsByPage, index), coverage, documents);
+		if (!isCurrent()) return;
+		list.replaceChildren();
+		paintAppTopicProjection(list, projection, isCurrent);
+		if (!matched.length) {
+			list.append(readerCollectionEmpty(Boolean(documents.length)));
+			return;
+		}
+
+		const grouped = collectionFilter === "all" && collectionSort === "activity" &&
+			projection.rows[0]?.fresh && !projection.rows.at(-1).fresh;
+		const visible = projection.rows.slice(0, collectionLimit);
+		for (const [index, doc] of visible.entries()) {
+			if (grouped && (index === 0 || (!doc.fresh && visible[index - 1].fresh))) {
+				const heading = document.createElement("h2");
+				heading.className = "reader-collection-section";
+				heading.textContent = doc.fresh ? "New discussion activity" : "Saved pages";
+				list.append(heading);
+			}
+			list.append(readerCollectionRow(doc, tagsByPage.get(doc.key)));
+		}
+		if (visible.length < projection.rows.length) {
+			const nav = document.createElement("div");
+			nav.className = "browse-nav";
+			const more = document.createElement("button");
+			more.type = "button";
+			more.className = "browse-nav-link";
+			more.textContent = "Show more";
+			more.onclick = async () => {
+				state.collectionLimit += FRONT_PAGE_SIZE;
+				await renderAppList();
+				list.querySelectorAll(".reader-collection-row")[visible.length]?.querySelector("a, button")?.focus();
+			};
+			nav.append(more);
+			list.append(nav);
+		}
+		backfillCardLooks(visible).catch(console.error);
 	}
 
 	async function renderCollectionView(ui, list, isCurrent = () => true) {
@@ -16671,8 +18157,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			const empty = document.createElement("div");
 
 			empty.className = "browse-empty";
-			empty.textContent =
-				"Nothing saved yet. Save a page, a discussion or a comment, or write a note on any page, and it will be kept here.";
+			empty.textContent = "Nothing saved yet. Save a page, a discussion or a comment, or write a note on any page, and it will be kept here.";
 			list.appendChild(empty);
 			return;
 		}
@@ -16786,8 +18271,13 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			return;
 		}
 
+		const inReader = Boolean(strip.closest("#app-article"));
+		const opened = inReader ? appState?.open : null;
 		const entries = await loadQueue();
-		const next = nextUnreadInQueue(entries);
+		if (inReader && appState?.open !== opened) return;
+		const next = nextUnreadInQueue(inReader
+			? entries.filter((entry) => opened && !sameURL(entry.url, opened.url))
+			: entries);
 
 		if (!next) {
 			strip.classList.add("hidden");
@@ -16804,29 +18294,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		title.href = next.url;
 		title.textContent = next.title;
 
-		title.onclick = (event) => {
-			const record = save(STORAGE.last, {
-				url: next.url,
-				source: next.source || "",
-				ids: [String(next.id)],
-				timestamp: Date.now(),
-			});
-
-			if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-				return;
-			}
-
-			event.preventDefault();
-
-			if (appState) {
-				openAppURL(next.url);
-				return;
-			}
-
-			record.catch(() => {}).then(() => {
-				location.href = next.url;
-			});
-		};
+		title.onclick = (event) => openStoryFromRow(next, event);
 
 		const row = document.createElement("div");
 		row.className = "next-up-row";
@@ -17121,15 +18589,26 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 	async function renderQueueView(ui, list, isCurrent = () => true) {
 		const entries = sortQueue(await loadQueue());
+		const reader = appState?.ui === ui;
+		const coverage = appState && entries.length ? await loadReaderArticleCoverage(entries) : null;
+		const projection = reader ? await appSavedTopicProjection(entries, (entry) => entry.url,
+			(index) => readerStorySubjectGroups(entries, (entry) => [entry], coverage, index), coverage) : null;
 
 		if (!isCurrent()) {
 			return;
 		}
 
-		const reload = () => isCurrent() ? ui.browseHome ? renderBrowseView(ui) : renderQueueView(ui, list, isCurrent) : Promise.resolve();
+		const reload = () => {
+			if (appState?.ui === ui) {
+				return appState.view === "queue" ? renderAppList() : Promise.resolve();
+			}
+			if (!isCurrent()) return Promise.resolve();
+			return ui.browseHome ? renderBrowseView(ui) : renderQueueView(ui, list, isCurrent);
+		};
 		let rank = 0;
 
 		list.replaceChildren();
+		if (projection) paintAppTopicProjection(list, projection, isCurrent);
 
 		if (!entries.length) {
 			const empty = document.createElement("div");
@@ -17140,7 +18619,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			return;
 		}
 
-		for (const entry of entries) {
+		for (const entry of projection?.rows ?? entries) {
 			const row = renderBrowseRow(entry, list, (rank += 1), {
 				inQueue: true,
 				reload,
@@ -17154,18 +18633,25 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		refreshSaveControls().catch(console.error);
 
 		refreshQueueEntries(entries).then((refreshed) => {
-			if (refreshed && isCurrent() && isBrowsing(ui) && browseTab === "queue") {
+			if (!refreshed || !isCurrent()) return;
+			if (reader && appState.topicsMode) {
+				renderAppList().catch(console.error);
+			} else if (isBrowsing(ui) && browseTab === "queue") {
 				renderQueueView(ui, list, isCurrent).catch(console.error);
 			}
 		});
 
-		if (entries.some((entry) => entry.readAt)) {
+		const clearable = projection?.active?.rows ?? entries;
+		if (clearable.some((entry) => entry.readAt)) {
 			const clear = document.createElement("button");
 			clear.type = "button";
 			clear.className = "browse-nav-link browse-clear-read";
 			clear.textContent = "clear read";
 			clear.onclick = async () => {
-				await mutateQueue((queued) => clearReadFromQueue(queued));
+				const keys = projection?.active ? new Set(clearable.map(queueKey)) : null;
+				await mutateQueue(keys
+					? (queued) => queued.filter((entry) => !entry.readAt || !keys.has(queueKey(entry)))
+					: clearReadFromQueue);
 
 				await reload();
 				refreshQueueCount(ui.shadow);
@@ -17326,7 +18812,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		paintSidebarSyncButton(ui);
 
 		for (const button of ui.shadow.querySelectorAll(".browse-home-nav [data-browse-view]")) {
-			const matches = button.dataset.browseView === view || (button.dataset.browseView === "all" && (view.startsWith("source:") || view.startsWith("topic:")));
+			const matches = button.dataset.browseView === view || (button.dataset.browseView === "all" && frontPageViewIsFiltered(view));
 			const current = matches && !state.searchOpen;
 
 			button.classList.toggle("is-current", current);
@@ -17344,15 +18830,18 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		}
 	}
 
-	function renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view) {
+	function renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view, hasHeadlines) {
 		const filters = ui.shadow.querySelector("#browse-home-filters");
 		const focused = filters.contains(ui.shadow.activeElement) ? ui.shadow.activeElement?.dataset.browseView : "";
 		const scrolls = new Map([...filters.querySelectorAll("[data-filter-group]")].map((section) => [section.dataset.filterGroup, section.querySelector(".browse-home-scroll").scrollLeft]));
+		const interests = topicIds.map((id) => ({ view: "topic:" + id, mark: TOPIC_ICONS[id], count: counts.topics[id] }));
+		const sources = sourceIds.map((id) => ({ view: "source:" + id, mark: APP_SOURCE_ICONS[id], count: counts.sources[id] }));
+		if (hasHeadlines) interests.unshift(APP_HEADLINES);
 
-		for (const [group, label, ids] of [["topics", "Topics", topicIds], ["sources", "Sources", sourceIds]]) {
+		for (const [group, label, views] of [["topics", "Front Pages", interests], ["sources", "Sources", sources]]) {
 			let section = filters.querySelector(`[data-filter-group="${group}"]`);
 
-			if (!ids.length) {
+			if (!views.length) {
 				section?.remove();
 				continue;
 			}
@@ -17361,7 +18850,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 				section = document.createElement("div");
 				section.className = "browse-home-filter-reveal is-collapsed";
 				section.dataset.filterGroup = group;
-				section.innerHTML = `<section class="browse-home-filter-section">${group === "topics" ? '<h3 class="browse-home-filter-label">Topics</h3>' : ""}<div class="browse-home-scroll" role="group" aria-label="${label}"></div></section>`;
+				section.innerHTML = `<section class="browse-home-filter-section">${group === "topics" ? `<h3 class="browse-home-filter-label">${label}</h3>` : ""}<div class="browse-home-scroll" role="group" aria-label="${label}"></div></section>`;
 				filters.append(section);
 			}
 
@@ -17369,17 +18858,16 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 			scroller.replaceChildren();
 
-			for (const id of ids) {
-				const key = (group === "topics" ? "topic:" : "source:") + id;
+			for (const { view: key, mark, count } of views) {
 				const name = appViewLabel(key);
-				const icon = (group === "topics" ? TOPIC_ICONS[id] : APP_SOURCE_ICONS[id]) || `<span class="rail-monogram">${escapeHTML(name.slice(0, 2))}</span>`;
+				const icon = mark || `<span class="rail-monogram">${escapeHTML(name.slice(0, 2))}</span>`;
 				const button = document.createElement("button");
 
 				button.type = "button";
 				button.className = "browse-home-tab browse-home-filter";
 				button.dataset.browseView = key;
 				button.setAttribute("aria-pressed", String(view === key));
-				button.innerHTML = browseTabContents(name, icon, counts[group][id]);
+				button.innerHTML = browseTabContents(name, icon, count);
 				button.onclick = () => renderBrowseView(ui, { view: ui.browseHome.view === key ? "all" : key }).catch(console.error);
 				scroller.append(button);
 			}
@@ -17486,19 +18974,19 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			return;
 		}
 
-		state.searchRows = state.rows?.length ? state.rows : state.searchRows || [];
+		state.searchRows = state.feedRows?.length ? state.feedRows : state.searchRows || [];
 		state.recentSearches = [];
 		setBrowseSearchOpen(ui, true);
 		const sequence = state.searchSequence;
-		const [queue, documents, hidden, settings, front, recent] = await Promise.all([loadQueue(), loadCollectionDocuments(), loadHiddenStoryKeys(), loadSettings(), state.rows?.length ? null : loadFrontPages(), loadRecentSearches()]);
+		const [queue, documents, hidden, settings, front, recent] = await Promise.all([loadQueue(), loadCollectionDocuments(), loadHiddenStoryKeys(), loadSettings(), state.feedRows?.length ? null : loadFrontPages(), loadRecentSearches()]);
 
 		if (!state.searchOpen || state.searchSequence !== sequence || ui !== sidebarUI) return;
 
-		const feeds = frontPageFeeds(settings, frontPageSourceIds(settings), enabledSourceIds(settings, registeredSourceIds()));
+		const feeds = frontPageFeedsForView(settings);
 
 		state.sourceIds = [...new Set(feeds.map((feed) => feed.source))];
-		state.topicIds = [...new Set(feeds.map((feed) => feed.topic).filter(Boolean))];
-		state.searchRows = (front?.rows || state.rows || []).filter((row) => !isStoryHidden(row.story, hidden));
+		state.topicIds = followedFrontPageInterests(settings);
+		state.searchRows = (front?.rows || state.feedRows || []).filter((row) => !isStoryHidden(row.story, hidden));
 		state.searchListIndex = searchListIndex(queue, documents);
 		state.recentSearches = recent;
 		renderBrowseSearch(ui);
@@ -17506,8 +18994,9 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 	async function markBrowseHomeRead(ui) {
 		const state = ui.browseHome;
+		if (state.view !== state.rowsView) return;
 		const rows = appViewRows(state.rows || [], state.view, state.seen || {}).filter((row) => rowIsUnread(row, state.seen || {}));
-		const keys = rows.flatMap(rowDiscussionKeys);
+		const keys = rows.flatMap(rowReadKeys);
 
 		if (!keys.length) {
 			return;
@@ -17615,38 +19104,40 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			renderBrowseSkeleton(list, "Loading Front Pages…");
 		}
 
+		const settings = await loadSettings();
+		if (!isCurrent() || browseTab !== "front") return;
+		const state = ui.browseHome;
+		const sourceIds = [...new Set(frontPageFeedsForView(settings).map((feed) => feed.source))];
+		const topicIds = followedFrontPageInterests(settings);
+		const hasHeadlines = frontPageHasHeadlines(settings);
+		let view = state?.view || "all";
+
+		if (!frontPageViewAvailable(view, sourceIds, topicIds, hasHeadlines)) {
+			view = state.view = state.frontView = "all";
+		}
+
 		const metadata = () => Promise.all([
 			loadQueue(),
 			loadHiddenStoryKeys(),
 			load(STORAGE.seen, {}),
-			loadSettings(),
 		]);
 		let paintRevision = 0;
-		const paint = async ({ rows: allRows, sources, topics, feedStates = [], pending = false }) => {
+		const paint = async ({ rows: allRows, sources, topics, feedStates = [], pending = false }, defaultList) => {
 			const revision = ++paintRevision;
-			const [queued, hiddenKeys, seen, settings] = await metadata();
+			const [queued, hiddenKeys, seen] = await metadata();
 
 			if (!isCurrent() || browseTab !== "front" || revision !== paintRevision) {
 				return;
 			}
 
 			const queuedKeys = new Set(queued.map(queueKey));
-			const rows = allRows.filter((row) => !isStoryHidden(row.story, hiddenKeys));
-			const state = ui.browseHome;
-			let view = state?.view || "all";
-			const feeds = frontPageFeeds(settings, frontPageSourceIds(settings), enabledSourceIds(settings, registeredSourceIds()));
-			const sourceIds = [...new Set(feeds.map((feed) => feed.source))];
-			const topicIds = [...new Set(feeds.map((feed) => feed.topic).filter(Boolean))];
-
-			if ((view.startsWith("source:") && !sourceIds.includes(view.slice(7))) || (view.startsWith("topic:") && !topicIds.includes(view.slice(6)))) {
-				view = "all";
-
-				if (state) {
-					state.view = state.frontView = view;
-				}
-			}
-
+			const candidates = allRows.filter((row) => !isStoryHidden(row.story, hiddenKeys));
+			const rows = settings.hiddenTopics.length
+				? (await readerFrontPageTopics(candidates, readerArticleCoverage(frontPageRowStories(candidates), settings, hiddenKeys), settings.hiddenTopics)).rows
+				: candidates;
+			if (!isCurrent() || browseTab !== "front" || revision !== paintRevision) return;
 			const shown = appViewRows(rows, view, seen || {});
+			const filteredEmpty = !shown.length && rows !== candidates && appViewRows(candidates, view, seen || {}).length > 0;
 			const failureText = frontPageFailureText(feedStates, view);
 
 			setBlendNote(ui, sources, topics);
@@ -17661,7 +19152,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 				const unavailable = feedStates.length > 0 && feedStates.every((feed) => feed.status !== "ok" && feed.status !== "window");
 
 				note.className = "browse-empty";
-				note.textContent = pending ? "Loading Front Pages…" : failureText || (unavailable ? "Could not load Front Pages." : allRows.length && !rows.length ? "Everything in Front Pages is hidden." : view === "unread" ? "All caught up." : "Nothing here right now.");
+				note.textContent = pending ? "Loading Front Pages…" : failureText || (unavailable ? "Could not load Front Pages." : filteredEmpty ? "No links match your topic filters." : allRows.length && !candidates.length ? "Everything in Front Pages is hidden." : view === "unread" ? "All caught up." : "Nothing here right now.");
 				list.append(note);
 			} else if (failureText) {
 				const notice = document.createElement("div");
@@ -17692,10 +19183,15 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 			if (state) {
 				state.rows = rows;
+				state.rowsView = view;
+				state.feedRows = defaultList ? mergeStoriesByURL([...defaultList.candidates, ...candidates]) : candidates;
 				state.seen = seen || {};
 				state.sourceIds = sourceIds;
 				state.topicIds = topicIds;
-				const counts = appViewCounts(rows, state.seen, sourceIds, topicIds);
+				const counts = appViewCounts(defaultList?.rows || rows, state.seen, sourceIds, topicIds);
+				if (defaultList && view.startsWith("topic:")) {
+					counts.topics[view.slice("topic:".length)] = shown.filter((row) => rowIsUnread(row, state.seen)).length;
+				}
 
 				for (const id of ["unread", "all"]) {
 					const badge = ui.shadow.querySelector(`[data-browse-view="${id}"] .rail-badge`);
@@ -17703,13 +19199,11 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 					badge.textContent = counts[id] ? compactCount(counts[id]) : "";
 				}
 
-				renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view);
-				paintBrowseHome(ui);
+				renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view, hasHeadlines);
 			}
 			return { feedStates };
 		};
-		const snapshot = await loadFrontPages({ force: options.force, automatic: options.automatic, onUpdate: paint });
-		return paint(snapshot);
+		return loadFrontPageView(view, settings, { force: options.force, automatic: options.automatic }, paint);
 	}
 
 	async function renderBrowseView(ui, options = {}) {
@@ -17998,18 +19492,23 @@ ${frontPageChooserHTML()}
 
 	function frontPageChooserHTML() {
 		const name = `hnewhere-front-page-${++frontPageChooserCount}`;
+		const interests = [
+			{ id: APP_HEADLINES.view, label: APP_HEADLINES.label, icon: APP_HEADLINES.mark },
+			...TOPICS.map((topic) => ({ ...topic, icon: TOPIC_ICONS[topic.id] })),
+		];
 
 		return `<div class="front-page-chooser" role="radiogroup" aria-label="Front Pages">
 <div class="front-page-choice">
-<label class="front-page-choice-label"><input type="radio" name="${name}" value="topics"><span>Topics you follow</span></label>
-<div class="front-page-choice-hint">Show popular links from your sources that match the topics you select.</div>
-<div class="front-page-topics-panel">
-<div class="front-page-topics" role="group" aria-label="Topics">${TOPICS.map((topic) => `<button type="button" class="front-page-topic" data-topic="${escapeHTML(topic.id)}" aria-pressed="false">${TOPIC_ICONS[topic.id]}<span>${escapeHTML(topic.label)}</span></button>`).join("")}</div>
-</div>
-</div>
-<div class="front-page-choice">
 <label class="front-page-choice-label"><input type="radio" name="${name}" value="sources"><span>Top links from your sources</span></label>
 <div class="front-page-choice-hint front-page-top-hint"></div>
+</div>
+<div class="front-page-choice">
+<label class="front-page-choice-label"><input type="radio" name="${name}" value="topics"><span>Interests</span></label>
+<div class="front-page-choice-hint">Show popular links for your interests from the sources you enable.</div>
+<div class="front-page-topics-panel">
+<div class="front-page-topics" role="group" aria-label="Followed interests">${interests.map(({ id, label, icon }) => `<button type="button" class="front-page-topic" data-topic="${escapeHTML(id)}" aria-pressed="false">${icon}<span>${escapeHTML(label)}</span></button>`).join("")}</div>
+<div class="front-page-choice-hint front-page-interest-status" role="status" hidden></div>
+</div>
 </div>
 <div class="front-page-hover-tip" role="tooltip" hidden></div>
 </div>`;
@@ -18022,13 +19521,15 @@ ${frontPageChooserHTML()}
 		const topicsRadio = radios.find((radio) => radio.value === "topics");
 		const panel = root.querySelector(".front-page-topics-panel");
 		const topHint = root.querySelector(".front-page-top-hint");
+		const interestStatus = root.querySelector(".front-page-interest-status");
 		const chips = [...root.querySelectorAll(".front-page-topic")];
 		const savedMode = (next) => (next?.frontPageMode === "topics" ? "topics" : "sources");
 		let mode = savedMode(settings);
 		let picked = frontPageTopicIds(settings);
+		let includeTopLinks = settings.frontPageIncludeTopLinks === true;
 		let emitted = null;
 
-		const choice = () => ({ frontPageMode: mode, frontPageTopics: [...picked] });
+		const choice = () => ({ frontPageMode: mode, frontPageTopics: [...picked], frontPageIncludeTopLinks: includeTopLinks });
 
 		const emit = () => {
 			emitted = choice();
@@ -18038,16 +19539,8 @@ ${frontPageChooserHTML()}
 		const paint = () => {
 			const enabled = enabledSourceIds(settings, registeredSourceIds());
 			const covered = (id) => TOPIC_FEED_SOURCES.some((source) => enabled.includes(source) && TOPIC_FEEDS[id]?.[source]?.length);
-			const available = TOPICS.some((topic) => covered(topic.id));
-			const kept = picked.filter(covered);
-			let changed = kept.length !== picked.length;
-
-			picked = kept;
-
-			if (!available && mode === "topics") {
-				mode = "sources";
-				changed = true;
-			}
+			const hasTopLinks = frontPageSourceIds(settings).length > 0;
+			const available = mode === "topics" || hasTopLinks || includeTopLinks || picked.length > 0 || TOPICS.some((topic) => covered(topic.id));
 
 			const topicsLabel = topicsRadio.closest(".front-page-choice-label");
 
@@ -18057,7 +19550,7 @@ ${frontPageChooserHTML()}
 			if (available) {
 				delete topicsLabel.dataset.hoverTip;
 			} else {
-				topicsLabel.dataset.hoverTip = "Turn on a source that covers topics to follow them.";
+				topicsLabel.dataset.hoverTip = "Turn on a source that covers interests to follow them.";
 			}
 
 			for (const radio of radios) {
@@ -18065,19 +19558,27 @@ ${frontPageChooserHTML()}
 			}
 
 			panel.hidden = mode !== "topics";
+			interestStatus.hidden = !(picked.length || includeTopLinks) || (includeTopLinks && hasTopLinks) || picked.some(covered);
+			interestStatus.textContent = interestStatus.hidden ? "" : hasTopLinks
+				? "Showing top links until an enabled source covers one of your interests."
+				: "Enable a source that covers one of your interests to see links.";
 
 			for (const chip of chips) {
 				const id = chip.dataset.topic;
-				const usable = covered(id);
+				const headlines = id === APP_HEADLINES.view;
+				const usable = headlines ? hasTopLinks : covered(id);
+				const selected = headlines ? includeTopLinks : picked.includes(id);
 
-				chip.setAttribute("aria-pressed", String(picked.includes(id)));
+				chip.setAttribute("aria-pressed", String(selected));
 				chip.classList.toggle("is-uncovered", !usable);
+				if (usable || selected) chip.removeAttribute("aria-disabled");
+				else chip.setAttribute("aria-disabled", "true");
 
 				if (usable) {
-					chip.removeAttribute("aria-disabled");
 					delete chip.dataset.hoverTip;
+				} else if (headlines) {
+					chip.dataset.hoverTip = "Enable a source with a front page to see Headlines.";
 				} else {
-					chip.setAttribute("aria-disabled", "true");
 					chip.dataset.hoverTip = `Needs ${joinWithAnd(
 						registeredSourceIds()
 							.filter((source) => TOPIC_FEEDS[id][source]?.length)
@@ -18087,13 +19588,9 @@ ${frontPageChooserHTML()}
 				}
 			}
 
-			topHint.textContent = frontPageSourceIds(settings).length
+			topHint.textContent = hasTopLinks
 				? "Show the most popular links from your sources, regardless of topic."
 				: "None of your sources has a front page of its own.";
-
-			if (changed) {
-				emit();
-			}
 		};
 
 		for (const radio of radios) {
@@ -18136,22 +19633,23 @@ ${frontPageChooserHTML()}
 					return;
 				}
 
-				picked = picked.includes(chip.dataset.topic)
-					? picked.filter((id) => id !== chip.dataset.topic)
-					: [...picked, chip.dataset.topic];
+				const id = chip.dataset.topic;
+				if (id === APP_HEADLINES.view) includeTopLinks = !includeTopLinks;
+				else picked = picked.includes(id) ? picked.filter((topic) => topic !== id) : [...picked, id];
 				paint();
 				emit();
 			});
 		}
 
-		const sync = (next) => {
-			const saved = { frontPageMode: savedMode(next), frontPageTopics: frontPageTopicIds(next) };
+		const sync = (next, { sourcesOnly = false } = {}) => {
+			const saved = { frontPageMode: savedMode(next), frontPageTopics: frontPageTopicIds(next), frontPageIncludeTopLinks: next.frontPageIncludeTopLinks === true };
 
 			settings = next;
 
-			if (!emitted || JSON.stringify(saved) !== JSON.stringify(emitted)) {
+			if (!sourcesOnly && (!emitted || JSON.stringify(saved) !== JSON.stringify(emitted))) {
 				mode = saved.frontPageMode;
 				picked = saved.frontPageTopics;
+				includeTopLinks = saved.frontPageIncludeTopLinks;
 				emitted = null;
 			}
 
@@ -18168,7 +19666,7 @@ ${frontPageChooserHTML()}
 
 		card.className = "front-page-card";
 		card.innerHTML = `<div class="front-page-card-head"><span class="front-page-card-title">Make Front Pages yours</span><button class="front-page-card-close" type="button" aria-label="Keep it as it is" title="Keep it as it is">${APP_CLOSE_ICON}</button></div>
-<div class="front-page-card-text">Follow the topics you care about, or keep the top links you have now.</div>
+<div class="front-page-card-text">Pick interests for Front Pages or see the top links from your sources.</div>
 ${frontPageChooserHTML()}
 <div class="front-page-card-actions"><button class="front-page-card-done" type="button">Done</button></div>`;
 
@@ -18181,7 +19679,7 @@ ${frontPageChooserHTML()}
 		};
 
 		card.querySelector(".front-page-card-close").onclick = () => {
-			settle({ frontPageMode: "sources", frontPageTopics: [] }).catch(console.error);
+			settle({ frontPageMode: "sources", frontPageTopics: [], frontPageIncludeTopLinks: false }).catch(console.error);
 		};
 		card.querySelector(".front-page-card-done").onclick = () => {
 			settle(chooser.choice()).catch(console.error);
@@ -19472,14 +20970,6 @@ ${Object.entries(DISCUSSION_BIRD_ART).map(([pose, [closed, open]]) => `.discussi
 	font-weight:700;
 }
 
-.collection-tag-chip {
-	padding:1px 6px;
-	border-radius:4px;
-	background:var(--active-tint);
-	color:var(--meta);
-	font:600 10px/1.5 Verdana, Geneva, sans-serif;
-}
-
 .collection-tag .collection-tag-more {
 	top:6px;
 	right:6px;
@@ -19955,21 +21445,6 @@ header button svg {
 	margin-top:8px;
 }
 
-.settings-option-byline {
-	display:flex;
-	align-items:baseline;
-	gap:.35em;
-	margin:3px 0 8px 21px;
-	color:var(--muted);
-	font-size:11px;
-	line-height:1.35;
-}
-
-.settings-byline-sep {
-	color:var(--muted);
-	opacity:.6;
-}
-
 .settings-byline-action {
 	padding:0;
 	border:0;
@@ -20216,41 +21691,14 @@ header button svg {
 	font-size:inherit;
 }
 
+#panel:not(.app-docked) .page-sort .settings-select-menu {
+	left:0;
+	right:auto;
+}
+
 .page-sort:focus-within {
 	position:relative;
 	z-index:6;
-}
-
-.page-sort-toggle {
-	border:0;
-	padding:0;
-	background:none;
-	color:var(--meta);
-	cursor:pointer;
-	font:inherit;
-	text-decoration:underline dotted;
-	text-underline-offset:2px;
-}
-
-.page-sort-sep {
-	margin:0 .1em;
-	color:var(--meta);
-}
-
-.page-sort-toggle[hidden],
-.page-sort-sep[hidden] {
-	display:none;
-}
-
-.page-sort-toggle.is-on {
-	color:var(--text);
-	text-decoration:underline;
-}
-
-@media (hover: hover) {
-	.page-sort-toggle:not(.is-on):hover {
-		text-decoration:underline;
-	}
 }
 
 .list-filtered .page-sort {
@@ -20484,6 +21932,85 @@ header button svg {
 
 .settings-button--primary {
 	color:var(--accent-ink);
+}
+
+#settings-topic-field {
+	padding:4px 8px;
+	border:1px solid var(--field-border);
+	border-radius:8px;
+	background:var(--field-bg);
+}
+
+#settings-topic-field:focus-within {
+	border-color:var(--accent);
+	box-shadow:0 0 0 1px var(--accent);
+}
+
+.settings-topic-search-row {
+	display:flex;
+	align-items:center;
+	gap:6px;
+	color:var(--muted);
+}
+
+.settings-topic-search-row > svg { flex:none; }
+
+#settings-topic-search {
+	appearance:none;
+	width:100%;
+	min-width:0;
+	min-height:26px;
+	padding:2px 0;
+	border:0;
+	outline:none;
+	background:transparent;
+	color:var(--field-text);
+	font:inherit;
+}
+
+#settings-topic-search::placeholder { color:var(--muted); }
+
+#settings-topic-list,
+#settings-topic-results {
+	display:flex;
+	flex-wrap:wrap;
+	gap:5px;
+}
+
+#settings-topic-list { padding:2px 0; }
+
+#settings-topic-results {
+	max-height:130px;
+	overflow:auto;
+	padding:4px 3px;
+	margin:4px -3px 0;
+}
+
+.front-page-topic.settings-topic-chip {
+	min-height:26px;
+	height:auto;
+	max-width:100%;
+	padding:3px 8px;
+	border-radius:999px;
+}
+
+.settings-topic-chip span {
+	min-width:0;
+	overflow-wrap:anywhere;
+}
+
+.settings-topic-chip.is-hidden-topic {
+	border-color:var(--border-soft);
+	background:var(--hover-tint);
+}
+
+.settings-topic-chip:hover { border-color:var(--accent); }
+.settings-topic-chip:disabled { opacity:.6; cursor:default; }
+#settings-topic-status { margin:8px 0 0; color:var(--muted); font-size:12px; }
+
+@media (pointer:coarse) {
+	#settings-topic-search { min-height:32px; font-size:16px; }
+	.front-page-topic.settings-topic-chip { min-height:32px; }
 }
 
 :is(#account-continue, #account-send-code):disabled:not([aria-busy="true"]) {
@@ -20809,7 +22336,7 @@ header button svg {
 	line-height:1.35;
 }
 
-#app-settings-modal:is([data-section="sources"], [data-section="appearance"]) #app-settings-heading {
+#app-settings-modal:is([data-section="sources"], [data-section="appearance"], [data-section="filters"]) #app-settings-heading {
 	margin-bottom:4px;
 }
 
@@ -20951,13 +22478,20 @@ header button svg {
 	bottom:calc(100% + 4px);
 }
 
-.settings-select-menu [role="option"]::before {
+.settings-select-menu > [role="group"] {
+	display:flex;
+	flex-direction:column;
+}
+
+.settings-select-menu :is([role="option"], [role="menuitemradio"], [role="menuitemcheckbox"])::before,
+.app-row-item[role="menuitemradio"]::before {
 	display:inline-block;
 	width:16px;
 	content:"";
 }
 
-.settings-select-menu [aria-selected="true"]::before {
+.settings-select-menu :is([aria-selected="true"], [aria-checked="true"])::before,
+.app-row-item[aria-checked="true"]::before {
 	content:"✓";
 }
 
@@ -21293,6 +22827,16 @@ button.shortcut-key {
 .settings-section-hint {
 	margin:0 0 14px;
 	line-height:1.4;
+}
+
+.settings-subheading {
+	margin:0 0 8px;
+	font-size:12px;
+	font-weight:600;
+}
+
+[data-app-section="collection"] .appearance-row + .appearance-row {
+	margin-top:10px;
 }
 
 .sources-subhead {
@@ -22136,11 +23680,16 @@ ${
 `;
 	}
 
-	function settingsSelectHTML(id, setting, label, hint, options) {
+	function settingsSelectHTML(id, setting, label, hint, options, extraItem = "") {
+		const popupRole = extraItem ? "menu" : "listbox";
+		const optionRole = extraItem ? "menuitemradio" : "option";
+		const checkedAttribute = extraItem ? "aria-checked" : "aria-selected";
+		const choices = options.map(([value, text]) => `<button class="dropdown-item" type="button" role="${optionRole}" tabindex="-1" data-value="${escapeHTML(String(value))}" ${checkedAttribute}="false" aria-label="${escapeHTML(text)}">${escapeHTML(text)}</button>`).join("");
+		const items = extraItem ? `<div role="group">${choices}</div><div class="dropdown-rule" role="separator"></div>${extraItem}` : choices;
 		return `<div class="settings-select" data-settings-select>
 <input type="hidden"${setting ? ` data-setting="${escapeHTML(setting)}"` : ""}>
-<button id="${escapeHTML(id)}" class="settings-select-toggle" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="${escapeHTML(id)}-options" aria-labelledby="${escapeHTML(label)} ${escapeHTML(id)}-value"${hint ? ` aria-describedby="${escapeHTML(hint)}"` : ""}><span id="${escapeHTML(id)}-value"></span><span aria-hidden="true">▾</span></button>
-<div id="${escapeHTML(id)}-options" class="dropdown settings-select-menu" role="listbox" aria-labelledby="${escapeHTML(label)}" hidden>${options.map(([value, text]) => `<button class="dropdown-item" type="button" role="option" tabindex="-1" data-value="${escapeHTML(String(value))}" aria-selected="false">${escapeHTML(text)}</button>`).join("")}</div>
+<button id="${escapeHTML(id)}" class="settings-select-toggle" type="button" aria-haspopup="${popupRole}" aria-expanded="false" aria-controls="${escapeHTML(id)}-options" aria-labelledby="${escapeHTML(label)} ${escapeHTML(id)}-value"${hint ? ` aria-describedby="${escapeHTML(hint)}"` : ""}><span id="${escapeHTML(id)}-value"></span><span aria-hidden="true">▾</span></button>
+<div id="${escapeHTML(id)}-options" class="dropdown settings-select-menu" role="${popupRole}" aria-labelledby="${escapeHTML(label)}" hidden>${items}</div>
 </div>`;
 	}
 
@@ -22151,14 +23700,16 @@ ${
 		const input = root.querySelector("input");
 		const toggle = root.querySelector(".settings-select-toggle");
 		const valueLabel = toggle.querySelector("span");
-		const menu = root.querySelector('[role="listbox"]');
-		const options = [...menu.querySelectorAll('[role="option"]')];
+		const menu = root.querySelector(".settings-select-menu");
+		const checkedAttribute = menu.getAttribute("role") === "menu" ? "aria-checked" : "aria-selected";
+		const options = [...menu.querySelectorAll("[data-value]")];
+		const items = [...menu.querySelectorAll("button")];
 		let surface;
 		const paint = (value) => {
 			const selected = options.find((option) => option.dataset.value === String(value)) || options[0];
 			input.value = selected.dataset.value;
 			valueLabel.textContent = selected.textContent;
-			for (const option of options) option.setAttribute("aria-selected", String(option === selected));
+			for (const option of options) option.setAttribute(checkedAttribute, String(option === selected));
 		};
 		const close = (focus = false) => {
 			menu.hidden = true;
@@ -22187,15 +23738,16 @@ ${
 			const up = below < menu.getBoundingClientRect().height && above > below;
 			menu.classList.toggle("opens-up", up);
 			menu.style.maxHeight = Math.max(36, Math.floor(up ? above : below)) + "px";
-			(options.find((option) => option.getAttribute("aria-selected") === "true") || options[0]).focus({ preventScroll: true });
+			(options.find((option) => option.getAttribute(checkedAttribute) === "true") || options[0]).focus({ preventScroll: true });
 		};
 		toggle.onmousedown = (event) => { if (event.button === 0) event.preventDefault(); };
 		toggle.onclick = () => menu.hidden ? open() : close(true);
 		menu.onclick = (event) => {
-			const option = event.target.closest('[role="option"]');
-			if (!option) return;
-			const changed = input.value !== option.dataset.value;
-			paint(option.dataset.value);
+			const item = event.target.closest("button");
+			if (!item) return;
+			const value = item.dataset.value;
+			const changed = value !== undefined && input.value !== value;
+			if (changed) paint(value);
 			close(true);
 			if (changed) input.dispatchEvent(new Event("change", { bubbles: true }));
 		};
@@ -22204,9 +23756,9 @@ ${
 				event.preventDefault();
 				event.stopPropagation();
 				if (menu.hidden) { open(); return; }
-				const current = options.indexOf(root.getRootNode().activeElement);
-				const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : Math.max(0, Math.min(options.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
-				options[next].focus({ preventScroll: true });
+				const current = items.indexOf(root.getRootNode().activeElement);
+				const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : Math.max(0, Math.min(items.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
+				items[next].focus({ preventScroll: true });
 			} else if (event.key === "Escape" && !menu.hidden) {
 				event.preventDefault();
 				event.stopPropagation();
@@ -22242,26 +23794,32 @@ ${
 
 	function wireDiagnosticSharing(shadow) {
 		const input = shadow.getElementById("account-share-diagnostics");
-		let updating = false;
+		let saving = false;
+		let request = 0;
 		let shownAccount = null;
 		const updateSharing = async (enabled) => {
-			if (updating || !input) return;
-			updating = true;
-			input.disabled = true;
+			if (saving || !input) return;
+			const current = ++request;
+			saving = typeof enabled === "boolean";
+			if (saving) input.disabled = true;
 			const session = await load(ACCOUNT_SYNC_KEY, null);
+			if (current !== request) return;
 			const account = hasAccountSyncSession(session) && session.expiresAt > Date.now() ? session.account : null;
 			const key = account && ACCOUNT_DIAGNOSTICS_PREFIX + account;
-			if (key && account === shownAccount && typeof enabled === "boolean") {
+			if (account !== shownAccount) input.disabled = true;
+			if (key && account === shownAccount && saving) {
 				try {
 					await save(key, enabled ? Date.now() : 0);
 				} catch {
 					showToast("Couldn’t save your diagnostics preference.", { kind: "system" });
 				}
 			}
-			input.checked = Boolean(key && diagnosticConsentEnabled(await load(key, 0)));
-			input.disabled = !key;
+			const checked = Boolean(key && diagnosticConsentEnabled(await load(key, 0)));
+			if (current !== request) return;
 			shownAccount = account;
-			updating = false;
+			input.checked = checked;
+			input.disabled = !key;
+			saving = false;
 		};
 		input?.addEventListener("change", (event) => {
 			if (event.isTrusted) void updateSharing(input.checked);
@@ -22272,7 +23830,7 @@ ${
 	function settingsPrivacyHTML() {
 		return `<div id="settings-privacy" class="settings-group settings-privacy" data-app-section="general">
 <div class="sources-subhead">Privacy</div>
-<div class="settings-privacy-body"><p class="privacy-meta">Triglavis LLC &middot; backchnnl.app &middot; Last updated 19 November 2026</p>
+<div class="settings-privacy-body"><p class="privacy-meta">Triglavis LLC &middot; backchnnl.app &middot; Last updated 20 November 2026</p>
 
         <h3>What this site collects</h3>
         <p>The promotional page uses no cookies, analytics, tracking pixels or third-party scripts. <strong>Cloudflare</strong> hosts Backchannel, handles network requests, and records operational logs.</p>
@@ -22283,7 +23841,8 @@ ${
           <li>Your settings, queue, Collection, votes, notes, hidden sites and the comments you have seen are saved in your userscript manager on this device.</li>
           <li>If you set up Account sync, Backchannel uploads an encrypted copy of your settings, reading queue, saved items and notes to Cloudflare. The service stores your passkey's public credential, session records, and browser and platform labels for linked devices. Backchannel stores your verified recovery email, uses it to label new passkeys, and sends verification and recovery codes through Cloudflare. Your recovery key stays on your devices.</li>
           <li>To find discussions, it asks each source you have turned on about the page you are on. Most are told its address; Lobsters and Mastodon's search are told only its domain. A link you open in the reader from Mastodon's front page is looked up on mastodon.social by its address. A source you have turned off is asked nothing.</li>
-          <li>It checks the pages in your Collection for new discussion, each at most once an hour, by sending their addresses to Hacker News, Bluesky's link index and, when Reddit answers through its archive, that archive. A page with new discussion is then looked up like the page you are on. Choose Unwatch on a page to stop.</li>
+          <li>It checks the pages in your Collection for new discussion, each at most once an hour, by sending their addresses to Hacker News, Bluesky's link index and, when Reddit answers through its archive, that archive. A page with new discussion is then looked up like the page you are on. Remove a page from Collection to stop checking it.</li>
+          <li>Reader downloads a public topic index and matches links on your device. To find topic images, Reader can send short subject names to Wikipedia and look up the resulting image credits on Wikimedia Commons. Reader loads the images without a referrer. If you send a topic report while signed in, Backchannel stores the link, the displayed topic, any suggestion, and a hashed account identifier for internal review. The identifier keeps the same account from counting twice for a link.</li>
           <li><strong>Reddit</strong>, <strong>Wikipedia</strong> and <strong>Hacker News</strong> can tell who you are. Signed in to one, its requests can arrive as your account. Signed out, Reddit and Wikipedia still send a device identifier.</li>
           <li>Voting and replying happen in a window on that source's own site, using the session you already have there.</li>
           <li>An article opened in the reader loads from the site that published it, with no referrer. If the page does not respond inside that frame, the script fetches it once, without cookies, to see whether it can be shown there and, if not, to show its text.</li>
@@ -22304,7 +23863,7 @@ ${
 </div>`;
 	}
 
-	function settingsPanelHTML() {
+	function settingsPanelHTML(reader = false) {
 		return `
 <div id="settings-panel" class="settings-panel">
 <div id="settings-pdf-notice" class="settings-notice" hidden>Backchannel not supported in Firefox's PDF viewer</div>
@@ -22387,11 +23946,6 @@ Comments that include images will render them inline with the comment. When disa
 Write your own notes on any article or PDF, with support for annotation.
 All stored locally.
 </div>
-<div class="settings-option-byline">
-<span id="settings-notes-count">0 notes</span>
-<span class="settings-byline-sep">|</span>
-<button id="settings-notes-export" class="settings-byline-action" type="button">export</button>
-</div>
 <div class="settings-suboptions" data-suboptions-of="notepad">
 <label class="settings-option sub-option">
 <input id="setting-note-on-selection" data-setting="noteOnSelection" type="checkbox">
@@ -22449,16 +24003,32 @@ ${settingsUpdatesHTML()}
 
 ${settingsPrivacyHTML()}
 
+${collectionSettingsHTML(reader)}
+
 <div data-app-section="sources">
 <div class="settings-section-hint">Where Backchannel looks for discussions and links for Front Pages. <a href="${escapeHTML(REPO_URL)}#what-exactly-is-the-script-doing-with-my-information" target="_blank" rel="noopener noreferrer">How each source works</a></div>
 <div class="sources-grid">${sourceListHTML({ idPrefix: "setting-source-", cells: true, help: true })}</div>
 <div class="sources-subhead">Front Pages</div>
-<div class="sources-subhint">Choose what Backchannel shows in Front Pages. Links come only from the sources you've enabled above.</div>
+<div class="sources-subhint">Choose which feed opens in Unread and All articles. Links come from your enabled sources.</div>
 ${frontPageChooserHTML()}
 <div class="appearance-row settings-sync-schedule">
 <div class="appearance-row-text"><div id="setting-source-refresh-label" class="appearance-row-label">Sync schedule</div><div id="setting-source-refresh-hint" class="appearance-row-hint">Determine how often sources should automatically sync.</div></div>
 ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-source-refresh-label", "setting-source-refresh-hint", [[5, "Every 5 minutes"], [15, "Every 15 minutes"], [30, "Every 30 minutes"], [60, "Every hour"], [0, "Manual"]])}
 </div>
+</div>
+
+<div data-app-section="filters" id="settings-topic-filters">
+<div id="settings-topic-hint" class="settings-section-hint">Choose which topics and links to hide from Front Pages.</div>
+<h3 class="settings-subheading">Hidden topics</h3>
+<div id="settings-topic-field">
+<div id="settings-topic-list" role="group" aria-label="Hidden topics" hidden></div>
+<div class="settings-topic-search-row">
+${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10.2 10.2 3.3 3.3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>')}
+<input id="settings-topic-search" type="search" placeholder="Search topics…" aria-label="Search topics" aria-describedby="settings-topic-hint" aria-controls="settings-topic-results" autocomplete="off" autocorrect="off" spellcheck="false">
+</div>
+</div>
+<div id="settings-topic-results" role="group" aria-label="Matching topics" hidden></div>
+<div id="settings-topic-status" role="status" hidden></div>
 <div id="settings-hidden-section">
 <div class="sources-subhead">Hidden links</div>
 <div class="sources-subhint">Links you've hidden from Front Pages.</div>
@@ -22483,10 +24053,156 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 `;
 	}
 
+	function wireSettingsTopicFilters(shadow) {
+		const panel = shadow.getElementById("settings-topic-filters");
+		const search = shadow.getElementById("settings-topic-search");
+		const tags = shadow.getElementById("settings-topic-list");
+		const results = shadow.getElementById("settings-topic-results");
+		const status = shadow.getElementById("settings-topic-status");
+		const addIcon = APP_ICON('<path d="M8 3.5v9m-4.5-4.5h9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>');
+		const broadTopics = TOPICS.map(({ label }) => label).sort((a, b) => a.localeCompare(b));
+		let available = broadTopics;
+		let aliases = new Map();
+		let hidden = [];
+		let loading = false;
+		let updating = false;
+		let request = 0;
+		let edits = 0;
+
+		const topicChip = (label, hide) => {
+			const chip = document.createElement("button");
+			chip.type = "button";
+			chip.className = "front-page-topic settings-topic-chip";
+			chip.classList.toggle("is-hidden-topic", !hide);
+			chip.dataset.topic = label;
+			chip.setAttribute("aria-label", (hide ? "Hide " : "Show again, ") + label);
+			const text = document.createElement("span");
+			text.textContent = topicDisplayName(label);
+			if (hide) {
+				chip.innerHTML = addIcon;
+				chip.append(text);
+			} else {
+				chip.append(text);
+				chip.insertAdjacentHTML("beforeend", APP_CLOSE_ICON);
+			}
+			chip.disabled = updating;
+			chip.onclick = () => update(label, hide);
+			return chip;
+		};
+
+		const paintMatches = () => {
+			const query = topicFilterKey(search.value);
+			const terms = query.split(" ");
+			const excluded = new Set(hidden.map(topicFilterKey));
+			const labels = query ? available.filter((label) => {
+				const keys = [label, ...(aliases.get(label) || [])].map(topicFilterKey);
+				return !keys.some((key) => excluded.has(key)) && keys.some((key) => terms.every((term) => key.includes(term)));
+			}) : [];
+			const active = shadow.activeElement;
+			const focused = results.contains(active) ? active.dataset.topic : "";
+			const chips = labels.map((label) => topicChip(label, true));
+			results.replaceChildren(...chips);
+			results.hidden = !chips.length;
+			status.hidden = !query || Boolean(chips.length);
+			status.textContent = status.hidden ? "" : loading ? "Loading topics…" : "No matching topics.";
+			if (focused) (chips.find((chip) => chip.dataset.topic === focused) || search).focus({ preventScroll: true });
+		};
+
+		const sync = (settings) => {
+			if (!accountValuesEqual(hidden, settings.hiddenTopics)) {
+				hidden = settings.hiddenTopics;
+				tags.replaceChildren(...hidden.map((label) => topicChip(label, false)));
+				tags.hidden = !hidden.length;
+			}
+			paintMatches();
+		};
+
+		const update = async (label, hide) => {
+			if (updating || !label) return;
+			updating = true;
+			edits++;
+			const focus = shadow.activeElement;
+			const query = search.value;
+			for (const chip of [...tags.children, ...results.children]) chip.disabled = true;
+			try {
+				const settings = await loadSettings();
+				const topics = settings.hiddenTopics.filter((topic) => topicFilterKey(topic) !== topicFilterKey(label));
+				if (hide) topics.push(label);
+				const saved = await saveSettings({ hiddenTopics: topics });
+				if (hide && search.value === query) search.value = "";
+				sync(saved);
+				if (appState && appViewIsFrontPage(appState.view)) endAppSelection();
+				refreshFrontPageConsumers().catch(console.error);
+			} catch (error) {
+				console.error(error);
+				showToast("Could not update hidden topics");
+			} finally {
+				updating = false;
+				for (const chip of [...tags.children, ...results.children]) chip.disabled = false;
+				if (!panel.hidden && !shadow.getElementById("app-settings-modal").hidden &&
+					(!shadow.activeElement || hide && shadow.activeElement === focus)) search.focus({ preventScroll: true });
+			}
+		};
+
+		search.oninput = paintMatches;
+		search.onkeydown = (event) => {
+			if (event.isComposing) return;
+			if (event.key === "Escape" && search.value) {
+				event.preventDefault();
+				event.stopPropagation();
+				search.value = "";
+				paintMatches();
+				return;
+			}
+			if (updating || !results.childElementCount || !["Enter", "ArrowDown"].includes(event.key)) return;
+			event.preventDefault();
+			const first = results.firstElementChild;
+			if (event.key === "Enter") {
+				const exact = [...results.children].find((chip) => topicFilterKey(chip.dataset.topic) === topicFilterKey(search.value));
+				if (exact || results.childElementCount === 1) {
+					(exact || first).click();
+					return;
+				}
+			}
+			first.focus();
+		};
+
+		return {
+			sync,
+			async refresh() {
+				const revision = ++request;
+				const startedWith = edits;
+				search.value = "";
+				loading = true;
+				paintMatches();
+				try {
+					const settings = await loadSettings();
+					if (revision !== request) return;
+					if (!updating && edits === startedWith) {
+						const changed = !accountValuesEqual(hidden, settings.hiddenTopics);
+						sync(settings);
+						if (changed) refreshFrontPageConsumers().catch(console.error);
+					}
+					const groups = await loadReaderFrontPageTopicGroups(settings);
+					if (revision !== request) return;
+					const subjects = groups.filter(readerTopicHasSubject);
+					aliases = new Map(subjects.map((group) => [group.label, group.aliases]));
+					available = normalizeTopicLabels([...broadTopics, ...subjects.map(({ label }) => label)]).sort((a, b) => a.localeCompare(b));
+				} finally {
+					if (revision === request) {
+						loading = false;
+						paintMatches();
+					}
+				}
+			},
+		};
+	}
+
 	function wireSettingsPanel(shadow, { onAnnotationChange } = {}) {
 		const settingsPanel = shadow.querySelector("#settings-panel");
 		const settingsToggle = shadow.querySelector("#settings-toggle");
 		const shortcutsPane = wireShortcutsPane(shadow);
+		const topicFilters = wireSettingsTopicFilters(shadow);
 
 		watchUpdateGear(settingsToggle);
 
@@ -22658,6 +24374,7 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 
 			applyButtonDesigner(settings);
 			syncSettingsFrontPage?.(settings);
+			topicFilters.sync(settings);
 			syncSourceSchedule(normalizeSourceRefreshMinutes(settings.sourceRefreshMinutes));
 
 			const sourceState = normalizeSourceSettings(
@@ -22771,6 +24488,9 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 
 		const notesExport = shadow.querySelector("#settings-notes-export");
 		const notesCount = shadow.querySelector("#settings-notes-count");
+		const bookmarksExport = shadow.querySelector("#settings-bookmarks-export");
+
+		if (bookmarksExport) bookmarksExport.onclick = () => exportBookmarks().catch(console.error);
 
 		const refreshNotesCount = async () => {
 			if (!notesCount) {
@@ -22829,8 +24549,8 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 				exportNotes()
 					.then((payload) => {
 						notesExport.textContent = payload.noteCount
-							? "exported"
-							: "no notes yet";
+							? "Exported"
+							: "No notes yet";
 
 						window.setTimeout(() => {
 							notesExport.textContent = restore;
@@ -22846,16 +24566,15 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 			if (sourceInput) {
 				syncSourceHint(sourceInput);
 
-				const current = await loadSettings();
-
-				syncSettingsFrontPage?.(
-					await saveSettings({
-						sources: {
-							...normalizeSourceSettings(current.sources, registeredSourceIds()),
-							[sourceInput.dataset.source]: sourceInput.checked,
-						},
-					}),
-				);
+				const source = sourceInput.dataset.source;
+				const enabled = sourceInput.checked;
+				const saved = await saveSettings((current) => ({
+					sources: {
+						...normalizeSourceSettings(current.sources, registeredSourceIds()),
+						[source]: enabled,
+					},
+				}));
+				syncSettingsFrontPage?.(saved, { sourcesOnly: true });
 
 				await refreshForSourceChange();
 				return;
@@ -23246,7 +24965,7 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 							await refreshFrontPageConsumers();
 						},
 					});
-					syncSettingsFrontPage = (next) => frontPageControl.sync(next);
+					syncSettingsFrontPage = (next, options) => frontPageControl.sync(next, options);
 				})
 				.catch(console.error);
 		}
@@ -23454,9 +25173,13 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 				const story = { url: address.href, title: "", site: hostLabel(address.href), source: "" };
 
 				await mutateHiddenStories((current) => addHiddenStory(current, story));
+				refreshFrontPageConsumers().catch(console.error);
 				return hiddenStoryKey(story);
 			},
-			remove: (key) => mutateHiddenStories((current) => removeHiddenStory(current, key)),
+			remove: async (key) => {
+				await mutateHiddenStories((current) => removeHiddenStory(current, key));
+				refreshFrontPageConsumers().catch(console.error);
+			},
 		});
 
 		const renderBlockedList = manageTable(shadow.querySelector("#settings-blocked-list"), {
@@ -23505,7 +25228,10 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 				if (section === "shortcuts") shortcutsPane.refresh().catch(console.error);
 				else shortcutsPane.close();
 				if (section === "sidebar") renderBlockedList().catch(console.error);
-				if (section === "sources") renderHiddenList().catch(console.error);
+				if (section === "filters") {
+					renderHiddenList().catch(console.error);
+					topicFilters.refresh().catch(console.error);
+				}
 			},
 			close: shortcutsPane.close,
 		};
@@ -23734,6 +25460,7 @@ ${CHROME_CSS}
 }
 
 #comments {
+	--comments-gutter:12px;
 			flex:1 1 auto;
 			min-height:0;
 	display:flex;
@@ -23741,7 +25468,7 @@ ${CHROME_CSS}
 	overflow:auto;
 	overflow-x:hidden;
 			overscroll-behavior:contain;
-	padding:12px 12px calc(32px + env(safe-area-inset-bottom, 0px));
+	padding:12px var(--comments-gutter) calc(32px + env(safe-area-inset-bottom, 0px));
 	word-wrap:break-word;
 }
 
@@ -25068,7 +26795,9 @@ ${appMode ? "" : `<div class="toast-viewport">${TOAST_HTML}</div>`}
 <div id="comments">
 <div id="filter-banner" class="filter-banner hidden">
 <div class="filter-banner-head">
-<span class="filter-banner-title">Focused discussion</span><a id="filter-banner-open" class="filter-banner-icon" target="_blank" rel="noopener" hidden>${APP_OPEN_ICON}</a><button id="clear-filter" class="filter-banner-icon" type="button" aria-label="Show all comments" title="Show all comments">${APP_CLOSE_ICON}</button>
+${appMode
+	? `<button id="clear-filter" class="app-head-icon" type="button" hidden>${APP_CLOSE_ICON}</button><div class="app-discussion-byline"></div>`
+	: `<span class="filter-banner-title">Focused discussion</span><a id="filter-banner-open" class="filter-banner-icon" target="_blank" rel="noopener" hidden>${APP_OPEN_ICON}</a><button id="clear-filter" class="filter-banner-icon" type="button" aria-label="Show all comments" title="Show all comments">${APP_CLOSE_ICON}</button>`}
 </div>
 <div id="filter-banner-quote" class="filter-banner-quote"></div>
 </div>
@@ -25082,7 +26811,7 @@ ${appMode ? `<div class="browse-tabs" role="tablist">
 <div id="browse-blend-note" class="browse-blend-note" hidden></div>
 <div id="browse-list"${appMode ? "" : ' class="reader-list" role="tabpanel" aria-labelledby="browse-tab-front"'}></div>
 </div>
-<div id="next-up" class="next-up hidden"></div>
+${appMode ? "" : '<div id="next-up" class="next-up hidden"></div>'}
 </div>
 ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 
@@ -27473,7 +29202,12 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 		renderedFor = openPageKey();
 		renderedDiscussions = stories;
 		renderedComments = [];
-		const header = renderPageHeader(stories, ui.body, { page: discussionsPageTitle(stories), sort: settings?.commentSort, onSortChange: () => renderDiscussionSnapshot(stories, ui) });
+		const header = renderPageHeader(stories, ui.body, {
+			page: discussionsPageTitle(stories),
+			sort: settings?.commentSort,
+			newCommentsFirst: settings?.newCommentsFirst,
+			onSortChange: () => renderDiscussionSnapshot(stories, ui),
+		});
 		ui.body.insertBefore(header, waiting);
 		mountFilterBanner(header, ui);
 		const details = document.createElement("div");
@@ -27543,7 +29277,12 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 		const settings = await loadSettings();
 		if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
 		const page = discussionsPageTitle(stories);
-		const headerOptions = { page, sort: settings.commentSort, onSortChange: () => renderDiscussionSnapshot(stories, ui) };
+		const headerOptions = {
+			page,
+			sort: settings.commentSort,
+			newCommentsFirst: settings.newCommentsFirst,
+			onSortChange: () => renderDiscussionSnapshot(stories, ui),
+		};
 		let headerElement = renderPageHeader(stories, ui.body, headerOptions);
 		ui.body.insertBefore(headerElement, waiting);
 		mountFilterBanner(headerElement, ui);
@@ -27606,7 +29345,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 				stories.map((story) => story.key),
 				Date.now(),
 			),
-			onSync: (releaseRead) => syncDiscussions(ui, stories, releaseRead),
+			onSync: (releaseRead) => syncDiscussions(ui, renderedDiscussions, releaseRead),
 		});
 
 		liveDiscussions.clear();
@@ -27729,8 +29468,6 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			},
 		);
 
-		syncNewCommentsFirstControl(ui, entries, settings);
-
 		const liveRunEnd =
 			(settings.commentSort || "best") === "best"
 				? entries.reduce((last, entry, index) => (entry.live ? index : last), -1)
@@ -27813,7 +29550,6 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 		await persistSharedThreads(stories).catch(console.error);
 		if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
 		if (reconcileWholeThreads(stories, ui)) syncDiscussionHeader(ui, stories, settings, loadStatus);
-		syncNewCommentsFirstControl(ui, entries, settings);
 		if (activeCommentFilter?.type === "discussion") applyDiscussionSelection(activeCommentFilter.keys, { animate: false, scroll: false });
 		syncFilterAffordances();
 		refreshSaveControls().catch(console.error);
@@ -28109,24 +29845,20 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 
 	function mountSortRow(container, sort, options) {
 		const sortRow = document.createElement("div");
+		const sortChoices = SORT_MODES.map(({ id, label }) => [id, label]);
+		const unreadLabel = "Prioritize unread comments";
+		const unreadToggle = `<button id="sort-new-first" class="dropdown-item" type="button" role="menuitemcheckbox" tabindex="-1"
+aria-checked="${Boolean(options.newCommentsFirst)}" aria-label="${unreadLabel}">${unreadLabel}</button>`;
 
 		sortRow.className = "page-sort";
 		sortRow.innerHTML = `<label id="comment-sort-label" class="page-sort-label" for="comment-sort">Sort</label>
-${settingsSelectHTML("comment-sort", "", "comment-sort-label", "", SORT_MODES.map(({ id, label }) => [id, label]))}
-<span id="sort-sep" class="page-sort-sep" hidden>|</span>
-<button id="sort-new-first" class="page-sort-toggle" type="button" hidden>prioritize unread</button>`;
+${settingsSelectHTML("comment-sort", "", "comment-sort-label", "", sortChoices, unreadToggle)}`;
 
-		sortRow.querySelector("#sort-new-first").onclick = async (event) => {
-			const control = event.currentTarget;
-			const next = !(await loadSettings()).newCommentsFirst;
-
-			await saveSettings({ newCommentsFirst: next });
-			control.classList.toggle("is-on", next);
-			control.setAttribute("aria-pressed", String(next));
-
-			if (typeof options.onSortChange === "function") {
-				await options.onSortChange(sort);
-			}
+		const unread = sortRow.querySelector("#sort-new-first");
+		unread.onclick = async () => {
+			const settings = await saveSettings((current) => ({ newCommentsFirst: !current.newCommentsFirst }));
+			unread.setAttribute("aria-checked", String(settings.newCommentsFirst));
+			await options.onSortChange?.(settings.commentSort);
 		};
 
 		wireSettingsSelect(sortRow.querySelector(".settings-select"))(sort);
@@ -28147,12 +29879,6 @@ ${settingsSelectHTML("comment-sort", "", "comment-sort-label", "", SORT_MODES.ma
 		const slot = appState?.ui.shadow.querySelector("#app-discussion-sort");
 
 		if (slot) {
-			const newFirst = sortRow.querySelector("#sort-new-first");
-
-			newFirst.classList.add("app-new-first", "app-head-icon");
-			newFirst.innerHTML = '<span class="app-new-mark">NEW</span>';
-			newFirst.setAttribute("aria-label", "Prioritize unread comments");
-			newFirst.title = "Prioritize unread comments";
 			slot.replaceChildren(sortRow);
 		} else {
 			container.appendChild(sortRow);
@@ -28425,6 +30151,19 @@ ${settingsSelectHTML("comment-sort", "", "comment-sort-label", "", SORT_MODES.ma
 		syncComposeBox();
 
 		const selected = activeCommentFilter?.type === "discussion" ? activeCommentFilter.keys : null;
+		if (appState && sidebarUI?.body) {
+			const body = sidebarUI.body;
+			const empty = body.querySelector(":scope > .app-discussion-selection-empty");
+			if (selected?.size === 0 && !empty) {
+				const note = document.createElement("div");
+				note.className = "browse-empty app-discussion-empty app-discussion-selection-empty";
+				note.setAttribute("role", "status");
+				note.textContent = "No discussions selected.";
+				body.append(note);
+			} else if (selected?.size !== 0) {
+				empty?.remove();
+			}
+		}
 		for (const more of sidebarUI?.body?.querySelectorAll(".more-replies[data-discussion-key]") || []) {
 			more.classList.toggle("source-filter-hidden", Boolean(selected && !selected.has(more.dataset.discussionKey)));
 		}
@@ -29836,7 +31575,7 @@ ${discussionChoiceGroupsHTML(
 		sidebarUI?.filterBanner?.classList.remove("app-pinned");
 		if (sidebarUI?.filterBannerQuote) {
 			sidebarUI.filterBannerQuote.textContent = "";
-			sidebarUI.filterBannerQuote.classList.remove("filter-banner-quote-comment", "app-focus-post");
+			sidebarUI.filterBannerQuote.classList.remove("filter-banner-quote-comment");
 		}
 		syncFocusControls();
 	}
@@ -32873,11 +34612,9 @@ ${discussionChoiceGroupsHTML(
 
 			if (sidebarUI?.filterBanner && sidebarUI?.filterBannerQuote) {
 				if (banner === false) {
-					sidebarUI.filterBanner.classList.add("hidden");
-					sidebarUI.filterBannerQuote.textContent = "";
+					resetFilterBanner();
 				} else {
 					sidebarUI.filterBanner.classList.remove("hidden", "app-pinned");
-					sidebarUI.filterBannerQuote.classList.remove("app-focus-post");
 					paintBanner(sidebarUI.filterBannerQuote);
 					syncFocusControls();
 				}
@@ -32932,21 +34669,15 @@ ${discussionChoiceGroupsHTML(
 			(rendered) =>
 				keys.has(rendered.discussionKey) && rendered.parentId === null,
 		);
-		const story = selected.length === 1 ? selected[0] : null;
-
 		applyFocusedDiscussion(
 			{
 				filter: { type: "discussion", keys },
 				directMatchIds: new Set(roots.map((rendered) => rendered.id)),
 				anchorElement: null,
-				banner: !story || Boolean(appState),
+				banner: appState ? keys.size > 0 : selected.length !== 1,
 				paintBanner: (quote) => {
-					if (story) {
-						paintDiscussionAttribution(quote, story);
-					} else {
-						quote.classList.remove("filter-banner-quote-comment", "app-focus-post");
-						quote.textContent = selected.length ? `Showing ${pluralize(selected.length, "discussion")}` : "No discussions selected.";
-					}
+					quote.classList.remove("filter-banner-quote-comment");
+					quote.textContent = appState ? "" : selected.length ? `Showing ${pluralize(selected.length, "discussion")}` : "No discussions selected.";
 				},
 				onFiltered: () => setQuoteRedundancy(null, false),
 			},
@@ -32954,89 +34685,65 @@ ${discussionChoiceGroupsHTML(
 		);
 	}
 
-	function paintDiscussionAttribution(quote, story) {
-		if (appState) {
-			paintAppDiscussionPost(quote, story);
-			return;
+	function focusedDiscussionKeys(filter) {
+		if (filter.type === "discussion") return filter.keys;
+		if (filter.type === "comment") {
+			const comment = renderedComments.find((entry) => entry.id === filter.id);
+			return new Set(comment ? [comment.discussionKey] : []);
 		}
-
-		const byline = document.createElement("span");
-		const points = story.score ?? story.points;
-		const author = story.author ?? story.by;
-		const time = story.createdAt ?? story.time;
-		const facts = [
-			points === null || points === undefined ? "" : pluralize(points, "point"),
-			author ? `by ${author}` : "",
-			time ? timeAgo(time) : "",
-		]
-			.filter(Boolean)
-			.join(" ");
-
-		quote.classList.add("filter-banner-quote-comment");
-		byline.className = "filter-banner-author";
-		byline.textContent = discussionChoiceLabel(story);
-		quote.replaceChildren(
-			byline,
-			document.createTextNode(
-				[facts, pluralize(story.commentCount ?? story.descendants ?? 0, "comment")]
-					.filter(Boolean)
-					.join(" · "),
-			),
-		);
+		const group = annotationController?.groupsByKey.get(filter.key);
+		const ids = new Set((group?.comments || []).map((match) => match.commentId));
+		return new Set(renderedComments.filter((entry) => ids.has(entry.id)).map((entry) => entry.discussionKey));
 	}
 
-	function paintAppDiscussionPost(quote, story) {
-		const points = story.score ?? story.points;
-		const author = story.author ?? story.by;
-		const time = story.createdAt ?? story.time;
-		const label = story.baseLabel || discussionChoiceLabel(story);
-		const byline = [
-			points === null || points === undefined ? "" : escapeHTML(pluralize(points, "point")),
-			author ? `by ${authorLinkHTML(story.source, author)}` : "",
-		]
-			.filter(Boolean)
-			.join(" ");
-		const meta = [byline, escapeHTML(pluralize(story.commentCount ?? story.descendants ?? 0, "comment"))]
-			.filter(Boolean)
-			.join(" | ");
-
-		quote.classList.add("filter-banner-quote-comment", "app-focus-post");
-		quote.innerHTML = `<div class="app-focus-post-title">${escapeHTML(story.title || label)} <span class="app-focus-post-site">(${escapeHTML([label, time ? timeAgo(time) : ""].filter(Boolean).join(", "))})</span></div><div class="app-focus-post-meta">${meta}</div>`;
+	function paintAppDiscussionByline(byline, filter) {
+		const choices = discussionChoices(renderedDiscussions);
+		const keys = filter ? focusedDiscussionKeys(filter) : null;
+		const selected = keys ? choices.filter((story) => keys.has(story.key)) : choices;
+		const focus = filter?.type === "comment" ? "Focused comment" : filter?.type === "quote" ? "Article quote" : "";
+		const scope = focus || (selected.length > 1 ? pluralize(selected.length, "discussion") : "");
+		const sources = selected.map((story) => {
+			const source = getSource(story.source);
+			const label = discussionChoiceLabel(story);
+			const name = escapeHTML(label === source?.shortLabel ? source.label : label);
+			const href = discussionURL(story);
+			return href
+				? `<a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" title="Open discussion in a new tab">${name} <span aria-hidden="true">↗</span></a>`
+				: `<strong>${name}</strong>`;
+		});
+		const count = !scope && selected.length === 1 ? escapeHTML(pluralize(selected[0].commentCount, "comment")) : "";
+		const html = [scope ? `<strong>${escapeHTML(scope)}</strong>` : "", ...sources, count].filter(Boolean).join(" · ");
+		if (byline.innerHTML !== html) byline.innerHTML = html;
 	}
 
 	function focusedDiscussion() {
 		const choices = discussionChoices(renderedDiscussions);
 		const only = choices.length === 1 ? choices[0] : null;
-		const byKey = (key) => renderedDiscussions.find((discussion) => discussion.key === key) || null;
-
-		if (activeCommentFilter?.type === "discussion") {
-			const keys = activeCommentFilter.keys;
-			return keys.size === 1 ? byKey([...keys][0]) : null;
-		}
-
-		if (activeCommentFilter?.type === "comment") {
-			return byKey(renderedComments.find((rendered) => rendered.id === activeCommentFilter.id)?.discussionKey) || only;
-		}
-
-		if (activeCommentFilter?.type === "quote") {
-			const ids = new Set((annotationController?.groupsByKey.get(activeCommentFilter.key)?.comments || []).map((match) => match.commentId));
-			const keys = new Set(renderedComments.filter((rendered) => ids.has(rendered.id)).map((rendered) => rendered.discussionKey));
-
-			return keys.size === 1 ? byKey([...keys][0]) : only;
-		}
-
-		return only;
+		const filter = activeCommentFilter;
+		if (!filter) return only;
+		const keys = focusedDiscussionKeys(filter);
+		const story = keys.size === 1 ? renderedDiscussions.find((entry) => keys.has(entry.key)) || null : null;
+		if (filter.type === "discussion" || filter.type === "quote" && keys.size === 1) return story;
+		return story || only;
 	}
 
 	function syncFocusControls() {
-		const shadow = sidebarUI?.shadow;
-		const open = shadow?.querySelector("#filter-banner-open");
-		const close = shadow?.querySelector("#clear-filter");
-
-		if (!open || !close) {
+		const banner = sidebarUI?.filterBanner;
+		if (!banner) return;
+		const close = banner.querySelector("#clear-filter");
+		const filter = activeCommentFilter;
+		close.hidden = !filter;
+		const byline = banner.querySelector(".app-discussion-byline");
+		if (byline) {
+			const label = filter?.type === "discussion" ? "Show all discussions" : "Show all comments";
+			close.setAttribute("aria-label", label);
+			close.title = label;
+			if (banner.classList.contains("hidden")) byline.replaceChildren();
+			else paintAppDiscussionByline(byline, filter);
 			return;
 		}
 
+		const open = banner.querySelector("#filter-banner-open");
 		const story = focusedDiscussion();
 		const href = story ? discussionURL(story) : null;
 		const label = story ? `Open this discussion on ${sourceShortLabel(story)}` : "";
@@ -33051,8 +34758,7 @@ ${discussionChoiceGroupsHTML(
 			open.removeAttribute("href");
 		}
 
-		close.hidden = !activeCommentFilter;
-		const title = sidebarUI.filterBanner?.querySelector(".filter-banner-title");
+		const title = banner.querySelector(".filter-banner-title");
 		if (title) {
 			title.textContent = activeCommentFilter?.type === "discussion" && activeCommentFilter.keys.size !== 1 ? "Filtered discussions" : "Focused discussion";
 		}
@@ -33071,7 +34777,8 @@ ${discussionChoiceGroupsHTML(
 		}
 
 		positionFilterBannerForComment(null);
-		paintAppDiscussionPost(quote, story);
+		quote.textContent = "";
+		quote.classList.remove("filter-banner-quote-comment");
 		banner.classList.add("app-pinned");
 		banner.classList.remove("hidden");
 		syncFocusControls();
@@ -33859,7 +35566,13 @@ ${discussionChoiceGroupsHTML(
 		const focusedOption = oldMenu?.contains(focused) && focused.closest(".source-menu-option");
 		const focusSync = oldMenu?.contains(focused) && focused.classList.contains("app-sources-sync");
 		const filterAtHeader = oldHeader?.nextElementSibling === ui.filterBanner;
-		const header = renderPageHeader(stories, body, { page: discussionsPageTitle(stories), sort: settings.commentSort, loadStatus, onSortChange: () => renderDiscussionSnapshot(stories, ui) });
+		const header = renderPageHeader(stories, body, {
+			page: discussionsPageTitle(stories),
+			sort: settings.commentSort,
+			newCommentsFirst: settings.newCommentsFirst,
+			loadStatus,
+			onSortChange: () => renderDiscussionSnapshot(stories, ui),
+		});
 		if (oldHeader) oldHeader.replaceWith(header);
 		else body.prepend(header);
 		if (filterAtHeader) mountFilterBanner(header, ui);
@@ -34059,11 +35772,10 @@ ${discussionChoiceGroupsHTML(
 			if (!current()) return;
 			for (let index = 0; index < nextStories.length; index++) syncMoreReplies(threads[index]?.rootMore, threads[index], comments, nextStories[index], { seenTime: seenTimes.get(nextStories[index].key) || 0, collapsedKeys, generation, parentKey: null });
 			syncDiscussionBookends(comments, entries, settings, lookup);
-			syncNewCommentsFirstControl(ui, entries, settings);
 			await persistSharedThreads(nextStories).catch(console.error);
 			if (!current()) return;
 			if (reconcileWholeThreads(nextStories, ui)) syncDiscussionHeader(ui, nextStories, settings, loadStatus);
-			syncNewCommentsFirstControl(ui, entries, settings);
+			ui.shadow.getElementById("sort-new-first")?.setAttribute("aria-checked", String(Boolean(settings.newCommentsFirst)));
 			refreshSaveControls().catch(console.error);
 			applyPendingFocus().catch(console.error);
 			await paintCollectionTag(ui, nextStories, seenTimes);
@@ -34080,7 +35792,7 @@ ${discussionChoiceGroupsHTML(
 			if (!current()) return;
 			if (activeCommentFilter?.type === "discussion") applyDiscussionSelection(activeCommentFilter.keys, { animate: false, scroll: false });
 			else if (activeCommentFilter?.type === "comment") applyCommentFocus(activeCommentFilter.id, { animate: false, scroll: false });
-			setSidebarSyncStatus(ui, { checkedAt: threadsCheckedAt(threadCache, nextStories.map((story) => story.key), Date.now()), onSync: (releaseRead) => syncDiscussions(ui, nextStories, releaseRead) });
+			setSidebarSyncStatus(ui, { checkedAt: threadsCheckedAt(threadCache, nextStories.map((story) => story.key), Date.now()), onSync: (releaseRead) => syncDiscussions(ui, renderedDiscussions, releaseRead) });
 		} finally {
 			operation?.finish(current() ? operation.outcome() : "cancelled");
 			finishDiscussionProgress(progress);
@@ -35512,13 +37224,6 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 
 .reader-list .browse-thumb {
 	display:block;
-	width:calc(var(--thumb) * .46);
-	height:calc(var(--thumb) * .46);
-	margin:calc(var(--thumb) * .27);
-	object-fit:contain;
-}
-
-.reader-list .has-preview .browse-thumb {
 	width:100%;
 	height:100%;
 	margin:0;
@@ -35534,14 +37239,13 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 	opacity:0;
 }
 
-.reader-list .is-generic::before,
-.reader-list .is-pending::before {
+.reader-list .browse-thumb-wrap:is(.is-generic, .is-pending)::before {
 	content:"";
 	position:absolute;
-	inset:calc(var(--thumb) * .27);
+	inset:0;
 	box-sizing:border-box;
 	border:1.5px solid currentColor;
-	border-radius:3px;
+	border-radius:inherit;
 	background:
 		linear-gradient(currentColor, currentColor) 50% 32% / 56% 1.5px no-repeat,
 		linear-gradient(currentColor, currentColor) 50% 54% / 56% 1.5px no-repeat,
@@ -35673,6 +37377,17 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 
 .app-search-item-note:empty {
 	display:none;
+}
+
+.app-search-topic-item {
+	display:grid;
+	grid-template-columns:24px minmax(0, 1fr);
+	column-gap:8px;
+}
+
+.app-search-topic-item > .app-topic-icon {
+	grid-row:1 / span 2;
+	align-self:center;
 }
 
 `;
@@ -35825,7 +37540,6 @@ ${SEARCH_CSS}
 }
 
 .browse-home #browse-list {
-	--thumb:44px;
 	flex:1 1 auto;
 	min-height:0;
 	padding:0 0 12px;
@@ -36283,8 +37997,8 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 		display:inline-flex;
 		align-items:center;
 		justify-content:center;
-		border-radius:4px;
-		background:none;
+		border-color:color-mix(in srgb, var(--surface-border) 56%, transparent);
+		background:color-mix(in srgb, var(--rail-fg) 6%, transparent);
 		box-shadow:none;
 		color:var(--rail-fg);
 		--icon-on:var(--rail-fg);
@@ -36293,7 +38007,7 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	}
 
 	#app #app-chin .app-head-icon:is(:hover, :active, .item-action-on, [aria-pressed="true"], [aria-expanded="true"]) {
-		background:rgba(255,255,255,.18);
+		background:color-mix(in srgb, var(--rail-fg) 18%, transparent);
 	}
 
 	#app-chin .app-head-icon > svg {
@@ -36305,15 +38019,17 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	#app-chin #app-toggle-discussion > svg {
 		width:15px;
 		height:15px;
+		transform:translateY(1px);
 	}
 
 	#app-chin #app-view-toggle > svg {
-		transform:translateY(.6px);
+		transform:translateY(-.15px);
 	}
 
 	#app-chin #app-article-actions [data-item-action="save"]::after {
 		width:11px;
 		height:11px;
+		margin-top:.4px;
 	}
 
 	#app #app-chin #app-article-actions .item-action-on {
@@ -36400,7 +38116,7 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	height:32px;
 	padding:0;
 	border:0;
-	border-radius:8px;
+	border-radius:999px;
 	background:none;
 	color:var(--rail-fg);
 	cursor:pointer;
@@ -36562,15 +38278,18 @@ ${TIP_CSS}
 
 #app-rail-sources .rail-button {
 	box-shadow:none;
-	cursor:grab;
 	touch-action:pan-y;
 	user-select:none;
 	-webkit-user-select:none;
 	-webkit-touch-callout:none;
 }
 
+#app-rail-sources .rail-reorderable {
+	cursor:grab;
+}
+
 #app-rail-sources.is-reordering,
-#app-rail-sources.is-reordering .rail-button {
+#app-rail-sources.is-reordering .rail-reorderable {
 	cursor:grabbing;
 }
 
@@ -36674,6 +38393,9 @@ ${TIP_CSS}
 }
 
 #app-list-title {
+	min-width:0;
+	overflow:hidden;
+	text-overflow:ellipsis;
 	font-weight:bold;
 }
 
@@ -36681,9 +38403,37 @@ ${TIP_CSS}
 	margin-left:auto;
 }
 
+#app-list-view {
+	display:flex;
+	flex:0 0 auto;
+	gap:16px;
+	padding:0 12px;
+	border-bottom:1px solid var(--border-soft);
+}
+
+#app-list-view[hidden] { display:none; }
+
+#app-list-view button {
+	min-height:30px;
+	margin:0 0 -1px;
+	padding:0 2px;
+	border:0;
+	border-bottom:2px solid transparent;
+	background:none;
+	color:var(--muted);
+	font:600 12px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	white-space:nowrap;
+	cursor:pointer;
+}
+
+#app-list-view button:hover { color:var(--text); }
+#app-list-view button[aria-selected="true"] { border-bottom-color:var(--accent); color:var(--accent); }
+#app-list-view button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+
 ${APP_ICON_CSS}
 
 #app-list .app-pane-actions {
+	flex:none;
 	gap:2px;
 	margin-right:-6px;
 }
@@ -36761,10 +38511,10 @@ ${APP_ICON_CSS}
 	font-size:10px;
 }
 
-.app-view-menu {
+.app-view-menu,
+.app-row-menu[data-collection] {
 	position:fixed;
 	z-index:30;
-	width:auto;
 	overflow-y:auto;
 	box-sizing:border-box;
 	padding:10px 10px 12px;
@@ -37018,6 +38768,138 @@ ${APP_ICON_CSS}
 
 ${SETTINGS_MODAL_CSS}
 
+:is(#bookmark-import, #topic-report) {
+	width:min(375px, calc(100vw - 30px));
+	box-sizing:border-box;
+	padding:17px;
+	border:1px solid var(--border-soft);
+	border-radius:12px;
+	background:var(--bg);
+	color:var(--text);
+	font:inherit;
+}
+
+:is(#bookmark-import, #topic-report)::backdrop { background:#0007; }
+:is(#bookmark-import, #topic-report) h2 { margin:0 0 10px; font-size:16px; }
+:is(#bookmark-import, #topic-report) p { margin:8px 0; color:var(--muted); overflow-wrap:anywhere; }
+:is(#bookmark-import, #topic-report) p:empty { display:none; }
+#bookmark-import dl {
+	display:grid;
+	grid-template-columns:1fr auto;
+	gap:5px 12px;
+	margin:10px 0;
+	padding:9px;
+	border:1px solid var(--border-soft);
+	border-radius:8px;
+	background:var(--surface);
+}
+#bookmark-import dd { margin:0; }
+:is(.bookmark-import-actions, .topic-report-actions) { display:flex; justify-content:flex-end; gap:7px; margin-top:12px; }
+
+.topic-report-link {
+	padding:9px;
+	border:1px solid var(--border-soft);
+	border-radius:8px;
+	background:var(--surface);
+	overflow-wrap:anywhere;
+}
+
+#topic-report-url { margin-top:3px; color:var(--muted); font-size:12px; }
+#topic-report-field label { display:block; margin:12px 0 5px; }
+#topic-report-matches {
+	box-sizing:border-box;
+	width:100%;
+	min-width:0;
+	max-width:none;
+	max-height:min(168px, 28dvh);
+	margin-top:4px;
+	overflow:auto;
+}
+#topic-report-matches .dropdown-item { flex:none; min-height:30px; white-space:normal; overflow-wrap:anywhere; }
+#topic-report-matches [aria-selected="true"] { background:var(--hover-tint); }
+
+#reading-list-share {
+	width:min(480px, calc(100vw - 28px));
+	max-width:none;
+	max-height:calc(100dvh - 28px);
+	box-sizing:border-box;
+	padding:20px;
+	border:1px solid var(--border-soft);
+	border-radius:12px;
+	background:var(--surface);
+	color:var(--text);
+	font:13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	box-shadow:0 14px 42px #0003;
+	overscroll-behavior:contain;
+}
+
+#reading-list-share::backdrop { background:#0006; }
+.reading-list-share-heading,
+#reading-list-share footer {
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:8px;
+}
+#reading-list-share h2 { margin:0; font-size:18px; }
+#topic-report-suggestion,
+#reading-list-share-title,
+#reading-list-share-markdown {
+	display:block;
+	box-sizing:border-box;
+	width:100%;
+	padding:8px;
+	border:1px solid var(--field-border);
+	border-radius:5px;
+	background:var(--field-bg);
+	color:var(--field-text);
+	font:inherit;
+}
+#reading-list-share-markdown { min-height:84px; margin-top:6px; resize:vertical; }
+#reading-list-share-markdown[hidden] { display:none; }
+.reading-list-share-title { display:block; margin:14px 0 6px; font-weight:600; }
+.reading-list-share-options,
+.reading-list-share-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.reading-list-share-options { margin:12px 0; gap:8px 14px; }
+.reading-list-share-options label { display:inline-flex; align-items:center; gap:4px; }
+.reading-list-share-options input { margin:0; accent-color:var(--accent); }
+.reading-list-share-preview {
+	max-height:min(265px, 45dvh);
+	overflow:auto;
+	overscroll-behavior:contain;
+	padding:12px;
+	border:1px solid var(--border-soft);
+	border-radius:7px;
+	background:var(--bg);
+	overflow-wrap:anywhere;
+}
+.reading-list-share-preview h3 { margin:0 0 6px; font-size:15px; }
+.reading-list-share-preview ol { margin:0; padding:0; list-style:none; }
+.reading-list-share-preview li { padding:8px 0; }
+.reading-list-share-preview li + li { border-top:1px solid var(--border-soft); }
+.reading-list-share-preview small { display:block; margin-top:3px; color:var(--muted); }
+.reading-list-share-preview :is(blockquote, p) { margin:6px 0 0; white-space:pre-wrap; }
+.reading-list-share-preview blockquote { padding-left:8px; border-left:2px solid var(--border); }
+#reading-list-share footer { margin-top:14px; flex-wrap:wrap; }
+#reading-list-share-count, #reading-list-share-status { color:var(--muted); }
+#reading-list-share-status { margin:8px 0 0; }
+#reading-list-share-status:empty { display:none; }
+.reading-list-share-actions { margin-left:auto; }
+
+@media (max-width:700px) {
+	#reading-list-share {
+		inset:auto 0 0;
+		width:100%;
+		max-height:calc(100dvh - 12px);
+		margin:0;
+		padding:16px 16px max(16px, env(safe-area-inset-bottom, 0px));
+		border-radius:12px 12px 0 0;
+	}
+	#topic-report-suggestion { min-height:44px; padding:10px 12px; font-size:16px; line-height:1.25; }
+	#reading-list-share-title, #reading-list-share-markdown { font-size:16px; }
+	#reading-list-share .settings-button { min-height:36px; }
+}
+
 #app-list-body {
 	flex:1 1 auto;
 	min-height:0;
@@ -37043,6 +38925,200 @@ ${SETTINGS_MODAL_CSS}
 	cursor:pointer;
 }
 
+.app-topic-header {
+	display:flex;
+	flex-wrap:wrap;
+	align-items:center;
+	gap:6px;
+	min-height:36px;
+	padding:3px 12px 3px 7px;
+	border-bottom:1px solid var(--border-soft);
+	font-size:12px;
+}
+
+.app-topic-summary { min-width:0; flex:1 1 96px; overflow-wrap:anywhere; }
+.app-topic-summary > :first-child { display:block; }
+.app-topic-meta { color:var(--muted); font-size:11px; }
+.app-topic-more { min-height:36px; padding:6px 0; }
+.app-topic-more-status { color:var(--muted); }
+.app-topic-row {
+	display:flex;
+	align-items:center;
+	gap:10px;
+	box-sizing:border-box;
+	width:100%;
+	min-height:52px;
+	padding:8px 12px;
+	border:0;
+	border-bottom:1px solid var(--border-soft);
+	background:none;
+	color:var(--text);
+	text-align:left;
+	font:inherit;
+	cursor:pointer;
+}
+
+.app-topic-row:hover { background:var(--hover-tint); }
+.app-topic-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.app-topic-media {
+	display:block;
+	flex:none;
+	position:relative;
+	width:54px;
+	height:44px;
+	border-radius:6px;
+	overflow:hidden;
+	background:var(--hover-tint);
+}
+
+.app-topic-icon {
+	display:grid;
+	place-items:center;
+	flex:none;
+	width:24px;
+	height:24px;
+	border-radius:5px;
+	background:var(--hover-tint);
+	color:var(--text);
+	background:color-mix(in srgb, hsl(var(--topic-icon-hue) 58% 52%) 15%, var(--surface));
+	color:color-mix(in srgb, hsl(var(--topic-icon-hue) 65% 48%) 45%, var(--text));
+}
+
+.app-topic-icon > svg { width:18px; height:18px; }
+.app-topic-media > .app-topic-icon {
+	width:100%;
+	height:100%;
+	border-radius:inherit;
+}
+.app-topic-media > .app-topic-icon > svg { width:26px; height:26px; }
+.app-topic-header > .app-topic-media { width:24px; height:24px; }
+.app-topic-header > .app-topic-media svg { width:18px; height:18px; }
+
+.app-topic-picture {
+	display:block;
+	position:absolute;
+	inset:0;
+	width:100%;
+	height:100%;
+	object-fit:cover;
+	opacity:0;
+}
+
+.app-topic-picture[data-loaded] { opacity:1; }
+.app-topic-media:has(> .app-topic-picture[data-loaded]) > .app-topic-icon { visibility:hidden; }
+.app-topic-picture[src*="/Flag_of_" i] { object-fit:contain; }
+.app-topic-picture[src*="screenshot" i] { object-position:center bottom; }
+.app-topic-name { display:block; font-weight:600; overflow-wrap:anywhere; }
+.app-topic-meta { display:block; }
+.app-topic-chevron { margin-left:auto; color:var(--muted); }
+
+@media (pointer:coarse) {
+	.app-topic-header .app-head-icon { width:36px; height:36px; }
+	.app-topic-row { padding-inline:16px; }
+}
+
+.app-selection-bar {
+	--selection-bar-surface:#fff;
+	--selection-button-size:28px;
+	position:absolute;
+	inset-inline:calc(var(--rail-column) + 12px) 12px;
+	bottom:14px;
+	z-index:24;
+	box-sizing:border-box;
+	width:max-content;
+	max-width:calc(100% - var(--rail-column) - 24px);
+	margin-inline:auto;
+	padding:4px;
+	display:flex;
+	align-items:center;
+	gap:8px;
+	border:1px solid var(--surface-border);
+	border-radius:999px;
+	background:var(--selection-bar-surface);
+	color:var(--surface-text);
+	box-shadow:0 4px 16px #0003;
+}
+
+:host(.${DARK_CLASS}) .app-selection-bar { --selection-bar-surface:#111; }
+
+#app-selection-count {
+	min-width:0;
+	overflow:hidden;
+	text-overflow:ellipsis;
+	white-space:nowrap;
+	font-size:12px;
+	font-weight:600;
+}
+
+.app-selection-controls { display:flex; align-items:center; gap:3px; flex:none; }
+
+.app-selection-button {
+	display:inline-flex;
+	align-items:center;
+	justify-content:center;
+	gap:4px;
+	min-height:var(--selection-button-size);
+	padding:0 9px;
+	border:0;
+	border-radius:999px;
+	background:var(--hover-tint);
+	color:inherit;
+	font:inherit;
+	font-size:12px;
+	font-weight:600;
+	line-height:1;
+	white-space:nowrap;
+	cursor:pointer;
+	touch-action:manipulation;
+}
+
+.app-selection-button svg { width:12px; height:12px; }
+.app-selection-button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.app-selection-button:disabled { opacity:.45; cursor:default; }
+.app-selection-button[aria-expanded="true"],
+.app-selection-button:active:not(:disabled) { background:var(--active-tint); }
+#app-selection-close { flex:none; width:var(--selection-button-size); padding:0; }
+#app-selection-close svg { width:15px; height:15px; }
+
+@media (hover:hover) {
+	.app-selection-button:hover:not(:disabled) { background:var(--active-tint); }
+}
+
+#app[data-searching] .app-selection-bar { display:none; }
+#app[data-selecting] #app-list-body { padding-bottom:80px; }
+
+@keyframes app-selection-bar-in {
+	from { opacity:0; transform:translateY(12px) scale(.985); }
+	to { opacity:1; transform:translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion:no-preference) {
+	.app-selection-bar:not([hidden]) { animation:app-selection-bar-in .22s cubic-bezier(.2,.8,.25,1) both; }
+}
+
+@media (min-width:701px) {
+	#app[data-selecting]:not([data-searching]) > .toast-viewport { --toast-bottom:calc(92px + env(safe-area-inset-bottom, 0px)); }
+}
+
+@media (max-width:700px) {
+	.app-selection-bar {
+		--selection-button-size:36px;
+		position:fixed;
+		inset-inline:12px;
+		bottom:calc(var(--app-rail-height, 44px) + 26px + env(safe-area-inset-bottom, 0px));
+		max-width:calc(100% - 24px);
+	}
+	#app:not([data-stage="list"]) .app-selection-bar { display:none; }
+	#app[data-selecting][data-stage="list"]:not([data-searching]) > .toast-viewport {
+		--toast-bottom:calc(var(--app-rail-height, 44px) + 86px + env(safe-area-inset-bottom, 0px));
+	}
+}
+
+#app-list-body .app-row-select { flex:0 0 auto; width:16px; height:16px; margin:0; accent-color:var(--accent); }
+#app-list-body .app-row:has(> .app-row-select) > .browse-rank { display:none; }
+#app-list-body .app-row:has(> .app-row-select) > .browse-more { visibility:hidden; }
+#app-list-body .app-row.is-selected { background:var(--active-tint); }
+
 @media (hover: hover) {
 	#app-list-body .app-row:not(.is-open):hover {
 		background:var(--hover-tint);
@@ -37057,9 +39133,11 @@ ${SETTINGS_MODAL_CSS}
 	border-bottom:1px solid var(--border-soft);
 }
 
+#app-list-body:has(> .browse-empty:only-child) { position:relative; }
+
 #app-list-body > .browse-empty:only-child {
 	position:absolute;
-	inset:36px 0 0;
+	inset:0;
 	display:flex;
 	align-items:center;
 	justify-content:center;
@@ -37069,6 +39147,17 @@ ${SETTINGS_MODAL_CSS}
 	box-sizing:border-box;
 	text-align:center;
 }
+
+#app-list-body > .reader-collection-empty:only-child { flex-direction:column; }
+#app-list-body .reader-collection-empty p { margin:0 0 6px; }
+
+.reader-collection-meta { overflow-wrap:anywhere; }
+.reader-collection-new { color:var(--accent); font-weight:600; }
+.reader-collection-section { margin:0; padding:10px 12px 4px; color:var(--muted); font-size:11px; font-weight:600; }
+.reader-saved-quotes { padding-right:12px; }
+.reader-saved-quotes summary { cursor:pointer; font-weight:600; }
+#app .app-collection-filter[data-filtered] { color:var(--accent); }
+.app-menu-label { padding:3px 9px; color:var(--muted); font-size:10px; }
 
 #app-list-body .browse-skeleton-label {
 	margin:12px 0;
@@ -37187,6 +39276,13 @@ ${READER_LIST_CSS}
 	background:var(--article-bg);
 }
 
+#app-article-scroll {
+	flex:1 1 auto;
+	display:flex;
+	flex-direction:column;
+	min-height:0;
+}
+
 .app-article-body {
 	position:relative;
 	flex:1 1 auto;
@@ -37212,6 +39308,121 @@ ${READER_LIST_CSS}
 	overflow:auto;
 	overscroll-behavior:contain;
 	background:var(--reader-page, var(--article-bg));
+}
+
+#app-article .app-article-nav {
+	flex:none;
+	box-sizing:border-box;
+	margin:0;
+	padding:12px 44px;
+	color:var(--meta);
+	font-size:12px;
+	line-height:1.45;
+	overflow-wrap:anywhere;
+}
+
+#app-article-coverage {
+	border-bottom:1px solid var(--border-soft);
+}
+
+#app-article-coverage ul {
+	list-style:none;
+	margin:0;
+	padding:0;
+}
+
+#app-article-coverage li + li {
+	margin-top:8px;
+}
+
+#app-article-coverage h2,
+#app-article .next-up-label {
+	margin:0 0 4px;
+	color:inherit;
+	font-size:11px;
+	font-weight:600;
+}
+
+#app-article :is(.reader-related-title, .next-up-title) {
+	color:var(--text);
+	font-weight:600;
+}
+
+#app-article-coverage a,
+#app-article .next-up-title {
+	text-decoration:underline;
+	text-underline-offset:2px;
+}
+
+#app-article-coverage .reader-related-discussion {
+	color:inherit;
+}
+
+#app-article #next-up {
+	position:relative;
+	border-top:1px solid var(--border-soft);
+}
+
+#app-article .next-up-row {
+	display:block;
+	padding:0;
+	border:0;
+}
+
+#app-article .next-up-label {
+	display:block;
+}
+
+#app-article .app-reader-scroll > .app-article-nav {
+	max-width:calc(544px * var(--app-text-zoom, 1));
+	margin-inline:auto;
+	padding-inline:28px;
+	border-color:var(--reader-rule);
+	color:var(--reader-meta);
+}
+
+#app-article .app-reader-scroll :is(.reader-related-title, .next-up-title) {
+	color:var(--reader-ink);
+}
+
+@media (min-width: 701px) {
+	#app-article-scroll:has(> #next-up:not(.hidden)) {
+		overflow:auto;
+		overscroll-behavior:contain;
+	}
+
+	#app-article-scroll:has(> #next-up:not(.hidden)) > .app-article-body {
+		flex:none;
+		min-height:100%;
+		height:calc(var(--app-frame-height, 0px) * var(--app-zoom, 1) * var(--app-frame-fit, 1));
+	}
+
+	#app-article-scroll:has(> #next-up:not(.hidden)) > .app-article-body[data-mode="image"] {
+		display:flex;
+		flex-direction:column;
+		height:auto;
+	}
+
+	#app-article-scroll:has(> #next-up:not(.hidden)) .app-article-image {
+		position:static;
+		flex:auto;
+		overflow:visible;
+	}
+
+	#app-article-scroll > #app-article-coverage {
+		max-height:40%;
+		overflow:auto;
+	}
+
+	#app-article:has(.app-reader-scroll > #app-article-coverage:not([hidden])) > .app-pane-head::before {
+		display:none;
+	}
+}
+
+@media (max-width: 700px) {
+	#app-article .app-article-nav {
+		padding-inline:28px;
+	}
 }
 
 .browse-feed-status {
@@ -37270,7 +39481,7 @@ ${READER_LIST_CSS}
 	min-height:32px;
 	padding:6px 18px;
 	border:1px solid var(--border);
-	border-radius:8px;
+	border-radius:999px;
 	background:var(--bg);
 	color:var(--text);
 	font:inherit;
@@ -37343,42 +39554,12 @@ ${READER_LIST_CSS}
 	font-size:10px;
 }
 
-#panel.app-docked .app-discussion-sort .page-sort-sep {
-	display:none !important;
-}
-
-#panel.app-docked .app-new-first {
-	display:inline-flex;
-	align-items:center;
-	justify-content:center;
-	box-sizing:border-box;
-	height:24px;
-	min-width:24px;
-	padding:0 3px;
-	border:0;
-	border-radius:5px;
-	text-decoration:none;
-	cursor:pointer;
-}
-
-#panel.app-docked .app-new-first[hidden] {
-	display:none;
-}
-
-.app-new-mark {
-	display:block;
-	box-sizing:border-box;
-	padding:0 1px;
-	border:1px solid currentColor;
-	border-radius:2px;
-	background:var(--pressed-fill, none);
-	color:var(--pressed-knock, inherit);
-	font:700 8px/9px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-	letter-spacing:0;
-}
-
 #panel.app-docked .app-discussion-sort .settings-select {
 	min-width:67px;
+}
+
+#panel.app-docked .app-discussion-sort .settings-select-toggle {
+	border-radius:999px;
 }
 
 #panel.app-docked:has(#comments-content.list-filtered) .app-discussion-sort {
@@ -37404,19 +39585,11 @@ ${READER_LIST_CSS}
 	width:24px;
 	height:24px;
 	padding:0;
-	border:0;
-	border-radius:5px;
 	text-decoration:none;
 }
 
 #app-discussion-meta.app-discussion-lone {
 	display:none;
-}
-
-@media (max-width: 700px) {
-	#panel.app-docked .filter-banner.app-pinned {
-		display:none;
-	}
 }
 
 .app-people {
@@ -37474,7 +39647,8 @@ ${READER_LIST_CSS}
 	display:none;
 }
 
-#app-view-arrow {
+#app-view-arrow,
+#app-collection-filter-arrow {
 	position:fixed;
 	z-index:31;
 }
@@ -37626,7 +39800,6 @@ ${READER_LIST_CSS}
 		height:36px;
 		margin-left:auto;
 		padding:0;
-		border-radius:5px;
 	}
 
 	#app-discussion-sync-empty:not([hidden]) {
@@ -37644,44 +39817,76 @@ ${READER_LIST_CSS}
 }
 
 #panel.app-docked .filter-banner {
-	margin-top:0;
+	max-width:none;
+	margin:0 calc(-1 * var(--comments-gutter)) 9px;
+	padding-bottom:7px;
+	padding-inline:calc(var(--comments-gutter) + var(--vote-gutter)) var(--comments-gutter);
+	border-bottom:1px solid var(--border-soft);
 }
 
-#panel.app-docked .filter-banner-quote.app-focus-post {
-	padding:8px 12px 9px;
-	color:var(--meta);
-	font-style:normal;
+#panel.app-docked .filter-banner-head {
+	gap:6px;
+	min-height:24px;
+	padding:0;
+	border-radius:0;
+	background:none;
+	color:var(--muted);
+	font-size:12px;
+	line-height:1.4;
 }
 
-.app-focus-post-title {
+#panel.app-docked #clear-filter {
+	width:15px;
+	height:15px;
+}
+
+#panel.app-docked #clear-filter > svg {
+	width:12px;
+	height:12px;
+}
+
+.app-discussion-byline {
+	flex:1 1 auto;
+	min-width:0;
+	overflow-wrap:anywhere;
+}
+
+.app-discussion-byline :is(strong, a) {
 	color:var(--text);
-	font-size:13px;
-	line-height:1.3;
+	font-weight:600;
 }
 
-.app-focus-post-site {
-	color:var(--meta);
-	font-size:11px;
-}
-
-.app-focus-post-meta {
-	padding-top:1px;
-	color:var(--meta);
-	font-size:10px;
-	line-height:1.15;
-}
-
-.app-focus-post-meta a {
-	color:var(--meta);
-	text-decoration:underline dotted;
-	text-underline-offset:2px;
+.app-discussion-byline a {
+	text-decoration:underline;
 	text-decoration-color:var(--border);
+	text-underline-offset:2px;
+}
+
+.app-discussion-byline a span {
+	color:var(--muted);
+	font-weight:400;
 }
 
 @media (hover: hover) {
-	.app-focus-post-meta a:hover {
-		text-decoration:underline;
+	.app-discussion-byline a:hover {
+		text-decoration-color:currentColor;
 	}
+}
+
+#panel.app-docked .filter-banner-quote {
+	margin-top:4px;
+	padding:0 0 0 8px;
+	border:0;
+	border-left:2px solid var(--border);
+	border-radius:0;
+	background:none;
+	color:var(--muted);
+	font-size:12px;
+}
+
+#panel.app-docked .filter-banner-quote::before,
+#panel.app-docked .filter-banner-quote::after {
+	content:none;
 }
 
 #panel.app-docked .header-actions {
@@ -37896,6 +40101,9 @@ ${READER_LIST_CSS}
 }
 
 #app .app-head-icon {
+	box-sizing:border-box;
+	border:1px solid var(--surface-border);
+	border-radius:999px;
 	background:none;
 	color:var(--meta);
 	--pressed-fill:none;
@@ -37942,6 +40150,10 @@ ${READER_LIST_CSS}
 	--icon-on:var(--surface-text);
 }
 
+#app #app-article .app-article-disc {
+	box-shadow:0 1px 2px rgba(0,0,0,.16), 0 6px 14px rgba(0,0,0,.16);
+}
+
 #app-bar-save[aria-pressed="true"],
 #app-bar-like[aria-pressed="true"],
 #app-bar-discussion[aria-pressed="true"],
@@ -37952,10 +40164,6 @@ ${READER_LIST_CSS}
 	color:var(--rail-fg);
 	--icon-on:var(--rail-fg);
 	--icon-fill:var(--rail-fg);
-}
-
-#app #app-article .app-article-disc {
-	border-radius:12px;
 }
 
 @media (hover: hover) {
@@ -38220,10 +40428,6 @@ header .item-action-link {
 	}
 }
 
-#app-list-body {
-	--thumb:44px;
-}
-
 #app-list-body .browse-row,
 #app-list-body .browse-row:has(.browse-thumb-wrap) {
 	position:relative;
@@ -38293,6 +40497,9 @@ header .item-action-link {
 	display:flex !important;
 	position:fixed;
 	z-index:30;
+	box-sizing:border-box;
+	max-height:calc(100dvh - 16px);
+	overflow-y:auto;
 }
 
 #app-row-menu[hidden] {
@@ -38750,10 +40957,16 @@ header .item-action-link {
 	#app-list-heading {
 		display:flex !important;
 		align-items:center;
+		gap:8px;
 		padding:16px 16px 6px;
 		font:700 26px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 		letter-spacing:-.01em;
 	}
+	#app-list-heading .app-pane-actions { margin:0 0 0 auto; }
+	#app-list-heading .app-head-icon { width:36px; height:36px; }
+	#app-list-view { margin:0 16px; padding:0; }
+	#app-list-view button { min-height:36px; font-size:13px; }
+	.app-topic-more { min-height:44px; }
 
 	#app-list-heading-text {
 		min-width:0;
@@ -38799,7 +41012,7 @@ header .item-action-link {
 	#app-list-tags:not([hidden]) {
 		display:flex !important;
 		gap:6px;
-		padding:2px 16px 10px;
+		padding:8px 16px 10px;
 		overflow-x:auto;
 		scrollbar-width:none;
 	}
@@ -38822,7 +41035,7 @@ header .item-action-link {
 		}
 	}
 
-	#app-list-tags:not([hidden]) + #app-list-body > .browse-empty:only-child {
+	#app-list-body > .browse-empty:only-child {
 		position:static;
 		min-height:50vh;
 	}
@@ -39259,6 +41472,18 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	const APP_ICON = (paths) =>
 		`<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">${paths}</svg>`;
 
+	const APP_HEADLINES = {
+		view: "top-stories",
+		label: "Headlines",
+		mark: APP_ICON('<path d="M5 2.1 6.1 4.4l2.5.3-1.8 1.8.4 2.5L5 7.9 2.8 9l.4-2.5-1.8-1.8 2.5-.3z" fill="currentColor"/><path d="M10 4.8h4m-4 3.4h4M2 12h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>'),
+		railMark: APP_ICON(`<path fill="currentColor" fill-rule="evenodd" d="
+			M3.3 1h9.4A2.3 2.3 0 0 1 15 3.3v9.4A2.3 2.3 0 0 1 12.7 15H3.3A2.3 2.3 0 0 1 1 12.7V3.3A2.3 2.3 0 0 1 3.3 1z
+			M5.8 3.1l.94 1.9 2.1.3-1.52 1.49.36 2.1-1.88-.99-1.88.99.36-2.1L2.76 5.3l2.1-.3z
+			M10 4.25h2.55a.6.6 0 0 1 0 1.2H10a.6.6 0 0 1 0-1.2z
+			M10 7.05h2.55a.6.6 0 0 1 0 1.2H10a.6.6 0 0 1 0-1.2z
+			M3.4 10.75h9.15a.6.6 0 0 1 0 1.2H3.4a.6.6 0 0 1 0-1.2z"/>`),
+	};
+
 	const APP_VIEWS = [
 		{
 			id: "unread",
@@ -39291,6 +41516,10 @@ ${SETTINGS_MODAL_PHONE_CSS}
 
 	const APP_MARK_READ_ICON =
 		'<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><circle cx="4.55" cy="9.3" r="2.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="11.45" cy="9.3" r="2.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M7.01 7.76Q8 6.76 8.99 7.76" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M1.92 8.07L4.15 3.8l0.85 0.6M14.08 8.07L11.85 3.8l-0.85 0.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+	const APP_SELECT_LINKS_ICON = APP_ICON(
+		'<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5"/><path d="m5.2 8 1.9 1.9 3.7-4"/></g>',
+	);
 
 	const APP_DISCUSSIONS_ICON = '<span class="app-people" aria-hidden="true"></span>';
 
@@ -39345,10 +41574,18 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		),
 	};
 
-	const APP_FILLED_VIEWS = ["queue", "collection"];
+	const APP_FILLED_VIEWS = ["queue"];
 
-	function appRailButtonHTML(id, label, inner) {
-		return `<button class="rail-button${APP_FILLED_VIEWS.includes(id) ? " rail-empty" : ""}" type="button" data-app-view="${escapeHTML(id)}" data-tip="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" aria-pressed="false"><span class="rail-icon">${inner}<span class="rail-badge" data-app-badge="${escapeHTML(id)}"></span></span><span class="rail-label" aria-hidden="true">${escapeHTML(label)}</span></button>`;
+	const COLLECTION_FILTERS = [["all", "All saved"], ["notes", "Notes & quotes"], ["discussion", "New discussions"]];
+	const COLLECTION_SORTS = [["activity", "Recent activity"], ["saved", "Newest saved"], ["title", "Title A–Z"]];
+	const COLLECTION_FILTER_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M2.3 3.6h11.4L9.4 8.5v3.2l-2.8 1.4V8.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+	function collectionFilterHTML() {
+		return `<button class="app-head-icon app-collection-filter" type="button" aria-label="Filter and sort Collection" title="Filter and sort Collection" aria-haspopup="menu" aria-expanded="false" aria-controls="app-row-menu" hidden>${COLLECTION_FILTER_ICON}</button>`;
+	}
+
+	function appRailButtonHTML(id, label, inner, { reorderable = false } = {}) {
+		return `<button class="rail-button${APP_FILLED_VIEWS.includes(id) ? " rail-empty" : ""}${reorderable ? " rail-reorderable" : ""}" type="button" data-app-view="${escapeHTML(id)}" data-tip="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" aria-pressed="false"><span class="rail-icon">${inner}<span class="rail-badge" data-app-badge="${escapeHTML(id)}"></span></span><span class="rail-label" aria-hidden="true">${escapeHTML(label)}</span></button>`;
 	}
 
 	// -------------------------
@@ -39497,6 +41734,8 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	const ACCOUNT_DEVICE_KEY = "HNewhere:account_device";
 	const ACCOUNT_AVATAR_PREFIX = "HNewhere:account_avatar:";
 	const ACCOUNT_DIAGNOSTICS_PREFIX = "HNewhere:account_diagnostics:";
+	const ACCOUNT_PASSKEY_DETAILS_PREFIX = "HNewhere:account_passkey_details:";
+	const ACCOUNT_PASSKEY_UPDATE_RETRY_MS = 60_000;
 	const ACCOUNT_PREFERENCES = {
 		blockedSites: STORAGE.blocked,
 		railOrder: STORAGE.appRailOrder,
@@ -39507,7 +41746,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	const ACCOUNT_SETTINGS = [...Object.keys(DEFAULT_SETTINGS), "readerCompact"];
 	const ACCOUNT_SETTING_STORE_KEYS = new Set([STORAGE.settings, ...Object.values(ACCOUNT_PREFERENCES)]);
 	const ACCOUNT_COLLECTION_STORE_KEYS = new Set([STORAGE.saved, STORAGE.collected, STORAGE.queue, NOTES_INDEX_KEY]);
-	const ACCOUNT_FOLDER_FIELDS = ["key", "url", "title", "site", "addedAt", "unwatched"];
+	const ACCOUNT_FOLDER_FIELDS = ["key", "url", "title", "site", "addedAt", "previewOnOpen"];
 	const ACCOUNT_SAVED_FIELDS = ["key", "url", "title", "site", "kind", "context", "by", "time", "focus", "source", "id", "parent", "text", "page", "addedAt"];
 	const ACCOUNT_NOTE_INDEX_FIELDS = ["key", "kind", "id", "url", "title", "excerpt", "count", "updated", "page"];
 	const ACCOUNT_NOTE_FIELDS = ["id", "created", "edited", "text", "exact", "prefix", "suffix", "page", "url"];
@@ -39549,7 +41788,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	function accountEditValue(key, value) {
 		if (key === STORAGE.settings) return accountSettingsShape(value);
 		if (key === STORAGE.queue) return accountQueueRecords(value).map((entry) => accountFields(entry, ACCOUNT_QUEUE_STATE));
-		if (key === STORAGE.collected) return (Array.isArray(value) ? value : []).map((entry) => accountFields(entry, ACCOUNT_FOLDER_FIELDS));
+		if (key === STORAGE.collected) return (Array.isArray(value) ? value : []).map(accountFolderFields);
 		return value;
 	}
 
@@ -39577,6 +41816,12 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		return Object.fromEntries(fields.filter((field) => record && Object.hasOwn(record, field) && record[field] !== undefined).map((field) => [field, record[field]]));
 	}
 
+	function accountFolderFields(entry) {
+		const fields = accountFields(entry, ACCOUNT_FOLDER_FIELDS);
+		if (collectedPreviewOnOpen(entry)) fields.previewOnOpen = true;
+		return fields;
+	}
+
 	function accountNoteKey(entry) {
 		return ["url", "pdf"].includes(entry?.kind) && typeof entry.id === "string" &&
 			entry.id.length > 0 && entry.key === NOTES_PREFIX + entry.kind + ":" + entry.id;
@@ -39595,6 +41840,10 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		for (const [key, value] of Object.entries(portable)) {
 			if (key === "sources" && accountObject(value)) {
 				portable.sources = Object.fromEntries(Object.entries(value).filter(([id, enabled]) => /^[a-z][a-z0-9]+$/.test(id) && typeof enabled === "boolean"));
+			} else if (key === "hiddenTopics") {
+				const topics = normalizeTopicLabels(value);
+				if (topics.length) portable.hiddenTopics = topics;
+				else delete portable.hiddenTopics;
 			} else if (accountValuesEqual(value, DEFAULT_SETTINGS[key])) {
 				delete portable[key];
 			}
@@ -39609,9 +41858,9 @@ ${SETTINGS_MODAL_PHONE_CSS}
 			(collection.queue !== undefined && !Array.isArray(collection.queue))) {
 			throw new Error("invalid-snapshot");
 		}
-		const entries = (list, fields) => list.map((entry) => {
+		const entries = (list, shape) => list.map((entry) => {
 			if (typeof entry?.key !== "string" || !entry.key || (entry.url && !/^https?:\/\//i.test(entry.url))) throw new Error("invalid-snapshot");
-			return accountFields(entry, fields);
+			return shape(entry);
 		});
 		const notes = collection.notes.map((entry) => {
 			if (!accountNoteKey(entry) || !Array.isArray(entry.notes) ||
@@ -39625,7 +41874,8 @@ ${SETTINGS_MODAL_PHONE_CSS}
 			settings: accountSettingsShape(input.settings),
 			preferences: Object.fromEntries(Object.entries(accountFields(input.preferences, [...Object.keys(ACCOUNT_PREFERENCES), "avatar", "shareDiagnostics"])).filter(([name, value]) => accountPreferenceShape(name, value))),
 			collection: {
-				saved: entries(collection.saved, ACCOUNT_SAVED_FIELDS), folders: entries(collection.folders, ACCOUNT_FOLDER_FIELDS), notes,
+				saved: entries(collection.saved, (entry) => accountFields(entry, ACCOUNT_SAVED_FIELDS)),
+				folders: entries(collection.folders, accountFolderFields), notes,
 				...(collection.queue !== undefined && { queue: accountQueueRecords(collection.queue) }),
 			},
 		};
@@ -39679,6 +41929,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 			const folders = next.collection.folders.map((entry) => {
 				const preserved = { ...local.get(entry.key) };
 				for (const field of ACCOUNT_FOLDER_FIELDS) delete preserved[field];
+				delete preserved.unwatched;
 				return { ...preserved, ...entry };
 			});
 			await write(STORAGE.collected, folders);
@@ -39734,11 +41985,17 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		}));
 	}
 
-	async function accountSeal(document, state, revision) {
-		const key = await accountEncryptionKey(state.recoveryKey, "encrypt");
+	async function compressAccountDocument(document) {
 		const plain = new Blob([JSON.stringify(document)]);
 		if (plain.size > ACCOUNT_DOCUMENT_LIMIT) throw new Error("snapshot-too-large");
 		const compressed = await new Response(accountBlobStream(plain).pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+		if (Math.ceil((compressed.byteLength + 12 + 16) * 4 / 3) > ACCOUNT_CIPHERTEXT_LIMIT) throw new Error("snapshot-too-large");
+		return compressed;
+	}
+
+	async function accountSeal(document, state, revision) {
+		const key = await accountEncryptionKey(state.recoveryKey, "encrypt");
+		const compressed = await compressAccountDocument(document);
 		const iv = crypto.getRandomValues(new Uint8Array(12));
 		const encrypted = new Uint8Array(await crypto.subtle.encrypt(accountCipherParameters(state.account, revision, iv), key, compressed));
 		const bytes = new Uint8Array(iv.length + encrypted.length);
@@ -40214,16 +42471,24 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		return `<button type="button" id="account-passkey-${mode}-submit" class="settings-button settings-button--primary settings-button--wide" aria-describedby="account-status-passkey-${mode}"><span class="settings-control-label">${label}</span></button><div id="account-status-passkey-${mode}"></div>`;
 	}
 
-	function accountSettingsHTML() {
-		return `<div id="settings-account-sync" class="settings-panel">
-<section id="account-profile" class="account-profile-identity" aria-labelledby="account-profile-name">
+	function accountProfileHTML(editable = false) {
+		return `<section id="account-profile" class="account-profile-identity" aria-labelledby="account-profile-name">
 <div class="account-avatar-frame">
 <span id="account-profile-avatar" class="app-account-avatar account-default-avatar" aria-hidden="true"></span>
-<button type="button" id="account-avatar-edit" aria-label="Edit birb" aria-expanded="false" aria-controls="account-avatar-editor" class="settings-button" hidden><span class="account-avatar-edit-label" aria-hidden="true">Edit</span></button>
+${editable ? '<button type="button" id="account-avatar-edit" aria-label="Edit birb" aria-expanded="false" aria-controls="account-avatar-editor" class="settings-button" hidden><span class="account-avatar-edit-label" aria-hidden="true">Edit</span></button>' : ""}
 </div>
 <h3 id="account-profile-name" class="account-profile-title">Backchannel Account</h3>
 <p id="account-email-value" class="appearance-row-hint">${ACCOUNT_SIGN_IN_HINT}</p>
-</section>
+</section>`;
+	}
+
+	function accountSyncStatusHTML() {
+		return '<h3 class="account-row-label">Sync</h3><p id="account-last-sync" class="appearance-row-hint">Last synced <time hidden></time><span>Never</span></p>';
+	}
+
+	function accountSettingsHTML() {
+		return `<div id="settings-account-sync" class="settings-panel">
+${accountProfileHTML(true)}
 <div id="account-stage">
 <section id="account-signed-out" class="account-section account-flow" data-account-step="0" tabindex="-1" hidden>
 <div id="account-sign-in-actions" hidden>
@@ -40342,7 +42607,7 @@ ${accountBackButton("account-manage-back")}
 <div id="account-signed-in" data-account-step="0" tabindex="-1" hidden>
 <section class="account-section">
 <div class="account-setting-row">
-<div><h3 class="account-row-label">Sync</h3><p id="account-last-sync" class="appearance-row-hint">Last synced <time hidden></time><span>Never</span></p></div>
+<div>${accountSyncStatusHTML()}</div>
 <div class="account-sync-control"><button type="button" id="account-sync-now" class="settings-button" aria-describedby="account-status-sync"><span class="settings-control-label">Sync now</span></button><div id="account-status-sync" class="account-chin-anchor"></div></div>
 </div>
 <div id="account-conflict" class="settings-notice" role="group" aria-labelledby="account-conflict-summary" hidden>
@@ -40449,6 +42714,9 @@ ${accountBackButton("account-manage-back")}
 		const date = new Date(timestamp);
 		if (!Number.isFinite(timestamp) || !Number.isFinite(date.getTime())) {
 			element.hidden = true;
+			element.removeAttribute("datetime");
+			element.removeAttribute("title");
+			element.textContent = "";
 			return false;
 		}
 		element.dateTime = date.toISOString();
@@ -40458,11 +42726,55 @@ ${accountBackButton("account-manage-back")}
 		return true;
 	}
 
+	function wireSidebarAccountSettings(shadow, panel) {
+		panel.innerHTML = `${accountProfileHTML()}
+<section class="account-section" id="account-sidebar-summary" hidden>
+<div class="account-setting-row">
+<div id="account-sidebar-sync" hidden>${accountSyncStatusHTML()}</div>
+<div><a id="account-sidebar-link" class="settings-button" href="${START_PAGE_ORIGIN}/#account-sync" target="_blank" rel="noopener noreferrer">Sign in to Backchannel</a></div>
+</div>
+</section>`;
+		const summary = panel.querySelector("#account-sidebar-summary");
+		const syncStatus = panel.querySelector("#account-sidebar-sync");
+		const link = panel.querySelector("#account-sidebar-link");
+		const last = panel.querySelector("#account-last-sync");
+		const time = last.querySelector("time");
+		const avatarElement = panel.querySelector("#account-profile-avatar");
+		const navStatus = shadow.getElementById("account-nav-status");
+		navStatus.textContent = "Backchannel Account";
+		let request = 0;
+
+		const refresh = async (event) => {
+			if (!event?.isTrusted) return;
+			const current = ++request;
+			const state = await load(ACCOUNT_SYNC_KEY, null);
+			const signedIn = hasAccountSyncSession(state) && state.expiresAt > Date.now();
+			const setupPending = signedIn && state.keyBackupPending;
+			const avatar = signedIn ? await load(ACCOUNT_AVATAR_PREFIX + state.account, null) : null;
+			if (current !== request) return;
+
+			navStatus.textContent = signedIn ? "Backchannel Account" : "Sign in to Backchannel";
+			panel.querySelector("#account-email-value").textContent = signedIn ? "Signed in on this device" : ACCOUNT_SIGN_IN_HINT;
+			paintAccountAvatar(shadow.getElementById("account-nav-avatar"), avatar);
+			paintAccountAvatar(avatarElement, avatar);
+			syncStatus.hidden = !signedIn || setupPending;
+			last.querySelector("span").hidden = writeAccountTime(time, syncStatus.hidden ? null : state.lastSync);
+			link.textContent = setupPending ? "Finish setup in Reader" : signedIn ? "Manage account in Reader" : "Sign in to Backchannel";
+			summary.hidden = false;
+		};
+		panel.addEventListener("account-section-hidden", () => {
+			request++;
+			summary.hidden = true;
+			writeAccountTime(time, null);
+			paintAccountAvatar(avatarElement, null);
+		});
+		return refresh;
+	}
+
 	function wireAccountSettings(shadow, updateDiagnosticSharing) {
 		const panel = shadow.getElementById("settings-account-sync");
 		if (!onStartPage() || window.top !== window.self) {
-			panel.innerHTML = `<p class="settings-section-hint">${ACCOUNT_SIGN_IN_HINT}</p><a href="${START_PAGE_ORIGIN}/#account-sync" target="_blank" rel="noopener noreferrer">Open Reader</a>`;
-			return () => {};
+			return wireSidebarAccountSettings(shadow, panel);
 		}
 
 		const find = (id) => shadow.getElementById("account-" + id);
@@ -40500,7 +42812,7 @@ ${accountBackButton("account-manage-back")}
 		let deviceCheckedAt = 0;
 		let shownAccount = null;
 		let profile = null;
-		let lastPasskeyEmail = null;
+		let lastPasskeyUpdate = null;
 		let emailFlow = null;
 		let emailPasskey = null;
 		let emailPrompt = null;
@@ -40853,18 +43165,46 @@ ${accountBackButton("account-manage-back")}
 
 		async function signalPasskeyEmail({ account, email }) {
 			if (!account || !email || typeof window.PublicKeyCredential?.signalCurrentUserDetails !== "function") return;
-			if (lastPasskeyEmail?.account === account && lastPasskeyEmail.email === email) return;
+			if (lastPasskeyUpdate?.account === account && lastPasskeyUpdate.email === email) return;
 			const current = { account, email };
-			lastPasskeyEmail = current;
+			lastPasskeyUpdate = current;
+			let requested = false;
 			try {
-				await PublicKeyCredential.signalCurrentUserDetails({
+				const encoder = new TextEncoder();
+				const details = {
 					rpId: START_PAGE_HOST,
-					userId: accountBase64(new TextEncoder().encode(account)),
+					userId: accountBase64(encoder.encode(account)),
 					name: email,
 					displayName: "Backchannel account",
+				};
+				const digest = await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify(details)));
+				const fingerprint = accountBase64(new Uint8Array(digest));
+				const storageKey = ACCOUNT_PASSKEY_DETAILS_PREFIX + account;
+				const lockName = "passkey-details:" + account;
+				const attempt = crypto.randomUUID();
+				const reserved = await withSharedStorageLock(lockName, async (lease) => {
+					if ((await load(ACCOUNT_SYNC_KEY, null))?.account !== account || lastPasskeyUpdate !== current) return false;
+					const previous = await load(storageKey, null);
+					const now = Date.now();
+					if (previous?.fingerprint === fingerprint && (!previous.attempt || previous.pendingUntil > now)) return false;
+					await lease.commit(() => save(storageKey, { fingerprint, attempt, pendingUntil: now + ACCOUNT_PASSKEY_UPDATE_RETRY_MS }));
+					return true;
 				});
+				if (!reserved) return;
+				requested = true;
+				let accepted = false;
+				try {
+					await PublicKeyCredential.signalCurrentUserDetails(details);
+					accepted = true;
+				} finally {
+					await withSharedStorageLock(lockName, async (lease) => {
+						if ((await load(storageKey, null))?.attempt !== attempt) return;
+						await lease.commit(() => accepted ? save(storageKey, { fingerprint }) : forget(storageKey));
+					});
+				}
 			} catch {
-				if (lastPasskeyEmail === current) lastPasskeyEmail = null;
+			} finally {
+				if (!requested && lastPasskeyUpdate === current) lastPasskeyUpdate = null;
 			}
 		}
 
@@ -41497,6 +43837,7 @@ ${accountBackButton("account-manage-back")}
 					await lease.commit(() => forget(ACCOUNT_AVATAR_PREFIX + account));
 					await lease.commit(() => forget(ACCOUNT_DIAGNOSTICS_PREFIX + account));
 				});
+				await withSharedStorageLock("passkey-details:" + account, (lease) => lease.commit(() => forget(ACCOUNT_PASSKEY_DETAILS_PREFIX + account)));
 				conflict = null;
 				profile = null;
 				avatar = null;
@@ -41562,7 +43903,7 @@ ${accountBackButton("account-manage-back")}
 		return showAccount;
 	}
 
-	function settingsModalHTML() {
+	function settingsModalHTML(reader = false) {
 		return `
 <div id="app-settings-modal" class="app-settings-modal" hidden>
 <div class="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1">
@@ -41571,15 +43912,17 @@ ${accountBackButton("account-manage-back")}
 <nav class="app-settings-nav" aria-label="Settings sections">
 <button type="button" id="account-nav-tab" class="app-settings-tab app-account-tab" data-settings-section="account" aria-label="Account"><span id="account-nav-avatar" class="app-account-avatar account-default-avatar" aria-hidden="true"></span><span class="app-account-tab-text"><span id="account-nav-title" class="app-account-tab-title">Account</span><span id="account-nav-status" class="app-account-tab-subtitle">Sign in to Backchannel</span></span></button>
 <button type="button" class="app-settings-tab" data-settings-section="general"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M2.5 5h6.6M12.9 5h.6M2.5 11h.6M6.9 11h6.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="11" cy="5" r="1.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5" cy="11" r="1.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>General</span></button>
+<button type="button" class="app-settings-tab" data-settings-section="collection"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M5 2.5h6a1 1 0 0 1 1 1v10L8 10.8l-4 2.7v-10a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Collection</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="appearance"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M8 2.2a5.8 5.8 0 1 0 0 11.6c.9 0 1.4-.6 1.4-1.3 0-.7-.5-1-.5-1.6 0-.7.6-1.2 1.3-1.2h1.4a2.2 2.2 0 0 0 2.2-2.2C13.8 4.5 11.2 2.2 8 2.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.2" cy="7.6" r=".95" fill="currentColor"/><circle cx="7.4" cy="5.1" r=".95" fill="currentColor"/><circle cx="10.5" cy="5.6" r=".95" fill="currentColor"/></svg><span>Appearance</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="sources"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M8 2.6 13.8 5.6 8 8.6 2.2 5.6Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.2 8.4 8 11.4l5.8-3M2.2 11.1 8 14.1l5.8-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Sources</span></button>
+<button type="button" class="app-settings-tab" data-settings-section="filters">${COLLECTION_FILTER_ICON}<span>Filters</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="sidebar"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="2" y="3.3" width="12" height="9.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.8 3.6v8.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Sidebar</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="shortcuts"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="1.8" y="3.6" width="12.4" height="8.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.7 6.7h.01M8 6.7h.01M11.3 6.7h.01M5.2 9.6h5.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Shortcuts</span></button>
 <div class="settings-credits"><a href="${escapeHTML(REPO_URL)}/issues" target="_blank" rel="noopener noreferrer">Report an issue</a></div>
 </nav>
 <div id="app-settings-content" class="app-settings-content" tabindex="-1" role="group" aria-labelledby="app-settings-heading"><div id="app-settings-heading" class="app-settings-heading">General</div>
 ${accountSettingsHTML()}
-${settingsPanelHTML()}
+${settingsPanelHTML(reader)}
 </div>
 </div>
 </div>
@@ -41594,7 +43937,24 @@ ${settingsPanelHTML()}
 </footer>`;
 	}
 
+	function appSelectLinksHTML() {
+		return `<button class="app-head-icon app-select-links" type="button" aria-label="Select links" title="Select links" aria-pressed="false" aria-controls="app-list-body" disabled>${APP_SELECT_LINKS_ICON}</button>`;
+	}
+
+	function appSelectionBarHTML() {
+		const down = APP_ICON('<path d="m4.8 6.5 3.2 3.2 3.2-3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>');
+		return `<div id="app-selection-bar" class="app-selection-bar" role="group" aria-label="Selected links" hidden>
+<button id="app-selection-close" class="app-selection-button" type="button" aria-label="Close selection" title="Close selection">${APP_CLOSE_ICON}</button>
+<span id="app-selection-count" role="status"></span>
+<div class="app-selection-controls">
+<button id="app-selection-share" class="app-selection-button" type="button" aria-label="Share reading list">Share</button>
+<button id="app-selection-actions" class="app-selection-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="app-row-menu">Actions${down}</button>
+</div>
+</div>`;
+	}
+
 	function appShellOpenHTML() {
+		const listViewControls = `${collectionFilterHTML()}${appSelectLinksHTML()}`;
 		return `<div id="app" data-stage="list">
 <div id="app-tip" class="app-tip" role="tooltip" hidden></div>
 <section id="app-onboarding" class="app-onboarding" aria-label="Welcome" hidden></section>
@@ -41632,22 +43992,50 @@ ${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon)).joi
 <button id="settings-toggle" class="rail-button" type="button" data-tip="Settings" aria-label="Open Backchannel settings" aria-expanded="false" aria-controls="app-settings-modal" aria-haspopup="dialog"><span class="rail-icon">${APP_SETTINGS_ICON}</span><span class="rail-label" aria-hidden="true">Settings</span></button>
 </nav>
 <button id="app-bar-back" class="app-stack-button" type="button" aria-label="Back to the articles" data-glyph="down" hidden>${APP_ICON('<path d="M2.2 5.1a1 1 0 0 1 1.4-.1L8 9l4.4-4a1 1 0 0 1 1.3 1.5l-5 4.6a1 1 0 0 1-1.4 0l-5-4.6a1 1 0 0 1-.1-1.4z"/>')}</button>
-<div id="app-row-menu" class="dropdown app-row-menu" role="menu" aria-label="This article" hidden></div>
-<div id="app-bar" class="app-bar" hidden><button id="app-bar-view" class="app-stack-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden><span class="app-view-glyph"><span class="app-view-big">A</span><span class="app-view-small">a</span></span></button><button id="app-bar-open" class="app-stack-button" type="button" aria-label="Open the original page" hidden>${APP_ICON('<path d="M9 2h5v5h-1.7V4.9L7.7 9.5 6.5 8.3l4.6-4.6H9z"/><path d="M3.5 4H7v1.7H4.7v5.6h5.6V9H12v3.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-8a.5.5 0 0 1 .5-.5z"/>')}</button><button id="app-bar-save" class="app-stack-button" type="button" aria-pressed="false" aria-label="Save" hidden>${APP_ICON('<path d="M3.5 1.5h9a.5.5 0 0 1 .5.5v12.3a.4.4 0 0 1-.64.32L8 11.2l-4.36 3.42A.4.4 0 0 1 3 14.3V2a.5.5 0 0 1 .5-.5z"/>')}</button><span id="app-mobile-votes" hidden></span><button id="app-bar-like" class="app-stack-button" type="button" aria-pressed="false" aria-label="Like" hidden>${APP_ICON('<path d="M2 7.2h2.6V14H2.5a.5.5 0 0 1-.5-.5z"/><path d="M5.8 14V6.7l2.5-4.4a1.2 1.2 0 0 1 2.2.9L10 6h3a1.4 1.4 0 0 1 1.37 1.7l-1 4.7A2 2 0 0 1 11.4 14z"/>')}</button><button id="app-bar-discussion" class="app-stack-button" type="button" aria-pressed="false" aria-label="Discussion">${APP_ICON('<path d="M2.5 2h11a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1H6.2L3 14.4a.4.4 0 0 1-.66-.3V11.5h.16a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/>')}<span class="rail-badge"></span></button></div>
+<div id="app-row-menu" class="dropdown app-row-menu" role="menu" aria-label="This link" hidden></div>
+<div id="app-collection-filter-arrow" class="app-drop-arrow" aria-hidden="true" hidden></div>
+<div id="app-bar" class="app-bar" hidden>
+<button id="app-bar-save" class="app-stack-button" type="button" aria-pressed="false" aria-label="Save" hidden>${APP_ICON('<path d="M3.5 1.5h9a.5.5 0 0 1 .5.5v12.3a.4.4 0 0 1-.64.32L8 11.2l-4.36 3.42A.4.4 0 0 1 3 14.3V2a.5.5 0 0 1 .5-.5z"/>')}</button>
+<span id="app-mobile-votes" hidden></span>
+<button id="app-bar-like" class="app-stack-button" type="button" aria-pressed="false" aria-label="Like" hidden>${APP_ICON('<path d="M2 7.2h2.6V14H2.5a.5.5 0 0 1-.5-.5z"/><path d="M5.8 14V6.7l2.5-4.4a1.2 1.2 0 0 1 2.2.9L10 6h3a1.4 1.4 0 0 1 1.37 1.7l-1 4.7A2 2 0 0 1 11.4 14z"/>')}</button>
+<button id="app-bar-view" class="app-stack-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden><span class="app-view-glyph"><span class="app-view-big">A</span><span class="app-view-small">a</span></span></button>
+<button id="app-bar-open" class="app-stack-button" type="button" aria-label="Open the original page" hidden>${APP_ICON('<path d="M9 2h5v5h-1.7V4.9L7.7 9.5 6.5 8.3l4.6-4.6H9z"/><path d="M3.5 4H7v1.7H4.7v5.6h5.6V9H12v3.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-8a.5.5 0 0 1 .5-.5z"/>')}</button>
+<button id="app-bar-discussion" class="app-stack-button" type="button" aria-pressed="false" aria-label="Discussion">${APP_ICON('<path d="M2.5 2h11a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1H6.2L3 14.4a.4.4 0 0 1-.66-.3V11.5h.16a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/>')}<span class="rail-badge"></span></button>
+</div>
 <section id="app-list" aria-label="Articles">
-<div class="app-pane-head"><span id="app-list-title"></span><span class="app-pane-actions app-pane-action"><button id="app-mark-read" class="app-head-icon" type="button" aria-label="Mark all as read" title="Mark all as read">${APP_MARK_READ_ICON}</button><button id="app-list-sync" class="app-head-icon" type="button" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button></span></div>
+<div class="app-pane-head"><span id="app-list-title"></span><span class="app-pane-actions app-pane-action">
+<button id="app-list-sync" class="app-head-icon" type="button" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>
+<button id="app-mark-read" class="app-head-icon" type="button" aria-label="Mark all as read" title="Mark all as read">${APP_MARK_READ_ICON}</button>
+${listViewControls}
+</span></div>
 <div id="app-list-pull" class="app-list-pull" aria-hidden="true"></div>
-<div id="app-list-heading" class="app-list-heading"><span id="app-list-heading-text"></span><button id="app-list-heading-button" type="button" aria-haspopup="menu" aria-expanded="false" hidden></button></div>
+<div id="app-list-heading" class="app-list-heading"><button id="app-list-heading-button" type="button" aria-haspopup="menu" aria-expanded="false"><span id="app-list-heading-text"></span></button><span class="app-pane-actions">${collectionFilterHTML()}</span></div>
+<div id="app-list-view" role="tablist" aria-label="Link view" hidden>
+<button id="app-all-links-tab" type="button" role="tab" aria-selected="true" aria-controls="app-list-body">All links</button>
+<button id="app-topics-tab" type="button" role="tab" aria-selected="false" aria-controls="app-list-body" tabindex="-1">Topics</button>
+</div>
 <div id="app-list-tags" class="app-list-tags" role="group" aria-label="Filters" hidden></div>
-<div id="app-list-body" class="reader-list"></div>
+<div id="app-list-topic" class="app-topic-header" hidden>
+<button id="app-list-topic-back" class="app-head-icon" type="button" aria-label="Back to topics" title="Back to topics">${APP_ICON('<path d="m9.6 3-5 5 5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>')}</button>
+<span class="app-topic-summary"><strong id="app-list-topic-title"></strong><span id="app-list-topic-count" class="app-topic-meta"></span></span>
+</div>
+<div id="app-list-body" class="reader-list" role="region" aria-label="Articles"></div>
 <div id="app-list-resize" class="app-list-resize" aria-hidden="true"></div>
 </section>
-${settingsModalHTML()}
+${appSelectionBarHTML()}
+${settingsModalHTML(true)}
+${bookmarkImportHTML()}
+${topicReportHTML()}
+${readingListShareHTML()}
 <div class="toast-viewport">${TOAST_HTML}</div>
 <div id="app-reading">
 <section id="app-article" aria-label="Article">
 <div class="app-pane-head"><button id="app-toggle-list" class="app-pane-toggle app-head-icon app-article-disc app-wide-only" type="button" aria-pressed="true" aria-label="Front Pages" title="${escapeHTML(appShortcutTip("front-pages"))}">${APP_LIST_TOGGLE_ICON}</button><span class="app-pane-middle"><span id="app-article-actions" class="app-article-actions" hidden></span><button id="app-view-toggle" class="app-head-icon app-article-disc app-view-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden>${APP_ICON(APP_CONTROL_PATHS.style)}</button></span><button id="app-toggle-discussion" class="app-pane-toggle app-head-icon app-article-disc app-wide-only" type="button" aria-pressed="true" aria-label="Discussion" title="${escapeHTML(appShortcutTip("discussion"))}" disabled>${APP_DISCUSSION_TOGGLE_ICON}<span class="rail-badge"></span></button></div>
+<div id="app-article-scroll">
+<nav id="app-article-coverage" class="app-article-nav" aria-labelledby="app-article-coverage-title" hidden><h2 id="app-article-coverage-title">Related coverage</h2><ul></ul></nav>
 <div id="app-article-body" class="app-article-body" data-mode="empty"><div class="app-article-note">Pick an article to read it here, with what people said about it beside it.</div></div>
+<div id="next-up" class="next-up app-article-nav hidden"></div>
+</div>
 <div id="app-next" class="app-next" hidden><span class="app-next-label">Read next</span><button id="app-next-link" class="app-next-link" type="button"><span class="app-next-title"></span><span class="app-next-meta"></span></button></div>
 </section>
 `;
@@ -41662,14 +44050,31 @@ ${settingsModalHTML()}
 			ui,
 			view: "unread",
 			listView: "",
+			bulk: null,
 			rows: [],
+			rowsView: "",
+			frontPageRows: [],
+			frontPageCandidates: [],
 			rowsByURL: new Map(),
+			feedFilterKey: "[]",
+			sourcesSeq: 0,
 			seen: {},
 			sourceIds: [],
 			open: null,
 			article: null,
 			listSeq: 0,
 			countSeq: 0,
+			collectionFilter: "all",
+			collectionSort: "activity",
+			collectionLimit: FRONT_PAGE_SIZE,
+			collectionTagFilter: "",
+			collectionTags: new Set(),
+			collectionCoverageStories: [],
+			topicsMode: false,
+			listTopic: null,
+			listTopicPhotos: null,
+			topicExtra: null,
+			topicExtraRows: null,
 			railFilled: null,
 			revealed: "",
 			panesHidden: { list: false, discussion: false },
@@ -41700,6 +44105,12 @@ ${settingsModalHTML()}
 		sidebarUI = ui;
 		sidebarHasDiscussion = false;
 		appState = createAppState(ui);
+		appState.topicsMode = (await load(APP_TOPICS_MODE_KEY, false)) === true;
+		const linkedTopic = new URLSearchParams(location.search).get("topic");
+		if (isSharedTopicId(linkedTopic)) {
+			appState.listTopic = linkedTopic;
+			appState.topicsMode = true;
+		}
 		paintAppDiscussionTheme();
 
 		document.documentElement.setAttribute("data-backchannel-installed", "1");
@@ -41713,6 +44124,7 @@ ${settingsModalHTML()}
 		renderAppDiscussionEmpty();
 		watchNoteSelection(await loadSettings());
 		await refreshAppSources();
+		scheduleCollectedChecks();
 		scheduleRedditReadNotice();
 	}
 
@@ -41720,7 +44132,25 @@ ${settingsModalHTML()}
 		const shadow = ui.shadow;
 
 		ui.headerSubtitle = null;
-
+		wireBookmarkImport(shadow);
+		for (const button of shadow.querySelectorAll(".app-collection-filter")) {
+			button.onclick = () => openCollectionFilterMenu(button);
+		}
+		const allLinksTab = shadow.getElementById("app-all-links-tab");
+		const topicsTab = shadow.getElementById("app-topics-tab");
+		allLinksTab.onclick = () => setAppTopicsMode(false);
+		topicsTab.onclick = () => setAppTopicsMode(true);
+		shadow.getElementById("app-list-view").addEventListener("keydown", (event) => {
+			if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+			const tab = event.key === "Home" ? allLinksTab : event.key === "End" ? topicsTab :
+				["ArrowLeft", "ArrowRight"].includes(event.key) ? (event.target === allLinksTab ? topicsTab : allLinksTab) : null;
+			if (!tab) return;
+			event.preventDefault();
+			event.stopPropagation();
+			tab.focus({ preventScroll: true });
+			tab.click();
+		});
+		shadow.getElementById("app-list-topic-back").onclick = () => openAppListTopic(null).catch(console.error);
 		const composeBar = shadow.getElementById("app-discussion-compose");
 		const app = shadow.getElementById("app");
 		new ResizeObserver(() => app.style.setProperty("--app-compose-height", `${composeBar.offsetHeight}px`)).observe(composeBar);
@@ -41747,8 +44177,43 @@ ${settingsModalHTML()}
 
 		shadow.querySelector("#app-list-heading-button").onclick = (event) => openAppHeadingMenu(event.currentTarget);
 
+		wireAppSelection(shadow);
+
 		const listBody = shadow.querySelector("#app-list-body");
 		let rowPress = null;
+
+		listBody.addEventListener("click", (event) => {
+			const press = rowPress;
+			rowPress = null;
+
+			const row = event.target.closest(".app-row");
+			if (!row || event.defaultPrevented || event.button !== 0) return;
+
+			const link = event.target.closest(".browse-title-link, .browse-comments-total");
+			const modified = event.altKey || event.ctrlKey || event.metaKey;
+			if (!link && (
+				modified ||
+				event.target.closest("a, button, input, select, textarea, label, summary") ||
+				(press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4)
+			)) return;
+
+			const title = row.querySelector(".browse-title-link");
+			if (event.shiftKey && !modified && appSelectionEntry(row)) {
+				event.preventDefault();
+				event.stopPropagation();
+				beginAppSelection(row, link || title, { range: true });
+				return;
+			}
+
+			const checkbox = row.querySelector(".app-row-select");
+			if (checkbox) {
+				event.preventDefault();
+				event.stopPropagation();
+				checkbox.click();
+			} else if (!link && !event.shiftKey) {
+				title?.click();
+			}
+		}, true);
 
 		listBody.addEventListener("pointerdown", (event) => {
 			rowPress = { x: event.clientX, y: event.clientY };
@@ -41769,32 +44234,6 @@ ${settingsModalHTML()}
 		window.addEventListener("pointerup", finishListPointer, true);
 		window.addEventListener("pointercancel", finishListPointer, true);
 		window.addEventListener("blur", finishListPointer);
-
-		listBody.addEventListener("click", (event) => {
-			const press = rowPress;
-			const row = event.target?.closest?.(".app-row");
-
-			rowPress = null;
-
-			if (
-				!row ||
-				event.defaultPrevented ||
-				event.button !== 0 ||
-				event.metaKey ||
-				event.ctrlKey ||
-				event.shiftKey ||
-				event.altKey ||
-				event.target.closest("a, button, input, select, textarea, label, summary")
-			) {
-				return;
-			}
-
-			if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4) {
-				return;
-			}
-
-			row.querySelector(".browse-title-link")?.click();
-		});
 
 		const appRoot = shadow.querySelector("#app");
 		const listToggle = shadow.querySelector("#app-toggle-list");
@@ -42024,14 +44463,14 @@ ${settingsModalHTML()}
 
 		appState.revealList = () => {
 			if (paneHidden.list) {
-				setPaneHidden("list", false);
+				setPaneHidden("list", false, false);
 			}
 		};
 		const listHeld = () => {
 			const panel = shadow.querySelector("#app-list");
 			const menu = shadow.querySelector("#app-row-menu");
 
-			return panel.matches(":hover") || panel.contains(shadow.activeElement) || (!menu.hidden && (menu.dataset.row || menu.dataset.heading)) || listPreviewTrigger?.matches(":hover") || (listPreviewKeyboard && shadow.activeElement === listPreviewTrigger);
+			return Boolean(appState.bulk) || panel.matches(":hover") || panel.contains(shadow.activeElement) || (!menu.hidden && (menu.dataset.row || menu.dataset.heading || menu.dataset.collection)) || listPreviewTrigger?.matches(":hover") || (listPreviewKeyboard && shadow.activeElement === listPreviewTrigger);
 		};
 		const closeListPreview = (force = false) => {
 			clearTimeout(listPreviewTimer);
@@ -42111,7 +44550,7 @@ ${settingsModalHTML()}
 		load(STORAGE.appPanes, null)
 			.then((panes) => {
 				if (panes && typeof panes === "object") {
-					setPaneHidden("list", panes.list === false, false);
+					setPaneHidden("list", panes.list === false && !appState.listTopic, false);
 					setPaneHidden("discussion", panes.discussion === false, false);
 				}
 			})
@@ -42295,6 +44734,7 @@ ${settingsModalHTML()}
 			for (const run of runs || []) {
 				if (run.status === "rejected") console.error(run.reason);
 			}
+			if (appState?.view === "collection") scheduleCollectedChecks();
 		};
 
 		syncButton.onclick = () => syncList().catch(console.error);
@@ -42316,11 +44756,12 @@ ${settingsModalHTML()}
 			}
 		};
 		shadow.querySelector("#app-bar-view").onclick = () => setAppViewMenuOpen(shadow.querySelector("#app-view-menu").hidden);
+		const rowMenu = shadow.getElementById("app-row-menu");
+		rowMenu.oncontextmenu = (event) => event.preventDefault();
 		const closeRowMenuOutside = (event) => {
 			const path = event.composedPath();
-			const rowMenu = shadow.querySelector("#app-row-menu");
 
-			if (!rowMenu.hidden && !path.includes(rowMenu) && !path.some((node) => node?.classList?.contains("browse-more") || node?.id === "app-list-heading-button")) {
+			if (!rowMenu.hidden && !path.includes(rowMenu) && !path.some((node) => node?.matches?.(".browse-more, .app-collection-filter, #app-list-heading-button, #app-selection-actions"))) {
 				closeAppRowMenu();
 			}
 		};
@@ -42510,7 +44951,7 @@ ${settingsModalHTML()}
 		const report = credits?.querySelector('a[href$="/issues"]');
 		const close = shadow.querySelector("#app-settings-close");
 		const app = shadow.querySelector("#app");
-		const behind = (app ? ["#app-rail", "#app-list", "#app-reading", "#app-chin"] : ["#panel"])
+		const behind = (app ? ["#app-rail", "#app-list", "#app-reading", "#app-chin", "#app-selection-bar"] : ["#panel"])
 			.map((selector) => shadow.querySelector(selector));
 
 		const holdBehind = (held) => {
@@ -42584,7 +45025,7 @@ ${settingsModalHTML()}
 			}
 		});
 
-		const showSection = (section, target = "") => {
+		const showSection = (section, target = "", event) => {
 			hideSourceHelpTip(shadow);
 			openSelects.get(shadow)?.();
 			const tab = tabs.find((each) => each.dataset.settingsSection === section) || tabs.find((each) => each.dataset.settingsSection === "general");
@@ -42604,7 +45045,7 @@ ${settingsModalHTML()}
 
 			content.scrollTop = 0;
 
-			if (section === "account") showAccount();
+			if (section === "account") showAccount(event);
 			else account.dispatchEvent(new Event("account-section-hidden"));
 
 			if (section === "general") {
@@ -42662,7 +45103,7 @@ ${settingsModalHTML()}
 		};
 
 		for (const tab of tabs) {
-			tab.onclick = () => showSection(tab.dataset.settingsSection);
+			tab.onclick = (event) => showSection(tab.dataset.settingsSection, "", event);
 		}
 
 		close.onclick = () => setOpen(false);
@@ -42706,17 +45147,17 @@ ${settingsModalHTML()}
 
 	async function refreshAppSources() {
 		const state = appState;
+		const revision = ++state.sourcesSeq;
 		const railOrderRevision = state.railOrderRevision || 0;
 		const [settings, railOrder] = await Promise.all([
 			loadSettings(),
 			appRailOrderSave.catch(console.error).then(() => load(STORAGE.appRailOrder, [])),
 		]);
+		if (revision !== state.sourcesSeq) return;
 
 		state.sourceIds = frontPageSourceIds(settings);
-
-		const feeds = frontPageFeeds(settings, state.sourceIds, enabledSourceIds(settings, registeredSourceIds()));
-
-		state.topicIds = frontPageTopicIds(settings).filter((id) => feeds.some((feed) => feed.topic === id));
+		state.topicIds = followedFrontPageInterests(settings);
+		state.hasHeadlines = frontPageHasHeadlines(settings);
 		if (railOrderRevision === (state.railOrderRevision || 0)) {
 			state.railOrder = Array.isArray(railOrder) ? railOrder.filter((view) => typeof view === "string") : [];
 		}
@@ -42725,6 +45166,19 @@ ${settingsModalHTML()}
 
 		if (state.noSources) {
 			sidebarHasDiscussion = false;
+		}
+
+		const filterKey = JSON.stringify(settings.hiddenTopics);
+		if (!appViewIsFrontPage(state.view) && filterKey !== state.feedFilterKey) {
+			const candidates = state.frontPageCandidates;
+			const hiddenKeys = await loadHiddenStoryKeys();
+			const coverage = readerArticleCoverage(frontPageRowStories(candidates), settings, hiddenKeys);
+			const { rows } = await readerFrontPageTopics(candidates, coverage, settings.hiddenTopics);
+			if (revision !== state.sourcesSeq) return;
+			if (state.frontPageCandidates === candidates && !appViewIsFrontPage(state.view)) {
+				state.frontPageRows = rows;
+				state.feedFilterKey = filterKey;
+			}
 		}
 
 		await renderAppList();
@@ -42765,7 +45219,7 @@ ${settingsModalHTML()}
 	let appRailOrderSave = Promise.resolve();
 
 	function saveAppRailOrder(section) {
-		const visible = [...section.querySelectorAll(".rail-button")].map((button) => button.dataset.appView);
+		const visible = [...section.querySelectorAll(".rail-reorderable")].map((button) => button.dataset.appView);
 		const remaining = [...visible];
 		const order = [...new Set([...(appState.railOrder || []), ...visible])].map((view) => visible.includes(view) ? remaining.shift() : view);
 
@@ -42785,7 +45239,7 @@ ${settingsModalHTML()}
 		let press = null;
 		let frame = 0;
 		let suppressClick = false;
-		const buttons = () => [...section.querySelectorAll(".rail-button")];
+		const buttons = () => [...section.querySelectorAll(".rail-reorderable")];
 		const finish = (commit) => {
 			if (commit) place();
 			const drag = press;
@@ -42827,7 +45281,7 @@ ${settingsModalHTML()}
 		section._cancelReorder = () => finish(false);
 		window.addEventListener("pointerdown", () => { suppressClick = false; }, true);
 		section.addEventListener("pointerdown", (event) => {
-			const button = event.target.closest(".rail-button");
+			const button = event.target.closest(".rail-reorderable");
 
 			if (!button || button.disabled || !event.isPrimary || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
 			press = { button, id: event.pointerId, startX: event.clientX, startY: event.clientY, before: buttons(), ready: event.pointerType !== "touch" };
@@ -42885,14 +45339,14 @@ ${settingsModalHTML()}
 			event.stopImmediatePropagation();
 		}, true);
 		section.addEventListener("keydown", (event) => {
-			const button = event.target.closest(".rail-button");
+			const button = event.target.closest(".rail-reorderable");
 
 			if (!button || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
 			event.preventDefault();
 			event.stopPropagation();
 			const adjacent = event.key === "ArrowUp" ? button.previousElementSibling : button.nextElementSibling;
 
-			if (!adjacent) return;
+			if (!adjacent?.matches(".rail-reorderable")) return;
 			if (event.key === "ArrowUp") section.insertBefore(button, adjacent);
 			else section.insertBefore(adjacent, button);
 			button.focus({ preventScroll: true });
@@ -42939,6 +45393,7 @@ ${settingsModalHTML()}
 		const order = [...new Set([...(state.railOrder || []), ...filters.map((filter) => filter.view)])];
 
 		filters.sort((a, b) => order.indexOf(a.view) - order.indexOf(b.view));
+		if (state.hasHeadlines) filters.unshift(APP_HEADLINES);
 		holder._cancelReorder?.();
 
 		state.ui.shadow.querySelector("#app-list-tags").innerHTML = filters
@@ -42948,26 +45403,17 @@ ${settingsModalHTML()}
 			)
 			.join("");
 
-		holder.innerHTML = filters.map((filter) => appRailButtonHTML(filter.view, filter.label, filter.mark)).join("");
+		holder.innerHTML = filters.map((filter) => appRailButtonHTML(filter.view, filter.label, filter.railMark ?? filter.mark, { reorderable: filter !== APP_HEADLINES })).join("");
 
-		for (const button of holder.querySelectorAll(".rail-button")) {
+		for (const button of holder.querySelectorAll(".rail-reorderable")) {
 			button.setAttribute("aria-description", "Drag to reorder, or press Alt and the Up or Down arrow key.");
 		}
 
-		state.ui.shadow.querySelector("#app-rail-rule").hidden = !state.sourceIds.length && !(state.topicIds || []).length;
+		state.ui.shadow.querySelector("#app-rail-rule").hidden = !filters.length;
 
-		if (
-			state.view.startsWith("source:") &&
-			!state.sourceIds.includes(state.view.slice("source:".length))
-		) {
+		if (!frontPageViewAvailable(state.view, state.sourceIds, state.topicIds, state.hasHeadlines)) {
 			state.view = "unread";
-		}
-
-		if (
-			state.view.startsWith("topic:") &&
-			!(state.topicIds || []).includes(state.view.slice("topic:".length))
-		) {
-			state.view = "unread";
+			state.listTopic = null;
 		}
 
 		state.revealed = "";
@@ -42975,11 +45421,22 @@ ${settingsModalHTML()}
 		paintAppRailFit();
 	}
 
-	function appViewIsFrontPage(view) {
-		return view === "unread" || view === "all" || view.startsWith("source:") || view.startsWith("topic:");
+	function frontPageViewAvailable(view, sourceIds, topicIds, hasHeadlines) {
+		if (view === APP_HEADLINES.view) return hasHeadlines;
+		if (view.startsWith("source:")) return sourceIds.includes(view.slice("source:".length));
+		if (view.startsWith("topic:")) return topicIds.includes(view.slice("topic:".length));
+		return true;
 	}
 
-	function appRowThumbHTML(story) {
+	function frontPageViewIsFiltered(view) {
+		return view === APP_HEADLINES.view || view.startsWith("source:") || view.startsWith("topic:");
+	}
+
+	function appViewIsFrontPage(view) {
+		return view === "unread" || view === "all" || frontPageViewIsFiltered(view);
+	}
+
+	function appRowThumbHTML(story, { look = null, fallbackFavicon = true } = {}) {
 		let host = "";
 
 		try {
@@ -42988,8 +45445,9 @@ ${settingsModalHTML()}
 			return "";
 		}
 
-		const preview = appState?.previews?.get(normalizeURL(story.url) || story.url) || "";
-		const source = preview || (host ? `https://${host}/favicon.ico` : "");
+		const saved = look ? safeLook(look) : null;
+		const preview = appState?.previews?.get(normalizeURL(story.url) || story.url) || saved?.image;
+		const source = preview || saved?.icon || (fallbackFavicon && host ? `https://${host}/favicon.ico` : "");
 
 		return `<span class="browse-thumb-wrap is-pending${preview ? " has-preview" : ""}"><img class="browse-thumb" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" data-src="${escapeHTML(source)}"></span>`;
 	}
@@ -43051,10 +45509,236 @@ ${settingsModalHTML()}
 	}
 
 	function openAppRowMenuButtons(row) {
-		return [...row.querySelectorAll(".story-meta button")].filter((link) => link.textContent.trim());
+		return [...row.querySelectorAll(".story-meta button")]
+			.filter((button) => button.textContent.trim())
+			.sort((a, b) => Number(b.matches(".browse-hide-link")) - Number(a.matches(".browse-hide-link")));
 	}
 
-	function openAppRowMenu(row, button) {
+	function appSelectionEntry(row) {
+		const link = row && row.querySelector(".browse-title-link");
+		return link ? appLinkSelectionEntry(link.href, link.textContent, row.dataset.appKey || row.dataset.documentKey) : null;
+	}
+
+	function appLinkSelectionEntry(url, title, key) {
+		if (!/^https?:\/\//i.test(url)) return null;
+		const normalized = normalizeURL(url);
+		const selectionKey = key || normalized;
+		if (!selectionKey) return null;
+		return { key: selectionKey, url, title: title?.trim() || url,
+			frontRow: appState.topicExtraRows?.get(normalized) || appState.rowsByURL.get(normalized) };
+	}
+
+	function wireAppSelection(shadow) {
+		for (const toggle of shadow.querySelectorAll(".app-select-links")) {
+			toggle.onclick = () => toggleAppLinkSelection(toggle);
+		}
+		shadow.getElementById("app-selection-close").onclick = () => endAppSelection({ refocus: true });
+		shadow.getElementById("app-selection-share").onclick = (event) => {
+			if (appState.bulk?.entries.size) openReadingListShare([...appState.bulk.entries.values()], event.currentTarget).catch(console.error);
+		};
+		shadow.getElementById("app-selection-actions").onclick = (event) => openAppBulkMenu(event.currentTarget);
+	}
+
+	function toggleAppLinkSelection(opener) {
+		if (appState.bulk) {
+			endAppSelection({ refocus: true });
+			return;
+		}
+		startAppSelection(opener);
+		paintAppSelection();
+		appState.ui.shadow.querySelector("#app-list-body .app-row-select")?.focus({ preventScroll: true });
+	}
+
+	function appListCanSelect(shadow) {
+		return Boolean(appState.bulk) || [...shadow.querySelectorAll("#app-list-body .app-row")].some(appSelectionEntry);
+	}
+
+	function paintAppSelectLinks(shadow) {
+		const active = Boolean(appState.bulk);
+		const available = appListCanSelect(shadow);
+		for (const toggle of shadow.querySelectorAll(".app-select-links")) {
+			toggle.disabled = !available;
+			toggle.setAttribute("aria-pressed", String(active));
+		}
+		const menuToggle = shadow.querySelector("#app-row-menu[data-heading]:not([hidden]) #app-menu-select-links");
+		if (menuToggle) menuToggle.disabled = !available;
+	}
+
+	function paintAppSelection() {
+		const { ui, bulk } = appState;
+		const shadow = ui.shadow;
+		const count = bulk?.entries.size || 0;
+		paintAppSelectLinks(shadow);
+		shadow.getElementById("app").toggleAttribute("data-selecting", count > 0);
+		shadow.getElementById("app-selection-bar").hidden = !count;
+		shadow.getElementById("app-selection-count").textContent = count ? `${count} selected` : "";
+		shadow.getElementById("app-selection-actions").disabled = !count || bulk.busy;
+		shadow.getElementById("app-selection-share").disabled = !count || bulk.busy;
+
+		for (const row of shadow.querySelectorAll("#app-list-body .app-row")) {
+			const entry = bulk ? appSelectionEntry(row) : null;
+			let checkbox = row.querySelector(":scope > .app-row-select");
+			row.classList.toggle("is-selected", Boolean(entry && bulk.entries.has(entry.key)));
+			if (!entry) {
+				checkbox?.remove();
+				continue;
+			}
+			if (!checkbox) {
+				checkbox = document.createElement("input");
+				checkbox.type = "checkbox";
+				checkbox.className = "app-row-select";
+				checkbox.setAttribute("aria-label", `Select ${entry.title}`);
+				checkbox.onchange = () => {
+					const current = appState.bulk;
+					if (!current) return;
+					if (checkbox.checked) current.entries.set(entry.key, entry);
+					else current.entries.delete(entry.key);
+					if (!current.entries.size) {
+						endAppSelection({ refocus: true });
+						return;
+					}
+					current.anchor = entry.key;
+					paintAppSelection();
+				};
+				checkbox.onkeydown = (event) => {
+					if (event.key !== "Escape") return;
+					event.preventDefault();
+					event.stopPropagation();
+					endAppSelection({ refocus: true });
+				};
+				row.prepend(checkbox);
+			}
+			checkbox.checked = bulk.entries.has(entry.key);
+			checkbox.disabled = bulk.busy;
+		}
+	}
+
+	function startAppSelection(opener) {
+		closeAppRowMenu();
+		return appState.bulk ??= { view: appState.view, entries: new Map(), opener, busy: false, anchor: "" };
+	}
+
+	function beginAppSelection(row, opener, { range = false } = {}) {
+		const entry = appSelectionEntry(row);
+		if (!entry || appState.bulk?.busy) return;
+		const bulk = startAppSelection(opener);
+		bulk.entries.set(entry.key, entry);
+		if (range && bulk.anchor && bulk.anchor !== entry.key) {
+			const visible = [...row.parentElement.querySelectorAll(".app-row")].map(appSelectionEntry);
+			const anchor = visible.findIndex((article) => article?.key === bulk.anchor);
+			const target = visible.findIndex((article) => article?.key === entry.key);
+			if (anchor >= 0 && target >= 0) {
+				for (const article of visible.slice(Math.min(anchor, target), Math.max(anchor, target) + 1)) {
+					if (article) bulk.entries.set(article.key, article);
+				}
+			} else {
+				bulk.anchor = entry.key;
+			}
+		} else {
+			bulk.anchor = entry.key;
+		}
+		paintAppSelection();
+		row.querySelector(".app-row-select")?.focus({ preventScroll: true });
+	}
+
+	function endAppSelection({ refocus = false } = {}) {
+		const current = appState.bulk;
+		if (!current) return;
+		appState.bulk = null;
+		const shadow = appState.ui.shadow;
+		if (shadow.getElementById("app-row-menu").dataset.bulk) closeAppRowMenu();
+		paintAppSelection();
+		if (refocus) {
+			const opener = current.opener.getClientRects().length ? current.opener : shadow.querySelector("#app-list-body .browse-more");
+			opener?.focus({ preventScroll: true });
+		}
+	}
+
+	function openAppBulkMenu(button, point = null) {
+		const state = appState;
+		if (!state.bulk?.entries.size || state.bulk.busy) return;
+		const menu = state.ui.shadow.getElementById("app-row-menu");
+		const wasOpen = !menu.hidden && Boolean(menu.dataset.bulk);
+		closeAppRowMenu();
+		closeCardMenu();
+		if (wasOpen && !point) return;
+		const labels = state.view === "collection" ? [
+			["seen", "Mark selected as seen"],
+		] : state.view === "queue" ? [
+			["queue-read", "Mark selected as read"],
+			["unqueue", "Remove selected from queue"],
+		] : [
+			["read", "Mark selected as read"],
+			["queue", "Add selected to queue"],
+		];
+		menu.setAttribute("aria-label", "Selected link actions");
+		showAppMenu(menu, button, labels.map(([action, label]) => ({
+			label,
+			run: () => applyAppBulkAction(action).catch(console.error),
+		})), { above: button.closest(".app-selection-bar"), point });
+		menu.dataset.bulk = "1";
+		button.setAttribute("aria-expanded", "true");
+	}
+
+	async function applyAppBulkAction(action) {
+		const state = appState;
+		const bulk = state.bulk;
+		if (!bulk?.entries.size || bulk.busy) return;
+		bulk.busy = true;
+		paintAppSelection();
+		const selected = [...bulk.entries.values()];
+		const keys = new Set(bulk.entries.keys());
+		const frontRows = selected.map((entry) => state.rowsByURL.get(entry.key) || entry.frontRow).filter(Boolean);
+		try {
+			if (action === "read") {
+				await markAppRowsRead(frontRows);
+			} else if (action === "queue") {
+				const now = Date.now();
+				await mutateQueue((entries) => frontRows.reduce((next, row) => addToQueue(next, row.story, now), entries));
+			} else if (action === "queue-read" || action === "unqueue") {
+				const now = Date.now();
+				await mutateQueue((entries) => action === "unqueue"
+					? entries.filter((entry) => !keys.has(normalizeURL(entry.url) || queueKey(entry)))
+					: entries.map((entry) => keys.has(normalizeURL(entry.url) || queueKey(entry)) && !entry.readAt ? { ...entry, readAt: now } : entry));
+			} else if (action === "seen") {
+				await mutateCollected((entries) => markCollectedSeen(entries, keys, Date.now()));
+			}
+			if (state.bulk === bulk) endAppSelection({ refocus: true });
+			if (action !== "read") {
+				await renderAppList();
+				if (bulk.view === "collection") await refreshCollectionTag();
+				showToast(`Updated ${pluralize(selected.length, "selected link")}`);
+			}
+		} catch (error) {
+			showToast("Couldn’t update the selected links");
+			throw error;
+		} finally {
+			if (state.bulk === bulk) {
+				bulk.busy = false;
+				paintAppSelection();
+			}
+		}
+	}
+
+	function wireAppRowMenu(row, button, doc = null) {
+		button.onclick = (event) => {
+			event.stopPropagation();
+			openAppRowMenu(row, button, doc);
+		};
+		row.oncontextmenu = (event) => {
+			if (event.defaultPrevented) return;
+			event.preventDefault();
+			const point = event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : null;
+			if (appState.bulk && appSelectionEntry(row)) {
+				if (!appState.bulk.entries.size) beginAppSelection(row, button);
+				openAppBulkMenu(appState.ui.shadow.getElementById("app-selection-actions"), point);
+			} else {
+				openAppRowMenu(row, button, doc, point);
+			}
+		};
+	}
+
+	function openAppRowMenu(row, button, doc = null, point = null) {
 		const shadow = appState?.ui.shadow;
 		const menu = shadow?.querySelector("#app-row-menu");
 
@@ -43062,29 +45746,68 @@ ${settingsModalHTML()}
 			return;
 		}
 
-		if (!menu.hidden && menu.dataset.row === row.dataset.storyId) {
+		if (!point && !menu.hidden && button.getAttribute("aria-expanded") === "true") {
 			closeAppRowMenu();
 			return;
 		}
 
 		closeAppRowMenu();
-		menu.setAttribute("aria-label", "This article");
-		const url = row.querySelector(".browse-title-link").href;
-		showAppMenu(
-			menu,
-			button,
-			[
-				...openAppRowMenuButtons(row).map((link) => {
-					const label = link.textContent.trim();
-
-					return { label: label.charAt(0).toUpperCase() + label.slice(1), run: () => link.click() };
-				}),
+		menu.setAttribute("aria-label", "This link");
+		const entry = appSelectionEntry(row);
+		const items = entry ? [
+			{ label: "Open", run: () => row.querySelector(".browse-title-link").click() },
+			{ label: "Open in new tab", href: entry.url, run: () => rememberAppArrival(entry.url).catch(console.error) },
+		] : [];
+		const topicKey = sharedTopicURLKey(entry?.url);
+		const contextual = doc ? cardMenuItems(doc)
+			.filter(({ id }) => id !== "open" && id !== "tab" && id !== "copy")
+			.map(({ id, label }) => ({ label, run: () => {
+				button.focus({ preventScroll: true });
+				runCardAction(id, doc).catch(console.error);
+			} }))
+			: openAppRowMenuButtons(row).map((action) => {
+				const label = action.textContent.trim();
+				return { label: label.charAt(0).toUpperCase() + label.slice(1), run: () => action.click() };
+			});
+		if (topicKey && (topicKey === sharedTopicURLKey(entry.frontRow?.story.url) || sharedTopicCache?.index?.pages.has(topicKey))) {
+			const url = canonicalSharedTopicURL(entry.url).href;
+			const header = shadow.getElementById("app-list-topic");
+			const topic = header.hidden ? "" : header.dataset.topicLabel;
+			contextual.push({
+				label: "Report incorrect topic…",
+				run: () => openTopicReport({ url, title: entry.title, topic }, button).catch(console.error),
+			});
+		}
+		if (contextual.length) {
+			if (items.length) items.push({ rule: true });
+			items.push(...contextual);
+		}
+		if (entry) {
+			items.push(
 				{ rule: true },
-				{ label: "Open the original page", href: url, run: () => rememberAppArrival(url).catch(console.error) },
-			],
-		);
-		menu.dataset.row = row.dataset.storyId || "";
+				{ label: "Copy link", run: () => {
+					button.focus({ preventScroll: true });
+					runCardAction("copy", entry).catch(console.error);
+				} },
+				{ label: "Select link", run: () => beginAppSelection(row, button) },
+			);
+		}
+		showAppMenu(menu, button, items, { point });
+		menu.dataset.row = "1";
 		button.setAttribute("aria-expanded", "true");
+
+	}
+
+	function openAppTopicMenu(button, group, point = null) {
+		const menu = appState.ui.shadow.getElementById("app-row-menu");
+		closeAppRowMenu();
+		menu.setAttribute("aria-label", "This topic");
+		showAppMenu(menu, button, [
+			{ label: "Open", run: () => button.click() },
+			{ rule: true },
+			{ label: "Select links", run: () => selectAppTopicLinks(group).catch(console.error) },
+		], { start: true, point });
+		menu.dataset.row = "topic";
 	}
 
 	function openAppHeadingMenu(button) {
@@ -43100,24 +45823,67 @@ ${settingsModalHTML()}
 		}
 
 		closeAppRowMenu();
-		menu.setAttribute("aria-label", appViewLabel(appState.view));
+		const { view, bulk, ui: { shadow } } = appState;
+		menu.setAttribute("aria-label", appViewLabel(view));
+		const items = appViewIsFrontPage(view) ? [
+			{ label: "Sync", run: () => shadow.getElementById("app-list-sync").click() },
+			{ rule: true },
+			{ label: "Mark all as read", run: () => markAppViewRead().catch(console.error) },
+		] : [];
+		items.push({
+			id: "app-menu-select-links",
+			label: bulk ? "Stop selecting" : "Select links",
+			disabled: !appListCanSelect(shadow),
+			run: () => toggleAppLinkSelection(button),
+		});
 		showAppMenu(
 			menu,
 			button,
-			[
-				{ label: "Sync", run: () => appState?.ui.shadow.querySelector("#app-list-sync")?.onclick?.(new Event("click")) },
-				{ rule: true },
-				{ label: "Mark all as read", run: () => markAppViewRead().catch(console.error) },
-			],
+			items,
 			{ start: true },
 		);
 		menu.dataset.heading = "1";
 		button.setAttribute("aria-expanded", "true");
 	}
 
-	function showAppMenu(menu, button, items, { start = false } = {}) {
+	function openCollectionFilterMenu(button) {
+		const state = appState;
+		const menu = state.ui.shadow.getElementById("app-row-menu");
+		const wasOpen = !menu.hidden && Boolean(menu.dataset.collection);
+		closeAppRowMenu();
+		closeCardMenu();
+		if (wasOpen) return;
+		const choices = (items, field) => items.map(([value, label]) => ({
+			label, checked: state[field] === value,
+			run: () => {
+				state[field] = value;
+				state.collectionLimit = FRONT_PAGE_SIZE;
+				endAppSelection();
+				resetAppListScroll();
+				button.focus({ preventScroll: true });
+				renderAppList().catch(console.error);
+			},
+		}));
+		menu.setAttribute("aria-label", "Filter and sort Collection");
+		menu.dataset.collection = "1";
+		showAppMenu(menu, button, [
+			{ heading: "Show" },
+			...choices(COLLECTION_FILTERS, "collectionFilter"),
+			{ rule: true },
+			{ heading: "Sort" },
+			...choices(COLLECTION_SORTS, "collectionSort"),
+			...(state.collectionTags.size ? [
+				{ rule: true },
+				{ heading: "Tag" },
+				...choices([["", "All tags"], ...TOPICS.filter(({ id }) => state.collectionTags.has(id)).map(({ id, label }) => [id, label])], "collectionTagFilter"),
+			] : []),
+		]);
+		button.setAttribute("aria-expanded", "true");
+	}
+
+	function showAppMenu(menu, button, items, { start = false, above = null, point = null } = {}) {
 		menu.replaceChildren(
-			...items.map(({ label, run, href, rule = false }) => {
+			...items.map(({ id, label, run, href, rule = false, checked, heading, disabled = false }) => {
 				if (rule) {
 					const divider = document.createElement("div");
 
@@ -43125,6 +45891,12 @@ ${settingsModalHTML()}
 					divider.setAttribute("role", "separator");
 
 					return divider;
+				}
+				if (heading) {
+					const title = document.createElement("div");
+					title.className = "app-menu-label";
+					title.textContent = heading;
+					return title;
 				}
 
 				const item = document.createElement(href ? "a" : "button");
@@ -43135,9 +45907,15 @@ ${settingsModalHTML()}
 					item.rel = "noopener noreferrer";
 				} else {
 					item.type = "button";
+					item.disabled = disabled;
 				}
+				if (id) item.id = id;
 				item.className = "dropdown-item app-row-item";
-				item.setAttribute("role", "menuitem");
+				item.setAttribute("role", checked === undefined ? "menuitem" : "menuitemradio");
+				if (checked !== undefined) {
+					item.setAttribute("aria-checked", String(checked));
+					item.setAttribute("aria-label", label);
+				}
 				item.textContent = label;
 				item.onclick = (event) => {
 					event.stopPropagation();
@@ -43150,24 +45928,41 @@ ${settingsModalHTML()}
 			}),
 		);
 		menu.hidden = false;
-
-		const box = button.getBoundingClientRect();
-		const width = menu.offsetWidth;
-		const height = menu.offsetHeight;
-		const below = box.bottom + 6 + height <= window.innerHeight - 8;
-
-		menu.style.left = `${Math.round(Math.max(8, Math.min(start ? box.left : box.right - width, window.innerWidth - width - 8)))}px`;
-		menu.style.top = `${Math.round(below ? box.bottom + 6 : Math.max(8, box.top - 6 - height))}px`;
+		menu.scrollTop = 0;
 		menu.style.bottom = "auto";
-		const controls = [...menu.querySelectorAll('[role="menuitem"]')];
-		controls[0]?.focus({ preventScroll: true });
+
+		if (menu.dataset.collection) {
+			const shadow = menu.getRootNode();
+			const arrow = shadow.getElementById("app-collection-filter-arrow");
+			placeAppPopover(menu, button, shadow.getElementById("app-list"), arrow);
+			arrow.hidden = false;
+		} else {
+			menu.style.maxHeight = "";
+			const width = menu.offsetWidth;
+			const height = menu.offsetHeight;
+			let left = point?.x;
+			let top = point?.y;
+			if (!point) {
+				const box = button.getBoundingClientRect();
+				const below = !above && box.bottom + 6 + height <= window.innerHeight - 8;
+				const upperEdge = above?.getBoundingClientRect().top ?? box.top;
+				left = start ? box.left : box.right - width;
+				top = below ? box.bottom + 6 : upperEdge - 6 - height;
+			}
+
+			menu.style.left = `${Math.round(Math.max(8, Math.min(left, window.innerWidth - width - 8)))}px`;
+			menu.style.top = `${Math.round(Math.max(8, Math.min(top, window.innerHeight - height - 8)))}px`;
+		}
+		const enabledControls = () => [...menu.querySelectorAll(':is([role="menuitem"], [role="menuitemradio"]):not(:disabled)')];
+		enabledControls()[0]?.focus({ preventScroll: true });
 		menu.onkeydown = (event) => {
+			const controls = enabledControls();
 			const index = controls.indexOf(menu.getRootNode().activeElement);
-			if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+			if (controls.length && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
 				event.preventDefault();
 				event.stopPropagation();
 				const next = event.key === "Home" ? 0 : event.key === "End" ? controls.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + controls.length) % controls.length;
-				controls[next]?.focus({ preventScroll: true });
+				controls[next]?.focus();
 			} else if (event.key === "Escape") {
 				event.preventDefault();
 				event.stopPropagation();
@@ -43188,13 +45983,20 @@ ${settingsModalHTML()}
 			menu.hidden = true;
 			delete menu.dataset.row;
 			delete menu.dataset.heading;
+			delete menu.dataset.collection;
+			delete menu.dataset.bulk;
 		}
 
+		shadow?.getElementById("app-collection-filter-arrow")?.setAttribute("hidden", "");
+		shadow?.getElementById("app-selection-actions")?.setAttribute("aria-expanded", "false");
 		shadow?.querySelector("#app-list-heading-button")?.setAttribute("aria-expanded", "false");
+		shadow?.querySelector('.app-collection-filter[aria-expanded="true"]')?.setAttribute("aria-expanded", "false");
 		shadow?.querySelector('#app-list-body .browse-more[aria-expanded="true"]')?.setAttribute("aria-expanded", "false");
 	}
 
 	function appViewLabel(view) {
+		if (view === APP_HEADLINES.view) return APP_HEADLINES.label;
+
 		if (view.startsWith("source:")) {
 			const id = view.slice("source:".length);
 
@@ -43212,11 +46014,12 @@ ${settingsModalHTML()}
 
 	function paintAppRail() {
 		const state = appState;
+		if (state.bulk && state.bulk.view !== state.view) endAppSelection();
 
 		const searching = !appIsPhone() && state.ui.shadow.querySelector("#app").hasAttribute("data-searching");
 		const search = state.ui.shadow.querySelector("#app-rail-search");
 
-		const filtered = state.view.startsWith("topic:") || state.view.startsWith("source:");
+		const filtered = frontPageViewIsFiltered(state.view);
 		const tags = state.ui.shadow.querySelector("#app-list-tags");
 
 		for (const button of state.ui.shadow.querySelectorAll("#app-rail [data-app-view]")) {
@@ -43228,7 +46031,7 @@ ${settingsModalHTML()}
 			button.setAttribute("aria-pressed", String(current));
 		}
 
-		tags.hidden = !tags.children.length || !(filtered || state.view === "all");
+		tags.hidden = !tags.children.length || !appViewIsFrontPage(state.view);
 
 		for (const chip of tags.children) {
 			chip.setAttribute("aria-pressed", String(chip.dataset.appView === state.view));
@@ -43241,21 +46044,14 @@ ${settingsModalHTML()}
 			paintAppRailFill(state.railFilled);
 		}
 
-		const markable = appViewIsFrontPage(state.view);
-		const heading = state.ui.shadow.querySelector("#app-list-heading");
-		const headingText = state.ui.shadow.querySelector("#app-list-heading-text");
-		const headingButton = state.ui.shadow.querySelector("#app-list-heading-button");
-		const headingHolder = markable ? headingButton : heading;
-
-		state.ui.shadow.querySelector("#app-mark-read").hidden = !markable;
-		state.ui.shadow.querySelector("#app-list-title").textContent = appViewLabel(state.view);
-		headingText.textContent = appViewLabel(state.view);
-
-		if (headingText.parentElement !== headingHolder) {
-			headingHolder.prepend(headingText);
+		state.ui.shadow.querySelector("#app-mark-read").hidden = !appViewIsFrontPage(state.view);
+		for (const button of state.ui.shadow.querySelectorAll(".app-collection-filter")) {
+			button.hidden = state.view !== "collection";
+			button.toggleAttribute("data-filtered", state.collectionFilter !== "all" || state.collectionSort !== "activity" || Boolean(state.collectionTagFilter));
 		}
-
-		headingButton.hidden = !markable;
+		const label = appViewLabel(state.view);
+		state.ui.shadow.querySelector("#app-list-title").textContent = label;
+		state.ui.shadow.querySelector("#app-list-heading-text").textContent = label;
 
 		if (state.revealed !== state.view && revealAppFilter()) {
 			state.revealed = state.view;
@@ -43294,7 +46090,7 @@ ${settingsModalHTML()}
 		return true;
 	}
 
-	function chooseAppView(view, fromSearch = false, railEvent = null) {
+	function chooseAppView(view, fromSearch = false, railEvent = null, topicId = null) {
 		const state = appState;
 
 		if (!state) {
@@ -43305,14 +46101,23 @@ ${settingsModalHTML()}
 
 		const preview = !appIsPhone() && state.previewList?.(fromSearch ? null : railEvent);
 
-		if (view === state.view) {
+		if (view === state.view && !topicId) {
 			if (preview) renderAppList().catch(console.error);
 			return;
 		}
 
+		const collectionChanged = state.view === "collection" || view === "collection";
+		clearAppTopicExtra();
 		state.view = view;
-		paintAppRail();
-		renderAppList().catch(console.error);
+		state.listTopic = null;
+		if (topicId) {
+			if (appIsPhone()) setAppStage("list");
+			openAppListTopic(topicId).catch(console.error);
+		} else {
+			paintAppRail();
+			renderAppList().catch(console.error);
+		}
+		if (collectionChanged) refreshCollectionTag().catch(console.error);
 	}
 
 	function showAppTip(button, { phone = false } = {}) {
@@ -43450,6 +46255,7 @@ ${settingsModalHTML()}
 
 		if (appIsPhone()) {
 			restoreAppStageScroll(was, stage);
+			if (stage === "list" && appState.view === "unread") refreshAppSeen({ returnedToList: true }).catch(console.error);
 		}
 	}
 
@@ -43589,6 +46395,7 @@ ${settingsModalHTML()}
 			paintAppChrome();
 			window.scrollTo(0, appState.scrolls.list || 0);
 			appState.moving = false;
+			if (appState.view === "unread") refreshAppSeen({ returnedToList: true }).catch(console.error);
 		});
 	}
 
@@ -43650,7 +46457,7 @@ ${settingsModalHTML()}
 		const at = rows.findIndex((row) => row.classList.contains("is-open"));
 		const next = at >= 0 ? rows[at + 1] : null;
 
-		return next ? state.rowsByURL.get(next.dataset.appKey) || null : null;
+		return next ? state.topicExtraRows?.get(next.dataset.appKey) || state.rowsByURL.get(next.dataset.appKey) || null : null;
 	}
 
 	function paintAppNext() {
@@ -43728,19 +46535,12 @@ ${settingsModalHTML()}
 		const middle = shadow.querySelector(".app-pane-middle");
 		const discussionToggle = shadow.querySelector("#app-toggle-discussion");
 		const chinActions = shadow.querySelector("#app-chin-actions");
-		const view = shadow.querySelector("#app-view-toggle");
 
 		if (appIsPhone()) {
 			if (discussionToggle.parentElement !== listHome) listHome.append(discussionToggle);
-			if (middle.parentElement !== listHome) {
-				listHome.insertBefore(middle, discussionToggle);
-				middle.append(view);
-			}
+			if (middle.parentElement !== listHome) listHome.insertBefore(middle, discussionToggle);
 		} else {
-			if (middle.parentElement !== chinActions) {
-				chinActions.prepend(middle);
-				middle.prepend(view);
-			}
+			if (middle.parentElement !== chinActions) chinActions.prepend(middle);
 			if (discussionToggle.parentElement !== chinActions) chinActions.append(discussionToggle);
 		}
 		document.querySelector(".chin")?.setAttribute("aria-hidden", String(!appIsPhone()));
@@ -43833,8 +46633,11 @@ ${settingsModalHTML()}
 		const state = appState;
 		state.recentSearches = [];
 		const sequence = state.searchSequence = (state.searchSequence || 0) + 1;
-		Promise.all([indexAppLists(), loadRecentSearches()]).then(([, recent]) => {
+		const lists = Promise.all([loadQueue(), loadCollectionDocuments()]);
+		state.topicSearch = { lists, entries: [], loading: false, requested: false };
+		Promise.all([lists, loadRecentSearches()]).then(([[queue, documents], recent]) => {
 			if (appState !== state || page.hidden || state.searchSequence !== sequence) return;
+			state.listIndex = searchListIndex(queue, documents);
 			state.recentSearches = recent;
 			renderAppSearch(input.value);
 		}).catch(console.error);
@@ -44484,16 +47287,23 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const owner = field.closest("[data-app-section]");
 			const section = owner?.dataset.appSection || "general";
 
-			if (label && label.length < 80 && !seen.has(label) && !field.closest("#app-view-menu") && section !== "shortcuts") {
+			if (label && label.length < 80 && !seen.has(label) && !field.closest("#app-view-menu, #collection-import-settings") && section !== "shortcuts") {
 				seen.add(label);
-				entries.push({ group: "Settings", title: label, note: { general: "General", appearance: "Appearance", sidebar: "Sidebar", sources: "Sources" }[section], keys: `${label} settings`, run: () => openSettings(section) });
+				entries.push({ group: "Settings", title: label, note: { general: "General", appearance: "Appearance", sidebar: "Sidebar", sources: "Sources", collection: "Collection" }[section], keys: `${label} settings`, run: () => openSettings(section) });
 			}
 		}
 
 		entries.push({ group: "Settings", title: "Sources", note: "Where comments come from", keys: "sources reddit hacker news bluesky lobsters mastodon lemmy settings", run: () => openSettings("sources") });
 		entries.push({ group: "Settings", title: "Account", note: "Sync settings, Collection, and reading queue", keys: "account sync devices sign in", run: () => openSettings("account") });
+		if (shadow.getElementById("collection-import-settings")) {
+			entries.push({ group: "Settings", title: "Import bookmarks", note: "Collection", keys: "import bookmarks html collection settings", run: () => {
+				openSettings("collection", "#collection-import-settings");
+				shadow.getElementById("collection-import-open").focus();
+			} });
+		}
 		entries.push({ group: "Settings", title: "Disabled sites", note: "Sidebar", keys: "disabled sites blocked hidden manage settings sidebar", run: () => openSettings("sidebar", "#settings-blocked-section") });
-		entries.push({ group: "Settings", title: "Hidden links", note: "Sources", keys: "hidden links blocked disabled manage settings sources", run: () => openSettings("sources", "#settings-hidden-section") });
+		entries.push({ group: "Settings", title: "Hidden links", note: "Filters", keys: "hidden links blocked disabled manage settings filters", run: () => openSettings("filters", "#settings-hidden-section") });
+		entries.push({ group: "Settings", title: "Hidden topics", note: "Filters", keys: "filters hide mute topics front pages settings", run: () => openSettings("filters") });
 		entries.push({ group: "Settings", title: "Privacy", note: "General", keys: "privacy policy personal data settings", run: () => openSettings("general", "#settings-privacy") });
 
 		return entries;
@@ -44517,6 +47327,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				entries.push({ group: "Go to", title: filter.label, note: kind, keys: [filter.label, kind, `${kind}s`, filter.id].filter(Boolean).join(" "), typed: true, run: () => chooseAppView(filter.view, true) });
 			}
 		}
+
+		entries.push(...(state.topicSearch?.entries || []));
 
 		for (const entry of state.rowsByURL.values()) {
 			const story = entry.story;
@@ -44546,37 +47358,95 @@ ${note ? appShortcutNoteHTML(note) : ""}
 
 		for (const doc of documents) {
 			if (doc.title && doc.url) {
-				index.push({ group: "Collection", key: doc.key, title: doc.title, note: doc.site || "", url: doc.url, story: documentStory(doc), keys: `${collectionHaystack(doc)} collection saved` });
+				index.push({ group: "Collection", key: doc.key, title: doc.title, note: doc.site || "", url: doc.url, story: documentStory(doc), keys: `${collectionHaystack(doc)} ${doc.url} collection saved` });
 			}
 		}
 
 		return index;
 	}
 
-	async function indexAppLists() {
-		const state = appState;
+	async function appSearchTopicIndex(state, [queued, documents]) {
+		const settings = await loadSettings();
+		const [snapshot, hiddenKeys] = await Promise.all([loadFrontPages({ settings, cachedOnly: true }), loadHiddenStoryKeys()]);
+		const candidates = snapshot.rows.filter((row) => !isStoryHidden(row.story, hiddenKeys));
+		const queue = sortQueue(queued);
+		if (!candidates.length && !queue.length && !documents.length) return [];
 
-		if (!state) {
-			return;
+		const index = await loadSharedTopicIndex();
+		const stories = frontPageRowStories(snapshot.rows);
+		const feedCoverage = readerArticleCoverage(frontPageRowStories(candidates), settings, hiddenKeys);
+		const feedGroups = await readerFrontPageTopicGroups(candidates, feedCoverage, { index, includeStories: true });
+		const visibleFeed = filterReaderTopicRows(candidates, settings.hiddenTopics, feedGroups, feedCoverage);
+		const scopes = [["all", "Front Pages", visibleFeed, feedGroups]];
+
+		if (documents.length) {
+			const coverage = readerArticleCoverage([...stories, ...documents.flatMap((doc) => doc.discussions)], settings, hiddenKeys);
+			const tags = readerCollectionPageTags(documents, coverage);
+			const tag = [...tags.values()].some((each) => each.has(state.collectionTagFilter)) ? state.collectionTagFilter : "";
+			const visible = readerCollectionMatches(documents, tags, state.collectionFilter, tag);
+			const groups = readerTopicGroups(visible, (doc) => doc.url, readerCollectionSubjectGroups(documents, tags, index), index, coverage);
+			scopes.push(["collection", "Collection", visible, groups]);
+		}
+		if (queue.length) {
+			const coverage = readerArticleCoverage([...stories, ...queue], settings, hiddenKeys);
+			const local = readerStorySubjectGroups(queue, (entry) => [entry], coverage, index);
+			const groups = readerTopicGroups(queue, (entry) => entry.url, local, index, coverage);
+			scopes.push(["queue", "Queue", queue, groups]);
 		}
 
-		const [queue, documents] = await Promise.all([loadQueue(), loadCollectionDocuments()]);
-		state.listIndex = searchListIndex(queue, documents);
+		return scopes.flatMap(([view, label, rows, groups]) =>
+			appTopicProjection(rows, groups, null, null, index).groups.filter((group) =>
+				readerTopicHasSubject(group) || group.kind === "story" &&
+					(group.rows.length > 1 || index?.topicPages.get(group.id)?.size > 1)
+			).map((group) => ({
+				group: "Topics",
+				key: view + ":" + group.id,
+				title: topicDisplayName(group.label),
+				note: label + " · " + pluralize(group.rows.length, "link"),
+				keys: readerTopicLabels(group).join(" "),
+				run: () => {
+					if (group.rows.length > 1) {
+						chooseAppView(view, true, null, group.id);
+						return;
+					}
+					if (appState.view === view && appState.listTopic) setAppTopicsMode(true);
+					chooseAppView(view, true);
+					const [row] = group.rows;
+					const story = row.story || (view === "collection" ? documentStory(row) : row);
+					openAppStory(story, { row: row.story ? row : null }).catch(console.error);
+				},
+			})),
+		);
+	}
+
+	function loadAppSearchTopics(state, search, input) {
+		search.requested = true;
+		search.loading = true;
+		search.lists.then((lists) => appSearchTopicIndex(state, lists)).then((entries) => {
+			search.entries = entries;
+		}).catch(console.error).finally(() => {
+			search.loading = false;
+			if (appState === state && state.topicSearch === search && !state.ui.shadow.getElementById("app-search-page").hidden) {
+				renderAppSearch(input.value);
+			}
+		});
 	}
 
 	function renderAppSearch(query) {
 		const shadow = appState?.ui.shadow;
 		const state = appState;
 		const input = shadow?.querySelector("#app-search-input");
+		const search = state?.topicSearch;
+		if (input && search && !search.requested && query.trim()) loadAppSearchTopics(state, search, input);
 
 		renderSearchResults(shadow?.querySelector("#app-search-results"), appState ? appSearchEntries() : [], query, (entry) => {
 			if (entry.recentQuery && input) { input.value = entry.recentQuery; renderAppSearch(input.value); input.focus({ preventScroll: true }); return; }
 			setAppSearchOpen(false);
 			setTimeout(() => entry.run(), 0);
-		}, { recent: state?.recentSearches, onClear: () => { if (state) state.recentSearches = []; renderAppSearch(input?.value || ""); input?.focus({ preventScroll: true }); clearRecentSearches().catch(console.error); } });
+		}, { recent: state?.recentSearches, loading: search?.loading, onClear: () => { if (state) state.recentSearches = []; renderAppSearch(input?.value || ""); input?.focus({ preventScroll: true }); clearRecentSearches().catch(console.error); } });
 	}
 
-	function renderSearchResults(results, entries, query, onSelect, { recent = [], onClear = null } = {}) {
+	function renderSearchResults(results, entries, query, onSelect, { recent = [], onClear = null, loading = false } = {}) {
 		if (!results) return;
 
 		const previousItems = [...results.querySelectorAll(".app-search-item")];
@@ -44588,8 +47458,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const plain = (text) => String(text).split(/\s+/).map(readerKey).filter(Boolean).join(" ");
 		const lead = plain(needle);
 		const words = lead ? lead.split(" ") : [];
+		const navigates = (entry) => entry.group === "Go to" || entry.group === "Topics";
 		const hit = (entry) => {
-			if (entry.group !== "Go to" || !words.length) {
+			if (!navigates(entry) || !words.length) {
 				return terms.every((term) => entry.keys.toLowerCase().includes(term));
 			}
 
@@ -44599,7 +47470,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		};
 		const found = entries.filter((entry) => (needle ? hit(entry) : entry.group === "Go to" && !entry.typed));
 		const tier = (entry) => {
-			if (!lead || entry.group !== "Go to") {
+			if (!lead || !navigates(entry)) {
 				return 3;
 			}
 
@@ -44657,6 +47528,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 					item.innerHTML = `<span class="app-search-item-title"></span><span class="app-search-item-note"></span>`;
 					item.querySelector(".app-search-item-title").textContent = entry.title;
 					item.querySelector(".app-search-item-note").textContent = entry.note;
+					if (name === "Topics") {
+						item.classList.add("app-search-topic-item");
+						item.prepend(appTopicIcon(entry.title));
+					}
 					item.onclick = (event) => {
 						event.stopPropagation();
 						onSelect(entry);
@@ -44672,7 +47547,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const empty = document.createElement("div");
 
 			empty.className = "browse-empty";
-			empty.textContent = "Nothing matches.";
+			empty.textContent = loading && needle ? "Searching topics…" : "Nothing matches.";
 			results.append(empty);
 		}
 
@@ -44688,6 +47563,1349 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	let openAppSettingsSection = () => {};
 	let closeAppSettings = () => {};
 	let appSettingsCaret = null;
+
+	const APP_TOPICS_MODE_KEY = "HNewhere:app_browse_topics";
+	const SHARED_TOPIC_INDEX_KEY = "HNewhere:shared_topic_index";
+	const SHARED_TOPIC_INDEX_URL = "https://topics.backchnnl.app/api/topics";
+	const SHARED_TOPIC_COVERAGE_URL = SHARED_TOPIC_INDEX_URL + "/coverage";
+	const SHARED_TOPIC_REPORT_URL = "https://topics.backchnnl.app/api/topic-reports";
+	const SHARED_TOPIC_FALLBACK_URL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
+	const SHARED_TOPIC_CACHE_REVISION = 9;
+	const SHARED_TOPIC_CACHE_MS = 3 * 60 * 60 * 1000;
+	const SHARED_TOPIC_MAX_LINKS = 4000;
+	const WIKI_TOPIC_PHOTOS_KEY = "HNewhere:wikipedia_topic_images";
+	const WIKI_TOPIC_PHOTO_DAY = 86_400_000;
+	const WIKI_TOPIC_ARTICLE_PROPS = {
+		prop: "pageimages|pageprops|pageterms|images", piprop: "name", pilicense: "free",
+		ppprop: "disambiguation", wbptterms: "alias", imlimit: "320",
+	};
+	const APP_TOPIC_PHOTOS = {
+		internetArchive: {
+			subject: "Internet Archive headquarters",
+			credit: "Girl2k · Public domain · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Christian_science_church122908_02.jpg",
+			url: "data:image/webp;base64,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",
+		},
+		library: {
+			subject: "Library shelves",
+			credit: "Lauren · Public domain · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Library_shelves.jpg",
+			url: "data:image/webp;base64,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",
+		},
+		markets: {
+			subject: "Stock exchange trading floor",
+			credit: "National Institute of Standards and Technology · Public domain · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:NYSE-floor.jpg",
+			url: "data:image/webp;base64,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",
+		},
+		games: {
+			subject: "Video game controller",
+			credit: "Evan-Amos · Public domain · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Microsoft-Xbox-One-controller.jpg",
+			url: "data:image/webp;base64,UklGRvIEAABXRUJQVlA4IOYEAACQGgCdASpsAFgAPpVAm0qlo6IhpjQNoLASiWkA1nNyWvM4A5k5lXil0tcz/yH/VPsG+Vh7OT8X3isoEl8z/zzrZA6u4rmxpzR1KQdYuBeCjmXtzdy3uxXpnMqe5xjn15JkASVl3esY/b6lYID+2Fu1xqClCSaX2WS2LIninJml6tariuf6mHNHMbr6PVEjd1lvspnYTns9AVbK9aKgjGLmLJ2aUls0zBh89J0Qa0sOpz/xN3lZSQTLG3oQUafbMu6XUH2X3BQUII/Eh6uoipDD6O05nTCItQq2fO95dAD++yQR99gAVC2OpBvkeK8DbsIaHFPa8O7yx62/Et+X9ZeKXqV3x+xeb5rVoNZdeOtoKj6J7LWNo8zKJ5sd7omssWm0MTqOWrBhc1X+ReAA+bGoeI5ygNBC0XQ3mdCIyiNpzIrFAFg1/jRnFhSmPZp8xt6rBsyYugZ2CKyLblk0UxDPoCaCT1WOvZLPQUlggchA3CdDIn7nqGiVgn9t4E7gZLuDAzbRuph9gG6LZlgPVu368vsAhFzdsCTfxrW99NcjylfdhTk57FhxuwARB0SmaktINIDGdjoePZ5qR9PDY92AsouMdx40RcIky3oyiGX9zpQU04zFFcvybHF4U+ofklrZuUx7lF4QLE3r5W5vwhv6G8r1geH/TiN7K+lU/963zux/CH6cxJOov8HP0VYwTNVoMxQkAh0KKKifOfSrl0+xWmxt+RJxaBOd+bfyWk33nsTc+tjTm2FVcebJtdMKFuMt6vLHIdaZF092jn1rTSLD4fpahYq8RclJ7G3S+9FcMW3c9pd4SpuMugLT2At0jmRbGNNz/M3ANVsf+rbBwf3T4zFbY8x2PLjDZS55ulLRET9NjKceCkFxCNWRLG7ECyV3cyBCnqK6EuQ656IwVMlzI0ZMYjDhjnOQ+zP9Odb0h7LjevL6lBBAzPqlTIDLv81mh5IVGocppk2JvxzoRCki8lWVgMwZ4mhKtsKQIXgzdIVJ8iA4tozuuUg9p+a6a+phjtvdLRepvs6nYK82OniiZct0Tw2kwwlPOgALi/G/epCt1Ty/x18oZuHNFtnGQbJkagPCUvGJD9QZ031TnLb7WK9r85hKRddzAO57RF8c+uzyazYXJqKuBPOnVw6J4OAZyr3ea+Ll9xPT67HZQNdzhrxE3Lb0093d1nNpKH3blpzjiFi2xZWjWTc2nGsA3apUJ8m9QY3w5igdl5DET0nVH7KYoynalI/vo2uUQZU43rLq0ho5rE72b+OMfdYZ0T1ISC0bYYFJRtfDl4KpSx6L8qPP7TX1tOUK2rPH8VpwyPRF41AknI2ZV4II7B23EE5iTsJWkKDM6xM5XtT+sYM4RZr1cD7sXKXgecs7CGLp7puGQLK58bnpWl5lILtEowO9c/NZz/NTKCASr8mUXLdzXdMJODMlTfIRcIm2BD9MxKE5DsslW93Ig6DGrGjbT9dWShVEGiRInq7h4IJeWe8u21ZfQDufPP89zOkF4TiMlu7+eu/H/8X1221DDX5w6ULB6BvIXPnlOJMZcIqdPEJ9WIwwX3hMIYnEHNH43nDeb88DppPkkDq5cxqX0k7MccxTUKww+ezV3g4yrncGN4D1br5y+LJhVYFRGKsROyjmvG1ZSuaqEmkrNlIIC/bcAOvSXVAAAAA=",
+		},
+		mobile: {
+			subject: "Google Pixel smartphone",
+			credit: "SimonWaldherr · CC BY-SA 4.0 · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Google_Pixel_8_Pro.jpg",
+			url: "data:image/webp;base64,UklGRsQEAABXRUJQVlA4ILgEAABQFgCdASpsAFgAPpVCnUqlo6KhpvcbILASiWIAzb5QwF/yPLv9amcEIvb27f+foW4jNl/VNIvEZmXdESoKr8I26Mvmtu00zECJCLbSN1eF8fOf74Unr3bcOwBZfGqiqpEZoW0IgHgMK0orGz2nM45ytJLwmQkrDTiBkE57X17ijuxe7f6IkuPRrR/u+o3tfySut4Jn1enj6MVYZ/XVvV9S5bQp//6qPqAAGZh7/XALF+igk2/8kLCg1CQAAP75uvpUthB7IsIyggRpKb8H4UJeIcapLCbBbezbajqLcfNmU+agysGr6nrUqlbyYohUpCKS93cMGFOL0jP39HxZfiDhCdJfBv+Mm17m17ejEeyPinHGQZpB6SuRm4cVoSyftqkbv7G+xl8u2hR/TEBQm1bFF9ZG/WLDq7BvN41VbunVSPFE8jauu4gOQPN5fnjX946sR4ZDjgKWldoXOPpHBJV75hhmFMfDQj+NDPYU79WHq0zmsoIvRHkR1/F1nXJfiE3QftUmS4MlwFyBXpG9IWPA0cEs7PmFuUVoS+lKWbbVcoTznebF6UfRQPLKwZjdmz+AQ61XPLolU+9N8+fGjXlTUEsl0iXyUalKu9c00Fo2r5PEgfHChplMHUmmc/hlFrgV5+MgsfUEDFfoehHegONO9Ro5nYefax03WJrNGmZy2pKxp1phRSS6mNrFncbzjHs580sCZ9z4TJz00Erwd4JM+BR5cfyIoYAn0TFhZmB1DcHQCEcVKekWFW3oqjKMKx4SYv5iHrGQpCDamN1yN25Sk5qlUe98y8R50SJIprTcB/QYTfdvZtkdd3BLxrepcUhnqmuw5++EFgat0owBHnP57vNWFuSOq64+HMIJ9GHlq5OcOrHo2dHs2o0mp+gwMgQrYRQAyjb9UeDjw6hAyUsLy+8P/RLH9EKs3dZKSKuod8HX+LDGtkvrLxkP3tN3S62QxjWpIZoDn2sE7EUxeuilPO8aZtPaNDEt5e+xK1qR3sDDoHh3MowSJ09Ds2Q1IfgtCppbity8CZRCfbyo8WjDuJSaWv8yXMQJHbjfGVMIdVMd4hVBX2ys1bPGjnnek4FaWo+1lK3pBGtit44BwTs8UUL/+Uvi/e1GijZG/b4z84mRKoOCb3oeMxAI0sV3qaqEtNBhnPclJBEaHYpdxg5Mxxn32JfXcK8WKYyeZ6BpwnRvyMlhhOP3/D65a3wIxvtyktEKzSs68fXnPrL5mFAVn7QZ4y4f2sl4OE1OrpnBxjY54GEQKtOEaQBvYYXIArGdm4v2kRf5SXg4TU7EZt4h3grpglFsr2mQJFUcdfQaA5UxweGEBNGOZ804tkyyCkjP9sTG8ZqG+IKQPu19KwNtS+bnlWxKgA57NEspQ/wQ1wyhZy7KV5doHEgLcKl3+bKnxgtEYicnZItB9eCIy06RqKnzyrbh/tblIgq84dxJlaFyPg921/HO3lRN4nPTbpW/U5iSPZ/8LGcopUS5F8SunYdMU3B7Mw5vehlg9VAawSFHyfKoxRgOMrNPB1YVuANmWzNPkStZfolhZtaWqmKvWf+qWq3rWeskyb4PYbMJgb+3tLu4zO/gERk6wWRNLzHj9jLG8FfAAA==",
+		},
+		hardware: {
+			subject: "Microprocessor die",
+			credit: "Pauli Rautakorpi · CC BY 3.0 · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Intel_80286_die.JPG",
+			url: "data:image/webp;base64,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",
+		},
+		rust: {
+			subject: "Rust source code",
+			credit: "Slashme · CC0 · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:RustCodeOnScreen.jpg",
+			url: "data:image/webp;base64,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",
+		},
+		software: {
+			subject: "Source code",
+			credit: "Martin Vorel · CC BY-SA 4.0 · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Programming_code.jpg",
+			url: "data:image/webp;base64,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",
+		},
+		astronomy: {
+			subject: "Radio telescope",
+			credit: "NASA · Public domain · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:KSC_radio_telescope.jpg",
+			url: "data:image/webp;base64,UklGRlwFAABXRUJQVlA4IFAFAACQFwCdASpsAFgAPpVEnEmlpCKiJ7TceLASiWMAx9xt1SEpvlbgNb2MhMtvg7pYmfyx7hof6qHvX0Qx9izYaILiU2AXKtJVNI3aPfRmYlk9iz3FziriaszGiseDSLUkuts3iL8Ux83P7CxOu8NWtOy+uAT1CyiNrPAnqfFwkNBVeFmA9g2MvnglN+KDH7307icmQb+S2O0Bt/6dSohflN55H39PHagXZUv9D1p66nHoA09XKJ0xAk2JmgmFFZaLi5eIiT3mAAD+94H2usrSJK/mlQ/31tMeI3o1EZqd2hT5VJMifEOYDXv+Rj19LWGwZOe4/TlNjyqNLL8sil/mvbpt8IC+J7HKm4VhH9+k6gYk0AlEaNRaw+DOXFOtoGEUkNKFJRcfVRnzwRMo8ikG1uJAiXrlxwf0S+3F/O94hkYVtqXSBuhV77sArDnKRlCzFZDuv8XqtG0yJsSglfm2oZng6O/nAONU3ldqxIanrf1KJec7t1l02mVf9Yaaj+bklFy3497Xy0c5GvMvpfKH6NY71WpiM3vTZr3e/dAiK9lAersXxRIuy9p0BoRbryur9d8ZjEBWl0E2NpSS1IY563qsPz6emt7DTa6dCkJ+45ibJRs6cI6pbrMh/59i/CZZRo028nb3HHHbo63RMh4or4i58ru2Q3ddl79r/gvIyV+N9WUA+F6k8WxMwYWgoIXfaSK+axpYybHwLL+XK984IGhffpNFfQEjOQBSufvChVsBGYXQ5DY3BCo1Hp5CO3N2Wqan/30kcO4RMBQ3Z6NTg3y5iQQ/fGTnL/9pF6wsMiYApKeaYYFJCFHCPUUK75BqRTWYkobRww8u9d46OAB3INr5GbWj48iaOrJUotMPOtSlyceA6syhgNl30bHfCS3VvrheaXwdKc9x7exMM3gQUvjoLXHmPQ48Utdghf+ghA0u0T6E+4P4s4JxYQPTGrK3/Y2h4LgRNSFOycn0QN18AkArsnxRkhjoc3iEgFkrzpaX6HyT/mpKVAnAClfVE0N9q317Nf9msnlXeNFMmz+nmdKfgjlh5d/Dp4fyAiG8ahR0voksaBKA8+22/nY/m+Dj9QRsN7YBgd+LeCuOPN62Vzz0DNv8DRsybv708EHNfaxPXIMnHV5CLVXceoO0mOP34So2mrvWqsHg0pJh1TAmiZPsDBk5d/L1yOP4WbmVefTNL9aQwDCOQIVOq6fkprqCRH2lXchLQFYsKSX4GhQlEV0uHR3CbwBbUMauOu+tCZ/MvDI6b/lFNjG6Y5hcf4FQPM5uBMAcx7sIu3OcNVArqvz0A1+TWl+uFErlNtrn5fhOLkATnGvZ/VaKdKmddloC0Hr5f89C/ZPoEJSpP7zNm+vRJXiv9LpwZmvF+BiYLjfqfdEU/aGjDwNKr47fguLPvii+FGlVCruZ72W3PtnkWTPGQ1UuuaoAwMppA9XuqgBSrVDJma1CCOaImq82mUr9yOZSLwZYNSRpDAeFd6klN8+sgHZdS/Bd8EdTZH9Wi8s2A06hvcTQUkgjsOwTB6wD9Ga/o3F86hl7xVOAs/tmF88J0lHSIACagvFDrJmuvYO2M3jAbp7stF2VUQbJhCPWN1J4E4I9W8iFvHm/D65v3w1R4XQoC3TFBTnzbZCCP0c8oHvMqFS44AL+SelUID8qWQAWzDdNBik51zrtHNdl8SLuoqiVWsilrLUpxGDmjimG2DtneW5bb/86QLQfVIyJYJzci0i4ATjtCut1IHvvZxOnk8h/1xfdW5FkUR5a1FzIoO8Fp93+fSlmFvgRintPznh2zDIfy/W2P5pwauaN0EAA",
+		},
+		ceramics: {
+			subject: "Glazed pottery",
+			credit: "Hunt Museum · Public domain · cropped thumbnail",
+			source: "https://commons.wikimedia.org/wiki/File:Green-glazed_pottery_bowl.jpg",
+			url: "data:image/webp;base64,UklGRu4CAABXRUJQVlA4IOICAAAwEgCdASpsAFgAPpVEnkolo6MhqrW5uLASiWMA0YXEsc5frd15eDbpEEcVxj/mVeebnhVwtnEXPDQ7N7VXT6xYnMqcz30Rqsf7WtKUy2Jnplw7wbN/3KS923JaZnGhv+YWv8cpSKo1LLlFDJ8v+ILLxQG0m6NWvy9XOkRTjS57cwZVBpjbHqIVgeXftoEiAtPTK/oC256ZPScAAP73jR2DhSaikPE2D8XYz0aj4wZw8a3FuttRj5O5l39Ps2a2o1/vGCCs6/R4UX7BRDs+fRfh2xc+vXy3yYY1gjnbH5pcLW806ao5Ouv2Pz5aBTJhspeiKxmDbMgEg2SNBO751vAGXeqe+oIWEUS7ozfWvZ3Czh5MCRWDCJB2npcGYcJneuKF7UUBA27beYsUjqCFW6GKdiMsB1GqBkxwZgrRn6WGwEb1iMXwvxUwnNGVlIeFwAtcd9ukE9DfSa62ispXBvB0C1mM60VUN5sSpKob9D1BxbVvMtofhtGGzGzYPcQdP0nH7FY6HxXAI4ivVFmlLgJ12A8wMosCLTL9hhKfrJOne6wSdgUM5rBpGtJhAA1wpM8mrmAnxdnZIuxvvq2pzbAu68FVVtdarGRw5NXJ/dBp1jB4DyIb0ugTtxj7V4c5+jIJ4IprwSwHDQ+Wvwut5J4yVslIzOz9dnLn0W/JsgWYRh1HYTWwtdBFXorTJerhB+pPUUOQ5gzXWMqjp/iyJJ2OI8gdfqvSPVdbIbfkT3nllJVQMFs4lO5RFluqLDA/n7YU4E81wPRbhPzPcDvqZJ5E+fuQ2FN0I7PayldRrvyqC09aNZjv73vaxnojdXCuFa3D5q3ogHuQMyE4Kcc+FJb/5AUpZ79Ie6aYGZAOlkeOE1kEv+sJut+FcoyrX/LKs43Aztogjet9tlSDa8xtN9M+pKI/AIuTCQNePxOb+3apuBe0Jl+I4PCdwde3BkOAUuq7SFjv5tlnUnfdSgB4KxcQAAA=",
+		},
+	};
+	const APP_TOPIC_PHOTO_THEMES = [
+		["internetArchive", /\binternet archive\b/i],
+		["markets", /\b(?:ipos?|wall street|stock (?:exchange|market|sell-off|prices?|trading)|securities and exchange commission|sec (?:investigation|probe|filing)|(?:financial|quarterly) earnings|(?:financial|corporate|forensic) accounting|accounting (?:rules|standards|fraud))\b/i],
+		["library", /\b(?:(?:web|digital|national|historical) archives?|(?:public|university|research) librar(?:y|ies)|library (?:collections?|shelves)|bookshelves|book collections?)\b/i],
+		["ceramics", /\b(?:ceramics?|pottery|kilns?|(?:celadon|ceramic) glazes?)\b/i],
+		["astronomy", /\b(?:astronom\w*|observator(?:y|ies)|telescopes?|exoplanets?|ringed planets?)\b/i],
+		["games", /\b(?:grand theft auto|video games?|game consoles?|gaming|xbox|playstation|nintendo|steam machine|steam deck)\b/i],
+		["mobile", /\b(?:grapheneos|android|ios (?:app|device|update)|smartphones?|mobile phones?|google pixel|iphones?)\b/i],
+		["hardware", /\b(?:microprocessors?|semiconductors?|chipsets?|gpus?|graphics cards?|cpu|data cent(?:er|re)s?)\b/i],
+		["software", /\b(?:source code|software|programming|compilers?|version control|extension permissions|browser privacy|browser extensions?|passkeys?|authentication|vibe[- ]?cod\w*|rust-lang|jujutsu[- ]vcs|jj-vcs)\b/i],
+	];
+	const APP_TOPIC_SOFTWARE_EVIDENCE = new Map([
+		["rust", /\b(?:rust[- ]lang|rust (?:code|crates?|programming language)|(?:algorithms?|incrementality|written|rewritten|implemented|compiled) in rust)\b/i],
+		["jujutsu", /\b(?:jj|git|version control)\b/i],
+	]);
+	const APP_TOPIC_ICONS_BY_THEME = {
+		astronomy: "science", games: "entertainment", hardware: "technology", markets: "business",
+		mobile: "technology", software: "technology",
+	};
+	const WIKI_TOPIC_RELATED_SUBJECTS = [
+		["Distributed version control", /\b(?:version control|revision control|git rebase)\b/i],
+		["End-to-end encryption", /\b(?:end-to-end encryption|encrypted chat|signal (?:app|messenger|(?:now )?blocks?))\b/i],
+		["Instant messaging", /\b(?:instant messaging|encrypted chat|signal (?:app|messenger|(?:now )?blocks?))\b/i],
+		["Screenshot", /\b(?:screenshots?|screen capture)\b/i],
+		["Email", /\b(?:mailchimp|e-?mail marketing)\b/i],
+		["Wall Street", /\b(?:ipos?|initial public offerings?|wall street|stock exchanges?)\b/i],
+		["Game controller", /\b(?:grand theft auto|video games?|game consoles?)\b/i],
+		["Proof assistant", /\b(?:lean proof|formal proofs?|theorem provers?)\b/i],
+	];
+	const unavailableAppTopicPhotos = new Set();
+	let wikiTopicPhotos;
+	let wikiTopicPhotoQueue = Promise.resolve();
+	let wikiTopicPhotoRetryAt = 0;
+	let sharedTopicCache;
+	let sharedTopicRequest;
+
+	function canonicalSharedTopicURL(value) {
+		try {
+			const url = new URL(value);
+			if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.href.length > 2048) return null;
+			url.hash = "";
+			for (const key of new Set(url.searchParams.keys())) {
+				if (/^(utm_.+|fbclid|gclid|mc_cid|mc_eid)$/i.test(key)) url.searchParams.delete(key);
+			}
+			url.searchParams.sort();
+			return url;
+		} catch {
+			return null;
+		}
+	}
+
+	function sharedTopicURLKey(value) {
+		const url = canonicalSharedTopicURL(value);
+		return url ? url.host + url.pathname.replace(/\/$/, "") + url.search : "";
+	}
+
+	function parseSharedTopicImage(image) {
+		const { url, source, credit, subject } = image || {};
+		if ([url, source].some((value) => typeof value !== "string" || value.length > 2048) ||
+			[credit, subject].some((value) => typeof value !== "string" || !value.trim() || value.length > 512)) return null;
+		try {
+			const file = new URL(url);
+			const details = new URL(source);
+			if (!["https://upload.wikimedia.org", "https://thumb.wikimedia.org"].includes(file.origin) ||
+				!file.pathname.startsWith("/wikipedia/commons/") || file.username || file.password || file.search || file.hash ||
+				details.origin !== "https://commons.wikimedia.org" || !details.pathname.startsWith("/wiki/File:") ||
+				details.username || details.password || details.search || details.hash) return null;
+			return { url: file.href, source: details.href, credit: credit.trim(), subject: subject.trim() };
+		} catch {
+			return null;
+		}
+	}
+
+	function isSharedTopicId(id) {
+		return typeof id === "string" && id.length <= 272 && /^(?:topic|story|coverage):[^\s\x00-\x1f]+$/u.test(id);
+	}
+
+	function parseSharedTopic(topic) {
+		if (!isSharedTopicId(topic?.id) || typeof topic.kind !== "string" || !topic.id.startsWith(topic.kind + ":") ||
+			typeof topic.label !== "string" || !topic.label.trim() || topic.label.length > 512) return null;
+		return {
+			id: topic.id, label: topic.label.trim(), kind: topic.kind,
+			aliases: normalizeTopicLabels(Array.isArray(topic.aliases) ? topic.aliases.slice(0, 24) : []),
+			image: parseSharedTopicImage(topic.image), curated: topic.curated === true, imageCurated: topic.imageCurated === true,
+		};
+	}
+
+	function parseSharedTopicIndex(data) {
+		if (data?.version !== 1 || !Number.isFinite(Date.parse(data.generatedAt)) ||
+			!Array.isArray(data.topics) || !Array.isArray(data.pages) || data.pages.length > SHARED_TOPIC_MAX_LINKS) return null;
+		const topics = new Map();
+		const imagesBySubject = new Map();
+		for (const entry of data.topics) {
+			const topic = parseSharedTopic(entry);
+			if (!topic) continue;
+			const { id, image } = topic;
+			if (image) {
+				const key = topicFilterKey(image.subject);
+				if (!imagesBySubject.has(key)) imagesBySubject.set(key, []);
+				const images = imagesBySubject.get(key);
+				if (!images.some(({ source }) => source === image.source)) images.push(image);
+			}
+			topics.set(id, topic);
+		}
+		const pages = new Map();
+		const posts = new Map();
+		const topicPages = new Map();
+		const reviewedPages = new Set();
+		for (const page of data.pages) {
+			if (typeof page?.key !== "string" || !page.key || page.key.length > 2048 || !Array.isArray(page.topicIds)) continue;
+			const ids = [...new Set(page.topicIds.filter((id) => topics.has(id)))];
+			if (page.reviewed === true) reviewedPages.add(page.key);
+			if (ids.length || reviewedPages.has(page.key)) pages.set(page.key, ids);
+			for (const id of ids) {
+				if (!topicPages.has(id)) topicPages.set(id, new Set());
+				topicPages.get(id).add(page.key);
+			}
+			if (Array.isArray(page.posts)) {
+				posts.set(page.key, page.posts.slice(0, 240).filter((post) => Array.isArray(post) &&
+					typeof post[0] === "string" && post[0].length <= 220 && parseSourceKey(post[0]) &&
+					Number.isSafeInteger(post[1]) && post[1] >= 0));
+			}
+		}
+		return { topics, pages, posts, topicPages, reviewedPages, imagesBySubject, generatedAt: Date.parse(data.generatedAt) };
+	}
+
+	function loadSharedTopicIndex() {
+		if (sharedTopicCache?.until > Date.now()) return Promise.resolve(sharedTopicCache.index);
+		return sharedTopicRequest ??= (async () => {
+			const saved = await load(SHARED_TOPIC_INDEX_KEY, null);
+			const stored = parseSharedTopicIndex(saved?.data);
+			const age = Date.now() - saved?.fetchedAt;
+			if (stored && saved.revision === SHARED_TOPIC_CACHE_REVISION && age >= 0 && age < SHARED_TOPIC_CACHE_MS) {
+				sharedTopicCache = { index: stored, until: saved.fetchedAt + SHARED_TOPIC_CACHE_MS };
+				return stored;
+			}
+
+			const requestIndex = (url) => requestResource({
+				url, method: "GET", anonymous: true, headers: { Accept: "application/json" },
+			}, 5_000);
+			const primary = await requestIndex(SHARED_TOPIC_INDEX_URL);
+			const response = primary?.status ? primary : await requestIndex(SHARED_TOPIC_FALLBACK_URL);
+			const fallback = stored || sharedTopicCache?.index || null;
+			let data;
+			if (response?.status === 200 && response.responseText?.length <= 2_000_000) {
+				try { data = JSON.parse(response.responseText); } catch {}
+			}
+			const index = parseSharedTopicIndex(data);
+			if (index && (!fallback || index.generatedAt >= fallback.generatedAt)) {
+				const fetchedAt = Date.now();
+				sharedTopicCache = { index, until: fetchedAt + SHARED_TOPIC_CACHE_MS };
+				save(SHARED_TOPIC_INDEX_KEY, { revision: SHARED_TOPIC_CACHE_REVISION, fetchedAt, data }).catch(console.error);
+			} else {
+				sharedTopicCache = { index: fallback, until: Date.now() + 60_000 };
+			}
+			return sharedTopicCache.index;
+		})().finally(() => { sharedTopicRequest = null; });
+	}
+
+	function parseSharedTopicCoverage(data) {
+		const topic = parseSharedTopic(data?.topic);
+		if (data?.version !== 1 || !topic || !Array.isArray(data.links) || data.links.length > SHARED_TOPIC_MAX_LINKS) return null;
+		const date = (value) => {
+			const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+			return Number.isFinite(parsed) ? parsed : null;
+		};
+		const generatedAt = date(data.generatedAt);
+		const nextOffset = data.nextOffset ?? null;
+		if (data.generatedAt !== undefined && generatedAt === null || nextOffset !== null &&
+			(!Number.isSafeInteger(nextOffset) || nextOffset < 1 || nextOffset >= SHARED_TOPIC_MAX_LINKS || generatedAt === null)) return null;
+		const links = new Map();
+		for (const link of data.links) {
+			const address = canonicalSharedTopicURL(link?.url);
+			if (!address || links.has(address.href) || !Array.isArray(link.posts) || typeof link.title !== "string" || !link.title.trim()) continue;
+			const posts = new Map();
+			for (const post of link.posts.slice(0, 240)) {
+				const url = canonicalSharedTopicURL(post?.url);
+				const key = typeof post?.id === "string" && post.id.length <= 220 && parseSourceKey(post.id);
+				if (!url || !key || key.source !== post.source || posts.has(post.id)) continue;
+				posts.set(post.id, {
+					id: post.id, source: key.source, sourceId: key.id, url: url.href,
+					title: typeof post.title === "string" ? post.title.trim().slice(0, 512) : "",
+					community: typeof post.community === "string" ? post.community.trim().slice(0, 100) : "",
+					postedAt: date(post.postedAt), comments: Number.isSafeInteger(post.comments) && post.comments >= 0 ? post.comments : 0,
+				});
+			}
+			links.set(address.href, {
+				url: address.href, title: link.title.trim().slice(0, 512), domain: hostLabel(address.href), postedAt: date(link.postedAt),
+				posts: [...posts.values()],
+			});
+		}
+		return { topic, links: [...links.values()], generatedAt, nextOffset };
+	}
+
+	async function requestSharedTopicCoverage(id, signal) {
+		if (!isSharedTopicId(id)) return { status: "missing" };
+		const unavailable = { status: "unavailable" };
+		const links = new Map();
+		let first;
+		let offset = 0;
+		do {
+			const url = new URL(SHARED_TOPIC_COVERAGE_URL);
+			url.searchParams.set("id", first?.topic.id || id);
+			if (offset) url.searchParams.set("offset", String(offset));
+			const response = await requestResource({ url: url.href, method: "GET", anonymous: true,
+				headers: { Accept: "application/json" } }, 5_000, signal);
+			if (signal.aborted) return null;
+			if (!offset && (response?.status === 404 || response?.status === 410)) return { status: "missing" };
+			if (response?.status !== 200 || !response.responseText || response.responseText.length > 8_000_000) return unavailable;
+			let page;
+			try { page = parseSharedTopicCoverage(JSON.parse(response.responseText)); } catch {}
+			if (!page || page.nextOffset !== null && page.nextOffset <= offset ||
+				first && (page.topic.id !== first.topic.id || page.generatedAt !== first.generatedAt)) return unavailable;
+			first ??= page;
+			for (const link of page.links) {
+				if (links.has(link.url) || links.size === SHARED_TOPIC_MAX_LINKS) return unavailable;
+				links.set(link.url, link);
+			}
+			offset = page.nextOffset;
+		} while (offset !== null);
+		return { links: [...links.values()] };
+	}
+
+	function appTopicExtraIndexIds(group, index = sharedTopicCache?.index, allowed = () => true) {
+		const known = new Set([...group.rows, ...group.extraRows].map((row) => sharedTopicURLKey(appTopicRowURL(row))));
+		const ids = [];
+		for (const id of new Set([group.id, ...(group.equivalentIds || [])])) {
+			const extra = [...(index?.topicPages.get(id) || [])].filter((key) => !known.has(key) && allowed(key));
+			if (!extra.length) continue;
+			ids.push(id);
+			for (const key of extra) known.add(key);
+		}
+		return ids;
+	}
+
+	function clearAppTopicExtra() {
+		appState.topicExtra?.request?.abort();
+		appState.topicExtra = null;
+		appState.topicExtraRows = null;
+	}
+
+	async function revealAppTopicExtra(ids, button) {
+		const state = appState;
+		if (state.topicExtra?.request) return;
+		const extra = state.topicExtra = { links: state.topicExtra?.links || [], loaded: !ids.length };
+		const focus = button.getRootNode().activeElement === button;
+		button.disabled = true;
+		button.textContent = "Loading hidden links…";
+		if (ids.length) {
+			const request = extra.request = new AbortController();
+			const results = await Promise.all(ids.map((id) => requestSharedTopicCoverage(id, request.signal)));
+			if (appState !== state || state.topicExtra !== extra) return;
+			extra.request = null;
+			const links = new Map(extra.links.map((link) => [link.url, link]));
+			for (const result of results) for (const link of result?.links || []) links.set(link.url, link);
+			extra.links = [...links.values()];
+			extra.loaded = results.every((result) => result?.links || result?.status === "missing");
+			extra.failed = !extra.loaded;
+		}
+		await renderAppList();
+		if (focus && appState === state && state.topicExtra === extra && !state.ui.shadow.activeElement) {
+			state.ui.shadow.querySelector("#app-list-body [data-topic-extra] .browse-title-link, #app-list-body .app-topic-more")?.focus({ preventScroll: true });
+		}
+	}
+
+	async function appendAppTopicExtra(list, isCurrent) {
+		const state = appState;
+		const group = state.activeListTopic;
+		if (!group) return;
+		const [hidden, settings, queue, looks] = await Promise.all([
+			loadHiddenStoryKeys(), loadSettings(), loadQueue(), state.topicExtra ? loadLooks() : null,
+		]);
+		if (!isCurrent() || state.activeListTopic !== group) return;
+		const index = sharedTopicCache?.index;
+		const muted = new Set(settings.hiddenTopics.map(topicFilterKey));
+		const mutedTopic = (id) => {
+			const topic = index?.topics.get(id);
+			return topic && readerTopicLabels(topic).some((label) => muted.has(topicFilterKey(label)));
+		};
+		const allowed = (key) => !hidden.has(normalizeURL("https://" + key)) && !index?.pages.get(key)?.some(mutedTopic);
+		const matchesMuted = readerHiddenTopicMatcher(settings.hiddenTopics, muted);
+		const canShow = (entry) => !isStoryHidden(entry.story, hidden) && allowed(sharedTopicURLKey(entry.story.url)) && !matchesMuted(entry);
+		const local = group.extraRows.map((row) => row.story ? row : { story: row.discussions ? documentStory(row) : row, also: row.discussions || [] });
+		const extra = state.topicExtra;
+		const ids = appTopicExtraIndexIds(group, index, allowed);
+		if (extra) {
+			const published = extra.links.toSorted((a, b) => (b.postedAt ?? 0) - (a.postedAt ?? 0)).map((link) => {
+				const [first, ...also] = link.posts.map((post) => ({
+					id: post.sourceId, source: post.source, url: link.url, title: post.title, permalink: post.url,
+					time: (post.postedAt || 0) / 1000, descendants: post.comments, site: post.community || link.domain,
+					community: post.community.replace(/^!/, "").split("@")[0],
+				}));
+				return { story: { id: normalizeURL(link.url), ...first, url: link.url, title: link.title,
+					site: link.domain, time: (link.postedAt || 0) / 1000 }, also };
+			});
+			const seen = new Set(group.rows.map((row) => normalizeURL(appTopicRowURL(row))));
+			const queuedKeys = new Set(queue.map(queueKey));
+			const entries = state.topicExtraRows = new Map();
+			for (const entry of [...local, ...published]) {
+				const key = normalizeURL(entry.story.url);
+				if (!key || seen.has(key) || !canShow(entry)) continue;
+				seen.add(key);
+				entries.set(key, entry);
+				const row = renderBrowseRow(entry.story, list, 0, {
+					also: entry.also, look: looks?.[key], queuedKeys, hideable: true, reload: () => renderAppList(),
+				});
+				row.setAttribute("data-topic-extra", "");
+			}
+			if (entries.size) {
+				const extraCoverage = readerArticleCoverage(frontPageRowStories([...entries.values()]), settings, hidden);
+				const counts = appTopicDiscussionTotals([...state.activeTopicThreads.values(),
+					...[...entries.values()].map((row) => appTopicRowThreads(row, extraCoverage, index))]);
+				paintAppTopicCounts(state.ui.shadow.getElementById("app-list-topic-count"), { rows: [...group.rows, ...entries.values()], counts });
+				refreshSaveControls().catch(console.error);
+			}
+		}
+		if (extra?.loaded || !ids.length && !local.some(canShow)) return;
+		const nav = document.createElement("div");
+		nav.className = "browse-nav";
+		const button = document.createElement("button");
+		button.type = "button";
+		button.className = "browse-nav-link app-topic-more";
+		button.textContent = extra?.request ? "Loading hidden links…" : "Load hidden links about this topic";
+		button.disabled = Boolean(extra?.request);
+		button.onclick = () => revealAppTopicExtra(ids, button).catch(console.error);
+		if (extra?.failed) {
+			const error = document.createElement("span");
+			error.className = "app-topic-more-status";
+			error.setAttribute("role", "status");
+			error.textContent = "Couldn’t load hidden links. Try again.";
+			nav.append(error);
+		}
+		nav.append(button);
+		list.append(nav);
+	}
+
+	function topicFilterKey(label) {
+		return label.normalize("NFKC").trim().replace(/^#+\s*/, "").toLowerCase().replace(/\s+/g, " ");
+	}
+
+	function topicDisplayName(label) {
+		return label.startsWith("#") ? label : "#" + label;
+	}
+
+	function normalizeTopicLabels(value) {
+		const topics = new Map();
+		for (const label of Array.isArray(value) ? value : []) {
+			if (typeof label !== "string" || label.length > 512) continue;
+			const key = topicFilterKey(label);
+			if (key && !topics.has(key)) topics.set(key, label.trim());
+		}
+		return [...topics.values()];
+	}
+
+	function readerTopicLabels(group) {
+		return [group.label, ...(group.aliases || [])];
+	}
+
+	function readerTopicHasSubject(group) {
+		return group.kind === "topic" || Boolean(group.aliases?.length);
+	}
+
+	const READER_BROAD_TOPIC_LABELS = new Set([
+		...TOPICS.map(({ label }) => label),
+		"Animals", "Artificial intelligence", "Audio & video", "Companies", "Environment", "General",
+		"Maps & geography", "News", "Politics", "Programming",
+	].map(topicFilterKey));
+
+	function readerTopicIsSpecific(group) {
+		if (group.curated) return true;
+		const key = topicFilterKey(group.label);
+		if (READER_BROAD_TOPIC_LABELS.has(key) || group.nameOnly) return false;
+		if (group.kind !== "topic") return true;
+		const terms = readerSubjectWords(key).filter(readerSubjectWord);
+		return terms.length > 1 || group.rows.some((row) => Array.isArray(row.discussions)) &&
+			READER_SUBJECT_CUES.some(([label]) => topicFilterKey(label) === key);
+	}
+
+	function mergeReaderTopicGroups(groups, order, index) {
+		const terms = new Map();
+		const termsFor = (label) => {
+			if (!terms.has(label)) {
+				terms.set(label, new Set(readerSubjectWords(label).map((word) => word.toLowerCase())
+					.filter(readerSubjectWord).map((word) => readerSubjectTerm(word.replace(/^centre(s?)$/, "center$1")))));
+			}
+			return terms.get(label);
+		};
+		const merged = [];
+		const byLabel = new Map();
+		const byRow = new Map();
+		for (const group of groups) {
+			const key = topicFilterKey(group.label);
+			let slot = group.curated ? undefined : byLabel.get(key);
+			if (slot !== undefined) {
+				const other = merged[slot];
+				const sameStory = group.kind === "story" && other.kind === "story" && termsFor(group.label).size >= 4;
+				if (!sameStory && (group.kind !== "topic" || other.kind !== "topic") &&
+					!group.rows.some((row) => byRow.get(row)?.has(slot))) slot = undefined;
+			}
+			if (slot !== undefined && merged[slot].kind !== group.kind &&
+				(group.rows.length !== merged[slot].rows.length || group.rows.some((row) => !byRow.get(row)?.has(slot)))) slot = undefined;
+			if (slot === undefined && !group.curated) {
+				const overlaps = new Map();
+				for (const row of group.rows) {
+					for (const position of byRow.get(row) || []) overlaps.set(position, (overlaps.get(position) || 0) + 1);
+				}
+				for (const [position, shared] of overlaps) {
+					const other = merged[position];
+					if (other.curated || shared < 2 || shared / Math.max(group.rows.length, other.rows.length) < .75) continue;
+					if (group.kind !== other.kind && (shared !== group.rows.length || shared !== other.rows.length)) continue;
+					const words = termsFor(group.label);
+					const otherWords = termsFor(other.label);
+					const common = [...words].filter((word) => otherWords.has(word)).length;
+					if (!common || common !== Math.min(words.size, otherWords.size)) continue;
+					const published = index?.topicPages?.get(group.id);
+					const otherPublished = index?.topicPages?.get(other.id);
+					if (published && otherPublished) {
+						const commonPages = [...published].filter((key) => otherPublished.has(key)).length;
+						if (commonPages / Math.max(published.size, otherPublished.size) < .75) continue;
+					}
+					slot = position;
+					break;
+				}
+			}
+			if (slot === undefined) {
+				slot = merged.length;
+				merged.push(group);
+			} else {
+				const other = merged[slot];
+				const story = Number(group.kind === "story") - Number(other.kind === "story");
+				const published = Number(Boolean(index?.topics.has(group.id))) - Number(Boolean(index?.topics.has(other.id)));
+				const primary = story > 0 || !story && (published > 0 ||
+					!published && termsFor(group.label).size > termsFor(other.label).size) ? group : other;
+				const aliases = normalizeTopicLabels([...readerTopicLabels(other), ...readerTopicLabels(group)])
+					.filter((label) => topicFilterKey(label) !== topicFilterKey(primary.label));
+				const equivalentIds = [...new Set([other.id, group.id, ...(other.equivalentIds || [])])];
+				merged[slot] = { ...primary, image: primary.image || other.image || group.image, aliases, equivalentIds,
+					rows: [...new Set([...other.rows, ...group.rows])].sort((a, b) => order.get(a) - order.get(b)) };
+			}
+			if (!group.curated) byLabel.set(key, slot);
+			for (const row of group.rows) {
+				if (!byRow.has(row)) byRow.set(row, new Set());
+				byRow.get(row).add(slot);
+			}
+		}
+		return merged;
+	}
+
+	function readerTopicGroups(rows, urlFor, localGroups, index, coverage) {
+		const buckets = new Map();
+		const assigned = new Set();
+		for (const row of rows) {
+			const ids = index?.pages.get(sharedTopicURLKey(urlFor(row)));
+			for (const id of ids || []) {
+				if (!buckets.has(id)) buckets.set(id, []);
+				buckets.get(id).push(row);
+				const topic = index.topics.get(id);
+				if (topic.kind !== "coverage" && !READER_BROAD_TOPIC_LABELS.has(topicFilterKey(topic.label))) assigned.add(row);
+			}
+		}
+		const groups = [];
+		for (const topic of index?.topics.values() || []) {
+			if (buckets.has(topic.id)) groups.push({ ...topic, rows: buckets.get(topic.id) });
+		}
+		const order = new Map(rows.map((row, position) => [row, position]));
+		const existing = new Map(groups.map((group) => [group.id, group]));
+		for (const group of localGroups) {
+			if (index?.topics.get(group.id)?.curated) continue;
+			const shared = index?.topics.has(group.id);
+			const match = existing.get(group.id);
+			if (match && group.nameOnly) match.nameOnly = true;
+			const visible = group.rows.filter((row) => order.has(row) && (!shared || !assigned.has(row)));
+			if (!visible.length) continue;
+			if (match) {
+				match.rows = [...new Set([...match.rows, ...visible])].sort((a, b) => order.get(a) - order.get(b));
+			}
+			else {
+				const local = { ...group, rows: visible };
+				groups.push(local);
+				existing.set(local.id, local);
+			}
+		}
+		if (coverage) groups.push(...readerUnindexedStoryGroups(rows, urlFor, coverage, index, localGroups));
+		return mergeReaderTopicGroups(groups, order, index);
+	}
+
+	function readerStoryLead(rows) {
+		const candidates = rows.map((row) => {
+			const title = String((row.story || row).title || appTopicRowURL(row)).trim();
+			return { title, terms: readerStoryTerms(title) };
+		});
+		const frequency = new Map();
+		for (const { terms } of candidates) for (const term of terms) frequency.set(term, (frequency.get(term) || 0) + 1);
+		return candidates.map(({ title, terms }) => ({
+			title, score: [...terms].reduce((sum, term) => sum + frequency.get(term) - 1, 0) -
+				(/(?:\.{3}|…)$/.test(title) ? candidates.length : 0),
+		})).sort((a, b) => b.score - a.score || a.title.length - b.title.length)[0].title;
+	}
+
+	function readerUnindexedStoryGroups(rows, urlFor, coverage, index, subjects) {
+		const available = new Map();
+		for (const row of rows) {
+			const url = urlFor(row);
+			const key = normalizeURL(url);
+			const sharedKey = sharedTopicURLKey(url);
+			const published = index?.reviewedPages.has(sharedKey) || index?.pages.get(sharedKey)?.some((id) => {
+				const topic = index.topics.get(id);
+				return topic?.curated || topic?.kind === "story" && index.topicPages.get(id)?.size > 1;
+			});
+			if (key && !published) available.set(key, row);
+		}
+		const remaining = new Map(available);
+		const links = new Map();
+		const neighbors = (key) => {
+			if (!links.has(key)) {
+				links.set(key, new Set(relatedReaderArticles(coverage, urlFor(available.get(key)), available.size, readerStorySimilarity)
+					.map(({ story }) => normalizeURL(story.url)).filter((url) => available.has(url))));
+			}
+			return links.get(key);
+		};
+		const groups = [];
+		for (const key of remaining.keys()) {
+			const members = [key];
+			for (const other of neighbors(key)) {
+				if (remaining.has(other) && members.every((member) => neighbors(member).has(other))) members.push(other);
+			}
+			if (members.length < 2) continue;
+			const chosen = members.map((url) => remaining.get(url));
+			const memberSet = new Set(chosen);
+			const aliases = normalizeTopicLabels(subjects.filter((subject) =>
+				subject.rows.filter((row) => memberSet.has(row)).length >= 2 &&
+				!READER_BROAD_TOPIC_LABELS.has(topicFilterKey(subject.label))).flatMap(readerTopicLabels)).slice(0, 12);
+			groups.push({
+				id: "reader-story:" + members.toSorted()[0], kind: "story", label: readerStoryLead(chosen), aliases, rows: chosen,
+			});
+			for (const url of members) remaining.delete(url);
+		}
+		return groups;
+	}
+
+	async function readerFrontPageTopicGroups(rows, coverage, { cachedOnly = false, includeStories = false, index } = {}) {
+		if (!rows.length) return [];
+		if (index === undefined) {
+			index = cachedOnly
+				? sharedTopicCache?.index || parseSharedTopicIndex((await load(SHARED_TOPIC_INDEX_KEY, null))?.data)
+				: await loadSharedTopicIndex();
+		}
+		const localGroups = readerStorySubjectGroups(rows, ({ story, also }) => [story, ...(also || [])], coverage, index);
+		return readerTopicGroups(rows, (row) => row.story.url, localGroups, index, includeStories ? coverage : null);
+	}
+
+	async function loadReaderFrontPageTopicGroups(settings, options) {
+		const [snapshot, hiddenKeys] = await Promise.all([loadFrontPages({ settings, cachedOnly: true }), loadHiddenStoryKeys()]);
+		const rows = snapshot.rows.filter((row) => !isStoryHidden(row.story, hiddenKeys));
+		const coverage = readerArticleCoverage(frontPageRowStories(rows), settings, hiddenKeys);
+		return readerFrontPageTopicGroups(rows, coverage, options);
+	}
+
+	function readerHiddenTopicMatcher(hiddenTopics, hiddenKeys) {
+		const cues = READER_SUBJECT_CUES.filter(([label]) => hiddenKeys.has(topicFilterKey(label))).map(([, pattern]) => pattern);
+		const pairs = hiddenTopics.filter((label) => label.includes(" · "))
+			.map((label) => readerSubjectWords(label).map((word) => readerSubjectTerm(word.toLowerCase())));
+		const phrases = hiddenTopics.filter((label) => !label.includes(" · ") && !label.includes("/"))
+			.filter((label) => !TOPICS.some((topic) => topicFilterKey(topic.label) === topicFilterKey(label)))
+			.map((label) => readerSubjectWords(label).join(" ").toLowerCase())
+			.filter(Boolean);
+		return ({ story, also }) => {
+			const { titles, description, subjects } = readerStorySubjectEvidence([story, ...(also || [])]);
+			const labels = [readerNamedPageSubject(story.url), readerPublisherSubject(story.url), ...subjects];
+			if (labels.some((label) => hiddenKeys.has(topicFilterKey(label)))) return true;
+			if (!cues.length && !phrases.length && !pairs.length) return false;
+			const texts = [...titles, ...readerSubjectPaths(story.url), description];
+			if (cues.some((pattern) => pattern.test(texts.join(" ")))) return true;
+			const words = texts.map((text) => readerSubjectWords(text).map((word) => word.toLowerCase()));
+			if (phrases.length && words.some((parts) => {
+				const text = " " + parts.join(" ") + " ";
+				return phrases.some((phrase) => text.includes(" " + phrase + " "));
+			})) return true;
+			if (!pairs.length) return false;
+			const terms = new Set(words.flat().map(readerSubjectTerm));
+			return pairs.some((pair) => pair.length === 2 && pair.every((term) => terms.has(term)));
+		};
+	}
+
+	function filterReaderTopicRows(rows, hiddenTopics, groups, coverage) {
+		if (!hiddenTopics.length || !rows.length) return rows;
+		const hidden = new Set(hiddenTopics.map(topicFilterKey));
+		const muted = new Set(groups.filter((group) => readerTopicHasSubject(group) && readerTopicLabels(group).some((label) => hidden.has(topicFilterKey(label))))
+			.flatMap((group) => group.rows));
+		const hiddenTags = TOPICS.filter(({ label }) => hidden.has(topicFilterKey(label))).map(({ id }) => id);
+		const matchesHiddenSubject = readerHiddenTopicMatcher(hiddenTopics, hidden);
+		const visible = rows.filter((row) => {
+			const tags = coverage.articles.get(normalizeURL(row.story.url))?.tags;
+			return !muted.has(row) && !hiddenTags.some((tag) => tags?.has(tag)) && !matchesHiddenSubject(row);
+		});
+		return visible.length === rows.length ? rows : visible;
+	}
+
+	async function readerFrontPageTopics(rows, coverage, hiddenTopics, grouped = false) {
+		if (!grouped && !hiddenTopics.length) return { rows, groups: null };
+		const cachedOnly = !grouped && hiddenTopics.every((label) =>
+			TOPICS.some((topic) => topicFilterKey(topic.label) === topicFilterKey(label)));
+		const groups = await readerFrontPageTopicGroups(rows, coverage, { cachedOnly, includeStories: grouped });
+		return { rows: filterReaderTopicRows(rows, hiddenTopics, groups, coverage), groups };
+	}
+
+	async function appSavedTopicProjection(rows, urlFor, localGroups, coverage, available = rows) {
+		const { topicsMode, listTopic } = appState;
+		if (rows.length < 2 && !listTopic) return { rows };
+		const project = async () => {
+			const [index, discoveries] = await Promise.all([loadSharedTopicIndex(), load(DISCOVERY_CACHE_KEY, null)]);
+			return appTopicProjection(rows, readerTopicGroups(available, urlFor, localGroups(index), index, coverage), listTopic, coverage,
+				index, keptDiscoveries(discoveries, Date.now()), available);
+		};
+		return topicsMode ? project() : { rows, tabCheck: project().then(({ topics }) => Boolean(topics.length)).catch(() => false) };
+	}
+
+	function appTopicRowURL(row) {
+		return row.story?.url || row.url;
+	}
+
+	function appTopicRowThreads(row, coverage, index, discoveries) {
+		const url = appTopicRowURL(row);
+		const identity = sharedTopicURLKey(url);
+		const key = normalizeURL(url);
+		const counts = new Map();
+		const indexed = index?.posts?.get(identity) || [];
+		const hasIndexedBlueskyThreads = indexed.some(([id]) => id.startsWith("bsky:"));
+		const record = (id, count) => {
+			if (!coverage.enabled.has(parseSourceKey(id)?.source)) return;
+			if (Number.isSafeInteger(count) && count >= 0) counts.set(id, count);
+			else if (!counts.has(id)) counts.set(id, 0);
+		};
+		const add = (story) => {
+			if (!story?.id || !story.source || !storyHasCommentCount(story) || (story.kind && story.kind !== "discussion")) return;
+			if (story.source === "bsky" && (story.topic || story.interests?.length) && !story.frontPageThread && hasIndexedBlueskyThreads) return;
+			record(sourceKey(story.source, story.id), story.descendants ?? story.commentCount);
+		};
+		for (const saved of row.discussions || []) add(saved);
+		if (!row.story) add(row);
+		for (const story of discussionViewCache.get(key) || []) {
+			if (sharedTopicURLKey(story.articleURL) === identity) add(story);
+		}
+		for (const [id, count] of indexed) record(id, count);
+		const discovery = discoveries?.[key];
+		for (const hit of discovery?.results || []) {
+			const id = sourceKey("hn", hit?.objectID);
+			if (/^\d+$/.test(String(hit?.objectID)) && sharedTopicURLKey(hit.url) === identity &&
+				(!counts.has(id) || discovery.timestamp >= (index?.generatedAt || 0))) record(id, hit.num_comments);
+		}
+		const current = !row.story && row.source === "hn" ? itemCache.get(String(row.id)) : null;
+		if (current && sharedTopicURLKey(current.url) === identity) add(hnStory(current));
+		for (const story of coverage.feedThreads?.get(identity) || []) add(story);
+		if (row.story) {
+			for (const story of [row.story, ...(row.also || [])]) add(story);
+		}
+		return counts;
+	}
+
+	function appTopicDiscussionTotals(pages) {
+		const threads = new Map();
+		for (const page of pages) {
+			for (const [id, count] of page || []) threads.set(id, Math.max(threads.get(id) || 0, count));
+		}
+		return {
+			comments: [...threads.values()].reduce((sum, count) => sum + count, 0),
+			discussions: threads.size,
+		};
+	}
+
+	function rankFrontPageTopics(topics = []) {
+		if (topics.length < 2) return topics;
+		const recentAfter = Date.now() / 1000 - READER_COVERAGE_WINDOW;
+		return topics.map((group) => {
+			const latest = Math.max(0, ...frontPageRowStories(group.rows).map(({ time }) => Number(time) || 0));
+			const publishers = new Set(group.rows.map((row) => hostLabel(appTopicRowURL(row)).replace(/^(?:(?:amp|m|mobile)\.)+/, "")).filter(Boolean)).size;
+			return { group, latest, publishers, recent: Number(latest >= recentAfter) };
+		}).sort((a, b) => b.recent - a.recent || b.publishers - a.publishers || b.latest - a.latest)
+			.map(({ group }) => group);
+	}
+
+	function appTopicProjection(rows, topicGroups, topicId, coverage, index = sharedTopicCache?.index, discoveries, availableRows = rows) {
+		if (!topicGroups) return { rows };
+		const order = new Map(rows.map((row, position) => [row, position]));
+		const available = new Set(availableRows);
+		const ranked = [];
+		const assignments = new Map();
+		for (const group of topicGroups) {
+			if (!readerTopicIsSpecific(group)) continue;
+			const priority = group.rows.length < 2 ? 0 : group.curated ? 4 : group.kind === "story" ? 3 :
+				index?.topics.has(group.id) ? (group.kind === "coverage" ? 1 : 2) : 0;
+			ranked.push({ group, priority });
+			if (priority) for (const row of group.rows) assignments.set(row, Math.max(priority, assignments.get(row) || 0));
+		}
+		const groups = [];
+		const matches = (group, id) => group.id === id || group.equivalentIds?.includes(id);
+		for (const { group, priority } of ranked) {
+			const members = group.rows.filter((row) => priority >= (assignments.get(row) || 0));
+			if (members.length === 1 && group.rows.length > 1) continue;
+			const visible = members.filter((row) => order.has(row));
+			const extraRows = members.filter((row) => available.has(row) && !order.has(row));
+			if (visible.length || matches(group, topicId) && extraRows.length) groups.push({ ...group, rows: visible, extraRows });
+		}
+		groups.sort((a, b) => Number(b.rows.length > 1) - Number(a.rows.length > 1) ||
+			(order.get(a.rows[0]) ?? rows.length) - (order.get(b.rows[0]) ?? rows.length));
+		const topics = groups.filter((group) => group.rows.length > 1);
+		const grouped = new Set(topics.flatMap((group) => group.rows));
+		const bar = appState?.ui.shadow.getElementById("app-list-topic");
+		const previous = topicId && bar?.dataset.topicId === topicId ? topicFilterKey(bar.dataset.topicLabel) : "";
+		let active = groups.find((group) => matches(group, topicId));
+		if (!active && previous) {
+			const exact = groups.filter((group) => topicFilterKey(group.label) === previous);
+			const matches = exact.length ? exact : groups.filter((group) =>
+				group.aliases?.some((label) => topicFilterKey(label) === previous));
+			if (matches.length === 1) active = matches[0];
+		}
+		if (active && active.rows.length < 2 && !active.extraRows.length && !appTopicExtraIndexIds(active, index).length) active = undefined;
+		let threads;
+		if (coverage && (topics.length || active)) {
+			const counted = new Set([...grouped, ...(active?.rows || [])]);
+			threads = new Map([...counted].map((row) => [row, appTopicRowThreads(row, coverage, index, discoveries)]));
+			for (const group of new Set([...topics, ...(active ? [active] : [])])) {
+				group.counts = appTopicDiscussionTotals(group.rows.map((row) => threads.get(row)));
+			}
+		}
+		return { rows: active?.rows || rows.filter((row) => !grouped.has(row)), groups, topics, active, threads };
+	}
+
+	function paintAppTopicCounts(target, group) {
+		const { comments = 0, discussions = 0 } = group.counts || {};
+		const quantity = (n, unit) => n.toLocaleString() + " " + (n === 1 ? unit : unit + "s");
+		target.textContent = quantity(comments, "comment") + " across " + quantity(discussions, "discussion") +
+			" in " + quantity(group.rows.length, "link");
+	}
+
+	function appTopicPhotoTheme(text) {
+		return APP_TOPIC_PHOTO_THEMES.find(([, pattern]) => pattern.test(text))?.[0];
+	}
+
+	function appTopicEvidence(row) {
+		const story = row.story || row;
+		return [story.title, story.description, story.url, row.look?.description,
+			...readerSubjectPaths(story.url)].filter(Boolean).join(" ");
+	}
+
+	function appTopicSoftwareSubject(group) {
+		const terms = new Set(readerTopicLabels(group).flatMap(readerSubjectWords).map((word) => word.toLowerCase()));
+		return [...APP_TOPIC_SOFTWARE_EVIDENCE].find(([name, pattern]) =>
+			terms.has(name) && group.rows.some((row) => pattern.test(appTopicEvidence(row))))?.[0];
+	}
+
+	function wikiTopicTitles(group) {
+		const label = group.label;
+		const software = appTopicSoftwareSubject(group);
+		if (software) {
+			return software === "rust" ? ["Rust (programming language)"] : ["Distributed version control"];
+		}
+		const subjects = label.split(" · ");
+		const related = WIKI_TOPIC_RELATED_SUBJECTS.filter(([, pattern]) => pattern.test(label)).map(([title]) => title);
+		const names = label.match(/\b[A-Z][A-Z\d]{2,9}\b|\p{Lu}[\p{L}\p{N}'’-]*(?: (?:of |the )?\p{Lu}[\p{L}\p{N}'’-]*){1,3}/gu) || [];
+		const conflictPlace = /^(\p{Lu}\p{L}{2,})\s+(?:[Ww]ar|[Cc]onflict)\b/u.exec(label)?.[1];
+		if (conflictPlace) names.push(conflictPlace);
+		return normalizeTopicLabels([...subjects, ...(group.aliases || []), ...related, ...names].filter((title) =>
+			title.length <= 70 && /^[\p{L}\p{N} .&()'’–-]+$/u.test(title) &&
+			readerSubjectWords(title).length <= 5 && readerSubjectWords(title).some((word) => readerSubjectWord(word.toLowerCase())))).slice(0, 5);
+	}
+
+	async function wikiTopicQuery(host, parameters) {
+		const url = new URL("/w/api.php", host);
+		url.search = new URLSearchParams({ action: "query", format: "json", formatversion: "2", redirects: "1", ...parameters });
+		const response = await requestResource({ method: "GET", url: url.href, anonymous: true, headers: { Accept: "application/json" } }, 5000);
+		if (response?.status !== 200 || typeof response.responseText !== "string" || response.responseText.length > 1_000_000) return null;
+		try {
+			const { query, batchcomplete, error } = JSON.parse(response.responseText);
+			if (Array.isArray(query?.pages)) return query;
+			return batchcomplete && !error ? { pages: [] } : null;
+		} catch { return null; }
+	}
+
+	function wikiTopicPageKey(title) {
+		return topicFilterKey(title.replaceAll("_", " "));
+	}
+
+	function wikiTopicTerms(value) {
+		const text = value.toLowerCase().replace(/\b(?:[a-z]\.){2,}/g, (acronym) => acronym.replaceAll(".", ""));
+		return new Set(readerSubjectWords(text).filter(readerSubjectWord).map(readerSubjectTerm));
+	}
+
+	function wikiTopicOverlap(left, right) {
+		return [...left].filter((term) => right.has(term)).length;
+	}
+
+	function wikiTopicConflictMatches(terms, subject) {
+		if (!terms.has("war") && !terms.has("conflict")) return true;
+		const parties = /(\p{L}{2,})[-–—](\p{L}{2,})\s+(?:war|conflict)\b/iu.exec(subject);
+		return !parties || parties.slice(1).every((name) => terms.has(name.toLowerCase()));
+	}
+
+	function wikiTopicArticle(page) {
+		return page.ns === 0 && !page.missing && !page.invalid &&
+			!Object.hasOwn(page.pageprops || {}, "disambiguation") &&
+			!/^(?:lists? of|outlines? of|index of|timelines? of|glossary of)\b/i.test(page.title);
+	}
+
+	function wikiTopicImageName(value) {
+		if (typeof value !== "string") return "";
+		const name = value.replace(/^File:/i, "").replaceAll("_", " ").trim();
+		return /^[^#|<>]{1,220}\.(?:jpe?g|png|webp|svg)$/i.test(name) &&
+			!/\b(?:logos?|wordmarks?|favicon|placeholder|question book|disambig\w*|semi-protection|ambox|wikimedia|wikipedia|newsprint|stock photo)\b/i.test(name) ? name : "";
+	}
+
+	function wikiTopicArticleFiles(article) {
+		const lead = wikiTopicImageName(article.pageimage);
+		const terms = wikiTopicTerms(article.title);
+		const names = [...new Set((article.images || []).map(({ title }) => wikiTopicImageName(title)))];
+		const gallery = names.filter((name) => name && name !== lead).map((name) => ({
+			name, overlap: wikiTopicOverlap(terms, wikiTopicTerms(name)), raster: !name.toLowerCase().endsWith(".svg"),
+		})).sort((a, b) => b.overlap - a.overlap || Number(b.raster) - Number(a.raster)).slice(0, 3);
+		return [...(lead ? [{ name: lead, lead: true }] : []), ...gallery];
+	}
+
+	function wikiTopicCreditText(value) {
+		if (typeof value !== "string" || value.length > 8000) return "";
+		const template = document.createElement("template");
+		template.innerHTML = value.replace(/<\/?(?:br|div|li|p)\b[^>]*>/gi, " ");
+		return template.content.textContent.replace(/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/g, " ").trim();
+	}
+
+	function wikiTopicFile(file, article, lead) {
+		const info = file?.imageinfo?.[0];
+		const meta = info?.extmetadata;
+		if (!meta || file.ns !== 6 || file.imagerepository !== "local" || info.thumbwidth < 100 ||
+			info.thumbheight < 80 || String(meta.NonFree?.value).toLowerCase() === "true") return null;
+		const license = wikiTopicCreditText(meta.LicenseShortName?.value);
+		const author = wikiTopicCreditText(meta.Attribution?.value) || wikiTopicCreditText(meta.Artist?.value);
+		const unrestricted = /^(?:Public domain|CC0)$/i.test(license);
+		if (!unrestricted && (!author || !/^CC BY(?:-SA)? [1-4]\.\d(?: [a-z][a-z ]{1,24})?$/i.test(license))) return null;
+		if (!lead) {
+			const evidence = new Set([...wikiTopicTerms(file.title.slice(5)), ...wikiTopicTerms(wikiTopicCreditText(meta.ImageDescription?.value))]);
+			const names = [article.title, ...(article.terms?.alias || [])].map(wikiTopicTerms);
+			if (!names.some((terms) => terms.size && wikiTopicOverlap(terms, evidence) >= Math.min(2, terms.size))) return null;
+		}
+		try {
+			const url = new URL(info.thumburl);
+			url.search = "";
+			const credit = author ? author + " · " + license : license;
+			return parseSharedTopicImage({ url: url.href, source: info.descriptionurl, subject: article.title, credit });
+		} catch { return null; }
+	}
+
+	async function wikiTopicArticlePhotos(articles) {
+		const candidates = articles.map((article) => article ? wikiTopicArticleFiles(article) : []);
+		const files = [...new Set(candidates.flatMap((entries) => entries.map(({ name }) => "File:" + name)))];
+		if (!files.length) return articles.map(() => []);
+		const commons = await wikiTopicQuery("https://commons.wikimedia.org", {
+			titles: files.join("|"), prop: "imageinfo", iiprop: "url|extmetadata", iiurlwidth: "240",
+			iiextmetadatafilter: "Artist|Attribution|ImageDescription|LicenseShortName|NonFree",
+		});
+		if (!commons) return null;
+		const assets = new Map(commons.pages.map((file) => [wikiTopicPageKey(file.title), file]));
+		const moves = new Map((commons.redirects || []).map(({ from, to }) => [wikiTopicPageKey(from), wikiTopicPageKey(to)]));
+		return articles.map((article, index) => candidates[index].map(({ name, lead }) => {
+			const key = wikiTopicPageKey("File:" + name);
+			return wikiTopicFile(assets.get(moves.get(key) || key), article, lead);
+		}).filter(Boolean));
+	}
+
+	async function fetchWikiTopicPhotos(titles) {
+		const variants = [...new Set(titles.flatMap((title) => [title, title.toLowerCase()]))];
+		const query = await wikiTopicQuery("https://en.wikipedia.org", { ...WIKI_TOPIC_ARTICLE_PROPS, titles: variants.join("|") });
+		if (!query) return null;
+		const pages = new Map(query.pages.filter(wikiTopicArticle).map((page) => [wikiTopicPageKey(page.title), page]));
+		const aliases = new Map((query.redirects || []).filter(({ tofragment }) => !tofragment)
+			.map(({ from, to }) => [wikiTopicPageKey(from), wikiTopicPageKey(to)]));
+		return wikiTopicArticlePhotos(titles.map((title) => {
+			const key = wikiTopicPageKey(title);
+			const article = pages.get(aliases.get(key) || key);
+			return article && wikiTopicConflictMatches(wikiTopicTerms(title), article.title) ? article : null;
+		}));
+	}
+
+	async function searchWikiTopicPhotos(title) {
+		const terms = wikiTopicTerms(title);
+		const query = await wikiTopicQuery("https://en.wikipedia.org", {
+			...WIKI_TOPIC_ARTICLE_PROPS, generator: "search", gsrnamespace: "0", gsrsearch: title, gsrlimit: "6", imlimit: "120",
+		});
+		if (!query) return null;
+		const articles = query.pages.filter(wikiTopicArticle).filter((article) => {
+			if (!wikiTopicConflictMatches(terms, article.title)) return false;
+			const names = [article.title, ...(article.terms?.alias || [])].map(wikiTopicTerms);
+			return names.some((name) => wikiTopicOverlap(terms, name) >= Math.max(2, Math.ceil(terms.size * .6)));
+		}).sort((a, b) => a.index - b.index).slice(0, 3);
+		const photos = await wikiTopicArticlePhotos(articles);
+		return photos?.flat() || null;
+	}
+
+	function wikiTopicCachedImages(titles) {
+		return titles.flatMap((title) => {
+			const terms = wikiTopicTerms(title);
+			return (wikiTopicPhotos?.get(topicFilterKey(title))?.images || []).filter((image) => wikiTopicConflictMatches(terms, image.subject));
+		});
+	}
+
+	function loadWikiTopicPhotos(titles, searchTitles, onUpdate) {
+		const request = wikiTopicPhotoQueue.then(async () => {
+			if (!wikiTopicPhotos) {
+				const stored = await load(WIKI_TOPIC_PHOTOS_KEY, []);
+				wikiTopicPhotos = new Map((Array.isArray(stored) ? stored : []).filter((entry) =>
+					Array.isArray(entry) && typeof entry[0] === "string" && Number.isFinite(entry[1]?.expires))
+					.map(([key, { image, images, expires }]) => [key, {
+						images: (Array.isArray(images) ? images : [image]).map(parseSharedTopicImage).filter(Boolean),
+						expires: Array.isArray(images) ? expires : 0,
+					}]));
+			}
+			onUpdate();
+			const now = Date.now();
+			const missing = normalizeTopicLabels(titles).filter((title) => !(wikiTopicPhotos.get(topicFilterKey(title))?.expires > now));
+			let updated = false;
+			const remember = (title, images) => {
+				const key = topicFilterKey(title);
+				const unique = new Map();
+				for (const image of [...images, ...wikiTopicCachedImages([title])]) if (!unique.has(image.source)) unique.set(image.source, image);
+				wikiTopicPhotos.set(key, { images: [...unique.values()].slice(0, 5), expires: now + WIKI_TOPIC_PHOTO_DAY * (images.length ? 7 : 1) });
+				updated = true;
+			};
+			const searches = [];
+			for (let position = 0; position < missing.length && now >= wikiTopicPhotoRetryAt; position += 12) {
+				const batch = missing.slice(position, position + 12);
+				const results = await fetchWikiTopicPhotos(batch);
+				if (!results) {
+					wikiTopicPhotoRetryAt = Date.now() + 60_000;
+					break;
+				}
+				for (const [index, title] of batch.entries()) {
+					const images = results[index];
+					if (!images.length && searchTitles.has(topicFilterKey(title)) && wikiTopicTerms(title).size >= 2) searches.push(title);
+					else remember(title, images);
+				}
+				onUpdate();
+			}
+			for (let position = 0; position < searches.length && now >= wikiTopicPhotoRetryAt; position += 2) {
+				const batch = searches.slice(position, position + 2);
+				const results = await Promise.all(batch.map(searchWikiTopicPhotos));
+				for (const [index, title] of batch.entries()) {
+					if (results[index]) remember(title, results[index]);
+					else wikiTopicPhotoRetryAt = Date.now() + 60_000;
+				}
+				onUpdate();
+			}
+			if (updated) {
+				const retained = [...wikiTopicPhotos].sort(([, a], [, b]) => b.expires - a.expires).slice(0, 256);
+				wikiTopicPhotos = new Map(retained);
+				await save(WIKI_TOPIC_PHOTOS_KEY, retained).catch(console.error);
+			}
+		});
+		wikiTopicPhotoQueue = request.catch(console.error);
+		return request;
+	}
+
+	function appTopicRepresentativePhoto(group) {
+		const software = appTopicSoftwareSubject(group);
+		if (software) return APP_TOPIC_PHOTOS[software] || APP_TOPIC_PHOTOS.software;
+		const theme = appTopicPhotoTheme(group.label);
+		if (theme) return APP_TOPIC_PHOTOS[theme];
+		const votes = new Map();
+		for (const row of group.rows) {
+			const evidence = appTopicEvidence(row);
+			const candidate = appTopicPhotoTheme(evidence);
+			if (candidate) votes.set(candidate, (votes.get(candidate) || 0) + 1);
+		}
+		const agreed = [...votes].find(([, count]) => count > group.rows.length / 2);
+		return agreed ? APP_TOPIC_PHOTOS[agreed[0]] : null;
+	}
+
+	function appTopicPhotoAvailable(image, used) {
+		return image && !used.has(image.source) && !unavailableAppTopicPhotos.has(image.url);
+	}
+
+	function appTopicPhotos(topics) {
+		const photos = new Map(topics.map(({ id }) => [id, null]));
+		const used = new Set();
+		const indexed = sharedTopicCache?.index?.imagesBySubject;
+		const choose = (group, candidates) => {
+			const image = candidates.find((candidate) => appTopicPhotoAvailable(candidate, used));
+			if (image) {
+				photos.set(group.id, image);
+				used.add(image.source);
+			}
+		};
+		for (const group of topics) {
+			if (group.imageCurated) choose(group, [group.image]);
+		}
+		for (const group of topics) {
+			if (!photos.get(group.id)) choose(group, [group.image]);
+		}
+		for (const group of topics) {
+			if (photos.get(group.id)) continue;
+			const named = readerSubjectWords(group.label).length > 1 || /[a-z][A-Z]|\d/.test(group.label);
+			if (named) choose(group, indexed?.get(topicFilterKey(group.label)) || []);
+		}
+		for (const group of topics) {
+			if (!photos.get(group.id)) choose(group, wikiTopicCachedImages(wikiTopicTitles(group)));
+		}
+		const verified = new Set([...photos].filter(([, image]) => image).map(([id]) => id));
+		for (const group of topics) {
+			if (!photos.get(group.id)) choose(group, [appTopicRepresentativePhoto(group)]);
+		}
+		return { photos, used, verified };
+	}
+
+	function appTopicPhotoCredit(image) {
+		return image.subject + " · " + image.credit;
+	}
+
+	function appTopicIcon(label) {
+		const key = topicFilterKey(label);
+		const icon = document.createElement("span");
+		icon.className = "app-topic-icon";
+		icon.setAttribute("aria-hidden", "true");
+		let hue = 0;
+		for (const letter of key) hue = (hue * 31 + letter.codePointAt(0)) % 360;
+		icon.style.setProperty("--topic-icon-hue", hue);
+		const category = TOPICS.find(({ id, label: name }) => topicFilterKey(name) === key || READER_HEADLINE_TOPICS[id].test(label))?.id ||
+			APP_TOPIC_ICONS_BY_THEME[appTopicPhotoTheme(label)];
+		if (category) {
+			icon.innerHTML = TOPIC_ICONS[category];
+		} else {
+			const words = readerSubjectWords(label).filter((word) => readerSubjectWord(word.toLowerCase()));
+			const names = words.slice(1).filter((word) => /^\p{Lu}/u.test(word));
+			const subject = names.length && !/^\p{Lu}/u.test(words[1]) ? names : words;
+			const initials = subject.length > 1 ? subject.slice(0, 2).map((word) => [...word][0]).join("") : subject[0] || "";
+			const letters = escapeHTML([...initials.toUpperCase()].slice(0, 2).join(""));
+			icon.innerHTML = APP_ICON(`<path d="M4 2.75h7.05l2.45 2.45v6.55a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5v-7.5A1.5 1.5 0 0 1 4 2.75Z" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linejoin="round"/><text x="8" y="10.2" fill="currentColor" font-size="6" font-weight="750" text-anchor="middle">${letters || "#"}</text>`);
+		}
+		return icon;
+	}
+
+	function appTopicPicture(group, photos, used) {
+		const media = document.createElement("span");
+		media.className = "app-topic-media";
+		media.setAttribute("aria-hidden", "true");
+		media.title = group.label;
+		media.append(appTopicIcon(group.label));
+		let image = photos.get(group.id);
+		if (!image) return media;
+		const picture = document.createElement("img");
+		picture.className = "app-topic-picture";
+		picture.alt = "";
+		picture.loading = "lazy";
+		picture.decoding = "async";
+		picture.referrerPolicy = "no-referrer";
+		const show = () => {
+			picture.removeAttribute("data-loaded");
+			picture.title = appTopicPhotoCredit(image);
+			picture.src = image.url;
+		};
+		picture.onload = () => {
+			picture.setAttribute("data-loaded", "");
+			media.title = picture.title;
+		};
+		picture.onerror = () => {
+			if (!media.isConnected) return;
+			media.title = group.label;
+			unavailableAppTopicPhotos.add(image.url);
+			used.delete(image.source);
+			const backup = appTopicRepresentativePhoto(group);
+			if (!appTopicPhotoAvailable(backup, used)) {
+				photos.set(group.id, null);
+				picture.remove();
+				hydrateAppTopicPhotos([{ group, media }], photos, used);
+				return;
+			}
+			image = backup;
+			used.add(image.source);
+			photos.set(group.id, image);
+			show();
+			hydrateAppTopicPhotos([{ group, media }], photos, used);
+		};
+		show();
+		media.append(picture);
+		return media;
+	}
+
+	function hydrateAppTopicPhotos(cards, photos, used) {
+		const jobs = cards.map(({ group, media }) => ({ group, media, titles: wikiTopicTitles(group) }));
+		const ranked = [...jobs].sort((a, b) => b.group.rows.length - a.group.rows.length);
+		const titles = ranked.flatMap(({ titles }) => titles);
+		if (!titles.length) return;
+		const searchTitles = new Set(ranked.map(({ titles }) => titles.find((title) => wikiTopicTerms(title).size >= 2))
+			.filter(Boolean).map(topicFilterKey));
+		loadWikiTopicPhotos(titles, searchTitles, () => {
+			const state = appState;
+			if (state?.listTopicPhotos?.photos !== photos) return;
+			for (const job of jobs) {
+				const { group, titles } = job;
+				const active = state.listTopic === group.id;
+				const heading = active && state.ui.shadow.querySelector("#app-list-topic > .app-topic-media");
+				const media = heading || job.media;
+				if (!media.isConnected) continue;
+				const current = photos.get(group.id);
+				const image = wikiTopicCachedImages(titles).find((candidate) => candidate.source === current?.source ||
+					appTopicPhotoAvailable(candidate, used));
+				if (!image || image.source === current?.source) continue;
+				used.delete(current?.source);
+				used.add(image.source);
+				photos.set(group.id, image);
+				job.media = appTopicPicture(group, photos, used);
+				media.replaceWith(job.media);
+			}
+		}).catch(console.error);
+	}
+
+	function paintAppTopicTabs(available) {
+		const { ui: { shadow }, topicsMode, view } = appState;
+		const tabs = shadow.getElementById("app-list-view");
+		const list = shadow.getElementById("app-list-body");
+		const activeTab = topicsMode && available ? "app-topics-tab" : "app-all-links-tab";
+		tabs.hidden = !available;
+		for (const tab of tabs.children) {
+			const selected = tab.id === activeTab;
+			tab.setAttribute("aria-selected", String(selected));
+			tab.tabIndex = selected ? 0 : -1;
+		}
+		list.setAttribute("role", available ? "tabpanel" : "region");
+		if (available) {
+			list.setAttribute("aria-labelledby", activeTab);
+			list.removeAttribute("aria-label");
+		} else {
+			list.removeAttribute("aria-labelledby");
+			list.setAttribute("aria-label", appViewLabel(view));
+		}
+	}
+
+	function paintAppTopicProjection(list, { topics = [], active, threads, tabCheck }, isCurrent) {
+		const state = appState;
+		const shadow = state.ui.shadow;
+		paintAppTopicTabs(Boolean(topics.length || active));
+		tabCheck?.then((available) => { if (isCurrent()) paintAppTopicTabs(available); });
+		state.activeListTopic = active;
+		state.topicExtraRows = null;
+		if (shadow.getElementById("app-row-menu").dataset.row === "topic") closeAppRowMenu();
+		const bar = shadow.getElementById("app-list-topic");
+		list.toggleAttribute("data-topic-rows", Boolean(active));
+		bar.hidden = !active;
+		state.activeTopicThreads = active && new Map(active.rows.map((row) => {
+			const url = appTopicRowURL(row);
+			return [normalizeURL(url) || url, threads?.get(row)];
+		}));
+		if (active) {
+			state.listTopic = active.id;
+			bar.dataset.topicId = active.id;
+			bar.dataset.topicLabel = active.label;
+			const title = shadow.getElementById("app-list-topic-title");
+			title.textContent = topicDisplayName(active.label);
+			paintAppTopicCounts(shadow.getElementById("app-list-topic-count"), active);
+			const existing = state.listTopicPhotos;
+			const index = sharedTopicCache?.index;
+			const selection = existing?.view === state.view && existing.index === index && existing.photos.has(active.id) ?
+				existing : { view: state.view, index, ...appTopicPhotos(topics) };
+			state.listTopicPhotos = selection;
+			const media = appTopicPicture(active, selection.photos, selection.used);
+			bar.querySelector(":scope > .app-topic-media")?.remove();
+			title.parentElement.before(media);
+			if (!selection.verified.has(active.id)) hydrateAppTopicPhotos([{ group: active, media }], selection.photos, selection.used);
+			return;
+		}
+		delete bar.dataset.topicId;
+		delete bar.dataset.topicLabel;
+		if (state.listTopic !== null) {
+			clearAppTopicExtra();
+			state.listTopic = null;
+			endAppSelection();
+		}
+		const { photos, used, verified } = appTopicPhotos(topics);
+		state.listTopicPhotos = { view: state.view, index: sharedTopicCache?.index, photos, used, verified };
+		const pendingPhotos = [];
+		for (const group of topics) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "app-topic-row";
+			button.dataset.sharedTopic = group.id;
+			button.setAttribute("aria-keyshortcuts", "Shift+F10 ContextMenu");
+			const labels = document.createElement("span");
+			const name = document.createElement("span");
+			name.className = "app-topic-name";
+			name.textContent = topicDisplayName(group.label);
+			const meta = document.createElement("span");
+			meta.className = "app-topic-meta";
+			paintAppTopicCounts(meta, group);
+			const chevron = document.createElement("span");
+			chevron.className = "app-topic-chevron";
+			chevron.setAttribute("aria-hidden", "true");
+			chevron.textContent = "›";
+			labels.append(name, meta);
+			const media = appTopicPicture(group, photos, used);
+			button.append(media, labels, chevron);
+			if (!verified.has(group.id)) pendingPhotos.push({ group, media });
+			button.onclick = () => openAppListTopic(group.id).catch(console.error);
+			button.oncontextmenu = (event) => {
+				if (event.defaultPrevented) return;
+				event.preventDefault();
+				const point = event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : null;
+				openAppTopicMenu(button, group, point);
+			};
+			button.onkeydown = (event) => {
+				if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+				event.preventDefault();
+				event.stopPropagation();
+				openAppTopicMenu(button, group);
+			};
+			list.append(button);
+		}
+		hydrateAppTopicPhotos(pendingPhotos, photos, used);
+	}
+
+	function setAppTopicsMode(topicsMode) {
+		const state = appState;
+		if (state.topicsMode === topicsMode && !state.listTopic) return;
+		clearAppTopicExtra();
+		state.topicsMode = topicsMode;
+		state.listTopic = null;
+		endAppSelection();
+		resetAppListScroll();
+		save(APP_TOPICS_MODE_KEY, state.topicsMode).catch(console.error);
+		renderAppList().catch(console.error);
+	}
+
+	async function openAppListTopic(id) {
+		const state = appState;
+		const previous = state.listTopic;
+		if (previous !== id) clearAppTopicExtra();
+		const view = state.view;
+		if (id && !state.topicsMode) {
+			state.topicsMode = true;
+			save(APP_TOPICS_MODE_KEY, true).catch(console.error);
+		}
+		state.listTopic = id;
+		if (view === "collection") state.collectionLimit = FRONT_PAGE_SIZE;
+		endAppSelection();
+		resetAppListScroll();
+		await renderAppList();
+		if (!state.topicsMode || state.view !== view || Boolean(state.listTopic) !== Boolean(id)) return;
+		const shadow = state.ui.shadow;
+		const target = id ? shadow.getElementById("app-list-topic-back") :
+			[...shadow.querySelectorAll(".app-topic-row")].find((button) => button.dataset.sharedTopic === previous);
+		target?.focus({ preventScroll: Boolean(id) });
+	}
+
+	async function selectAppTopicLinks(group) {
+		const state = appState;
+		const { view, ui: { shadow } } = state;
+		if (state.bulk?.busy) return;
+		await openAppListTopic(group.id);
+		const header = shadow.getElementById("app-list-topic");
+		if (state.view !== view || state.listTopic !== group.id || state.bulk || header.hidden || header.dataset.topicId !== group.id) return;
+		const entries = group.rows.map((row) => {
+			const story = row.story || row;
+			return appLinkSelectionEntry(story.url, story.title, view === "collection" ? row.key : undefined);
+		}).filter(Boolean);
+		if (!entries.length) return;
+		const bulk = startAppSelection(shadow.getElementById("app-list-topic-back"));
+		for (const entry of entries) bulk.entries.set(entry.key, entry);
+		paintAppSelection();
+		shadow.querySelector("#app-list-body .app-row-select:checked")?.focus({ preventScroll: true });
+	}
 
 	function resetAppListScroll() {
 		const list = appState?.ui.shadow.querySelector("#app-list-body");
@@ -44758,7 +48976,7 @@ ${frontPageChooserHTML()}
 			welcome.hidden = !state.noSources;
 		}
 
-		if (!state.noSources) {
+		if (!state.noSources || state.view === "collection" || state.view === "queue") {
 			panel.hidden = true;
 			panel.replaceChildren();
 			return;
@@ -44805,32 +49023,42 @@ ${frontPageChooserHTML()}
 		let outcome;
 
 		paintAppRail();
+		if (state.listView !== view) paintAppTopicTabs(false);
 		await paintAppOnboarding();
 
+		if (request !== state.listSeq) return;
 		if (force || state.listView !== view) {
 			resetAppListScroll();
 		}
+		if (!state.listTopic) ui.shadow.getElementById("app-list-topic").hidden = true;
 
 		if (view === "queue") {
 			await renderQueueView(ui, list, () => request === state.listSeq);
 		} else if (view === "collection") {
-			await renderCollectionView(ui, list, () => request === state.listSeq);
+			await renderReaderCollectionView(ui, list, () => request === state.listSeq);
 		} else if (state.noSources) {
 			state.rows = [];
+			state.rowsView = view;
+			state.frontPageRows = [];
+			state.frontPageCandidates = [];
 			state.rowsByURL = new Map();
+			state.feedFilterKey = "[]";
 			list.replaceChildren();
+			paintAppTopicProjection(list, {}, () => request === state.listSeq);
 		} else {
 			if (state.listView !== view || !list.childElementCount) {
 				renderBrowseSkeleton(list, "Loading Front Pages…");
 			}
 
+			const cardSettings = await loadSettings();
+			if (request !== state.listSeq) return;
 			const metadata = () => Promise.all([
 				loadHiddenStoryKeys(),
 				loadQueue(),
 				load(STORAGE.seen, {}),
 			]);
 			let paintRevision = 0;
-			const paint = async ({ rows: allRows, feedStates = [], pending = false }) => {
+			const paint = async ({ rows: allRows, feedStates = [], pending = false }, defaultList) => {
 				const revision = ++paintRevision;
 				const [hiddenKeys, queued, seen] = await metadata();
 
@@ -44838,16 +49066,21 @@ ${frontPageChooserHTML()}
 					return;
 				}
 
-				outcome = { feedStates };
-				state.rows = allRows.filter((row) => !isStoryHidden(row.story, hiddenKeys));
-				state.rowsByURL = new Map(
-					state.rows.map((row) => [normalizeURL(row.story.url) || row.story.url, row]),
-				);
-				state.seen = seen || {};
-
-				const shown = view === "unread" && state.open
-					? state.rows.filter((row) => rowIsUnread(row, state.seen) || (normalizeURL(row.story.url) || row.story.url) === state.open.key)
-					: appViewRows(state.rows, view, state.seen);
+				const candidates = allRows.filter((row) => !isStoryHidden(row.story, hiddenKeys));
+				const coverage = readerArticleCoverage(frontPageRowStories(candidates), cardSettings, hiddenKeys);
+				const { rows, groups } = await readerFrontPageTopics(candidates, coverage, cardSettings.hiddenTopics, state.topicsMode);
+				if (request !== state.listSeq || revision !== paintRevision) return;
+				const seenRows = seen || {};
+				const openKey = appUnreadOpenKey(state);
+				const rowsForView = (entries, read = seenRows, retained = openKey) => view === "unread" && retained
+					? entries.filter((row) => rowIsUnread(row, read) || (normalizeURL(row.story.url) || row.story.url) === retained)
+					: appViewRows(entries, view, read);
+				const shown = rowsForView(rows);
+				const filteredEmpty = !shown.length && rows !== candidates && rowsForView(candidates).length > 0;
+				const isCurrent = () => request === state.listSeq && revision === paintRevision;
+				const projection = state.topicsMode ? appTopicProjection(shown, groups, state.listTopic, coverage,
+					sharedTopicCache?.index, undefined, rows) : { rows: shown };
+				if (pending && state.listTopic && !projection.active) return;
 				const failureText = frontPageFailureText(feedStates, view);
 				const unavailable = feedStates.length > 0 && feedStates.every((feed) => feed.status !== "ok" && feed.status !== "window");
 				const queuedKeys = new Set(queued.map(queueKey));
@@ -44856,11 +49089,22 @@ ${frontPageChooserHTML()}
 					await list._hnewherePointer.done;
 					if (request !== state.listSeq || revision !== paintRevision) return;
 				}
+				outcome = { feedStates };
+				state.rows = rows;
+				state.rowsView = view;
+				state.frontPageRows = defaultList?.rows || rows;
+				state.frontPageCandidates = defaultList?.candidates || candidates;
+				const indexedRows = defaultList ? [...defaultList.candidates, ...candidates] : candidates;
+				state.rowsByURL = new Map(indexedRows.map((row) => [normalizeURL(row.story.url) || row.story.url, row]));
+				state.feedFilterKey = JSON.stringify(cardSettings.hiddenTopics);
+				state.seen = seenRows;
+				state.listTopicGroups = null;
 				list.replaceChildren();
 
-				if (!shown.length) {
+				if (!shown.length && !projection.active) {
 					renderAppListMessage(
-						pending ? "Loading Front Pages…" : failureText || (!allRows.length
+						pending ? "Loading Front Pages…" : failureText || (filteredEmpty
+							? "No links match your topic filters." : !allRows.length
 							? unavailable ? "Could not load Front Pages." : "Nothing here right now."
 							: view === "unread"
 								? "All caught up."
@@ -44875,7 +49119,13 @@ ${frontPageChooserHTML()}
 					list.append(notice);
 				}
 
-				for (const row of shown) {
+				const tabCheck = !state.topicsMode && shown.length > 1 ? readerFrontPageTopicGroups(rows, coverage, { includeStories: true }).then((groups) => {
+					if (!isCurrent()) return false;
+					state.listTopicGroups = groups;
+					return Boolean(appTopicProjection(rowsForView(rows, state.seen, appUnreadOpenKey(state)), groups).topics.length);
+				}).catch(() => false) : null;
+				paintAppTopicProjection(list, { ...projection, topics: rankFrontPageTopics(projection.topics), tabCheck }, isCurrent);
+				for (const row of projection.rows) {
 					const unread = rowIsUnread(row, state.seen);
 					const element = renderBrowseRow(row.story, list, 0, {
 						also: row.also,
@@ -44888,9 +49138,6 @@ ${frontPageChooserHTML()}
 					element.classList.toggle("is-unread", unread);
 				}
 
-				const cardSettings = await loadSettings();
-
-				if (request !== state.listSeq || revision !== paintRevision) return;
 				if (cardSettings.frontPageMode === undefined) {
 					list.prepend(frontPageCardElement(cardSettings, () => refreshFrontPageConsumers()));
 				}
@@ -44899,13 +49146,14 @@ ${frontPageChooserHTML()}
 				decorateAppRows(list);
 				await paintAppCounts();
 			};
-			const snapshot = await loadFrontPages({ force, automatic, onUpdate: paint });
-			await paint(snapshot);
+			await loadFrontPageView(view, cardSettings, { force, automatic }, paint);
 		}
 
 		if (request !== state.listSeq) {
 			return;
 		}
+		await appendAppTopicExtra(list, () => request === state.listSeq);
+		if (request !== state.listSeq) return;
 
 		state.listView = view;
 		decorateAppRows(list);
@@ -44928,6 +49176,8 @@ ${frontPageChooserHTML()}
 			);
 		}
 
+		if (appState.bulk) paintAppSelection();
+		else paintAppSelectLinks(appState.ui.shadow);
 		paintAppNext();
 	}
 
@@ -44939,22 +49189,23 @@ ${frontPageChooserHTML()}
 		}
 
 		const seq = ++state.countSeq;
-		const [queue, collected, saved, notes] = await Promise.all([
+		const [queue, collected] = await Promise.all([
 			loadQueue(),
 			loadCollected(),
-			loadSavedItems(),
-			loadNotedIndex(),
 		]);
 
 		if (seq !== state.countSeq) {
 			return;
 		}
 
-		const counts = appViewCounts(state.rows, state.seen, state.sourceIds, state.topicIds || []);
+		const counts = appViewCounts(state.frontPageRows, state.seen, state.sourceIds, state.topicIds || []);
+		if (state.view === state.rowsView && state.rows !== state.frontPageRows && state.view.startsWith("topic:")) {
+			const id = state.view.slice("topic:".length);
+			counts.topics[id] = appViewRows(state.rows, state.view, state.seen).filter((row) => rowIsUnread(row, state.seen)).length;
+		}
 
 		paintAppRailFill({
 			queue: queue.length > 0,
-			collection: saved.length + notes.length + collected.length > 0,
 		});
 		const badges = {
 			unread: counts.unread,
@@ -45005,20 +49256,32 @@ ${frontPageChooserHTML()}
 		}
 	}
 
-	async function refreshAppSeen() {
+	function appUnreadOpenKey(state) {
+		const phoneList = appIsPhone() && !state.moving && state.ui.shadow.getElementById("app").dataset.stage === "list";
+		return phoneList ? "" : state.open?.key;
+	}
+
+	async function refreshAppSeen({ returnedToList = false } = {}) {
 		const state = appState;
 
 		if (!state) {
 			return;
 		}
 
+		const previous = state.seen;
 		state.seen = (await load(STORAGE.seen, {})) || {};
+		if (state.view === "unread" && state.topicsMode && !state.listTopic &&
+			(returnedToList || state.rows.some((row) => rowIsUnread(row, previous) !== rowIsUnread(row, state.seen)))) {
+			renderAppList().catch(console.error);
+			return;
+		}
 		const list = state.ui.shadow.querySelector("#app-list-body");
 		const elements = [...list.querySelectorAll(".app-row")];
+		const openKey = appUnreadOpenKey(state);
 		const removing = new Set(state.view === "unread" ? elements.filter((element) => {
 			const row = state.rowsByURL.get(element.dataset.appKey);
 
-			return row && element.dataset.appKey !== state.open?.key && !rowIsUnread(row, state.seen);
+			return row && !element.hasAttribute("data-topic-extra") && element.dataset.appKey !== openKey && !rowIsUnread(row, state.seen);
 		}) : []);
 		const edge = list.getBoundingClientRect().top;
 		const anchor = elements.find((element) => !removing.has(element) && element.getBoundingClientRect().bottom > edge);
@@ -45069,9 +49332,19 @@ ${frontPageChooserHTML()}
 			}
 		}
 
-		if (state.view === "unread" && !list.querySelector(".app-row")) {
+		if (state.view === "unread" && !state.topicsMode && !list.querySelector(".app-row")) {
 			renderAppListMessage("All caught up.");
+			paintAppTopicTabs(false);
 		}
+		if (state.view === "unread" && state.listTopic && removing.size) {
+			renderAppList().catch(console.error);
+			return;
+		}
+		if (removing.size && state.listTopicGroups && !state.topicsMode) {
+			const remaining = elements.filter((item) => !removing.has(item)).map((item) => state.rowsByURL.get(item.dataset.appKey)).filter(Boolean);
+			paintAppTopicTabs(Boolean(appTopicProjection(remaining, state.listTopicGroups).topics.length));
+		}
+		if (removing.size) paintAppSelectLinks(state.ui.shadow);
 
 		await paintAppCounts();
 		paintAppNext();
@@ -45080,14 +49353,24 @@ ${frontPageChooserHTML()}
 	async function markAppViewRead() {
 		const state = appState;
 
-		if (!state || !appViewIsFrontPage(state.view)) {
+		if (!state || state.view !== state.rowsView || !appViewIsFrontPage(state.view)) {
 			return;
 		}
 
-		const rows = appViewRows(state.rows, state.view, state.seen).filter((row) =>
-			rowIsUnread(row, state.seen),
-		);
-		const keys = rows.flatMap(rowDiscussionKeys);
+		const { bulk, view } = state;
+		let rows = appViewRows(state.rows, view, state.seen);
+		const list = state.ui.shadow.getElementById("app-list-body");
+		if (state.listTopic || list.hasAttribute("data-topic-rows")) {
+			const visible = new Set([...list.querySelectorAll(".app-row")].map((row) => row.dataset.appKey));
+			rows = rows.filter(({ story }) => visible.has(normalizeURL(story.url) || story.url));
+		}
+		await markAppRowsRead(rows);
+		if (bulk && state.bulk === bulk && view === "unread") endAppSelection();
+	}
+
+	async function markAppRowsRead(candidates) {
+		const rows = candidates.filter((row) => rowIsUnread(row, appState.seen));
+		const keys = rows.flatMap(rowReadKeys);
 
 		if (!keys.length) {
 			return;
@@ -45116,7 +49399,7 @@ ${frontPageChooserHTML()}
 		}
 
 		const key = normalizeURL(url) || url;
-		const entry = row || state.rowsByURL.get(key) || { story, also: [] };
+		const entry = row || state.topicExtraRows?.get(key) || state.rowsByURL.get(key) || { story, also: [] };
 
 		closeAppRowMenu();
 
@@ -45159,6 +49442,7 @@ ${frontPageChooserHTML()}
 		prepareAppDiscussion(entry, opened).catch(console.error);
 		decorateAppRows(state.ui.shadow.querySelector("#app-list-body"));
 		loadAppArticle(url, story.title || "");
+		paintAppArticleCoverage(opened).catch(console.error);
 
 		if (appIsPhone()) {
 			state.scrolls.article = 0;
@@ -45172,25 +49456,23 @@ ${frontPageChooserHTML()}
 
 		paintAppChrome();
 
-		markQueueArrival(url).catch(console.error);
+		markQueueArrival(url).then((marked) => {
+			if (!marked && state.open === opened) return refreshNextUp(state.ui.shadow);
+		}).catch(console.error);
 
 		const liveReddit = usesRedditReadWindow() && redditReadNoticeAccepted && redditReadSourceOn && !freshRedditPage(key) &&
 			Boolean(navigator.userActivation?.isActive);
 		const liveRead = liveReddit ? beginRedditDiscussionRead() : null;
 
 		try {
-			const keys = rowDiscussionKeys(entry);
-			const previousSeen = keys.length ? await markManySeen(keys) : {};
+			const previousSeen = await markManySeen(rowReadKeys(entry));
 
 			if (state.open !== opened) return;
 
 			state.openSeen = previousSeen;
+			await refreshAppSeen();
 
-			if (keys.length) {
-				await refreshAppSeen();
-
-				if (state.open !== opened) return;
-			}
+			if (state.open !== opened) return;
 
 			if (liveRead) {
 				await liveRead.run((releaseRead) => state.open === opened ? openAppDiscussion(entry, { focus, previousSeen, onThreadsLoaded: releaseRead }) : undefined);
@@ -45209,7 +49491,8 @@ ${frontPageChooserHTML()}
 			return;
 		}
 
-		const row = appState.rowsByURL.get(normalizeURL(address) || address) || null;
+		const key = normalizeURL(address) || address;
+		const row = appState.topicExtraRows?.get(key) || appState.rowsByURL.get(key) || null;
 
 		openAppStory(row ? row.story : { url: address, title: "" }, { row }).catch(
 			console.error,
@@ -45560,31 +49843,38 @@ ${frontPageChooserHTML()}
 			return;
 		}
 
+		const room = toggle.closest("#app-chin") ? shadow.getElementById("app") : pane;
+		placeAppPopover(menu, toggle, room, shadow.getElementById("app-view-arrow"), true);
+	}
+
+	function placeAppPopover(menu, toggle, room, arrow, preferAbove = false) {
 		menu.style.maxHeight = "";
 
+		const gap = 9;
+		const inset = 8;
 		const box = toggle.getBoundingClientRect();
-		const room = (toggle.closest("#app-chin") ? shadow.querySelector("#app") : pane).getBoundingClientRect();
+		const bounds = room.getBoundingClientRect();
+		const spaceAbove = box.top - gap - inset;
+		const spaceBelow = window.innerHeight - box.bottom - gap - inset;
+		const fitsAbove = menu.offsetHeight <= spaceAbove;
+		const fitsBelow = menu.offsetHeight <= spaceBelow;
+		const above = (preferAbove && fitsAbove) || (!fitsBelow && (fitsAbove || spaceAbove > spaceBelow));
+
+		menu.style.maxHeight = `${Math.max(0, Math.floor(above ? spaceAbove : spaceBelow))}px`;
 		const width = menu.offsetWidth;
-		const fitsAbove = box.top - 9 - menu.offsetHeight >= 8;
-		const fitsBelow = box.bottom + 9 + menu.offsetHeight <= window.innerHeight - 8;
-		const above = fitsAbove || (!fitsBelow && box.top > window.innerHeight - box.bottom);
-
-		menu.style.maxHeight = `${Math.floor(above ? box.top - 17 : window.innerHeight - box.bottom - 17)}px`;
-
 		const left = Math.min(
-			Math.max(box.left + box.width / 2 - width / 2, room.left + 8),
-			room.right - width - 8,
+			Math.max(box.left + box.width / 2 - width / 2, bounds.left + inset),
+			bounds.right - width - inset,
 		);
 
-		const arrow = shadow.querySelector("#app-view-arrow");
-
 		menu.style.left = `${Math.round(left)}px`;
-		menu.style.top = `${Math.round(above ? box.top - 9 - menu.offsetHeight : box.bottom + 9)}px`;
+		const top = above ? box.top - gap - menu.offsetHeight : box.bottom + gap;
+		menu.style.top = `${Math.round(top)}px`;
 
 		if (arrow) {
 			arrow.classList.toggle("is-down", above);
 			arrow.style.left = `${Math.round(box.left + box.width / 2 - 5)}px`;
-			arrow.style.top = `${Math.round(above ? box.top - 14 : box.bottom + 4)}px`;
+			arrow.style.top = `${Math.round((above ? box.top - gap : box.bottom + gap) - 5)}px`;
 		}
 	}
 
@@ -45620,11 +49910,17 @@ ${frontPageChooserHTML()}
 			if (activeDocumentSource === READER_DOCUMENT_SOURCE) {
 				activeDocumentSource = HTML_DOCUMENT_SOURCE;
 			}
-			const body = appState.ui.shadow.querySelector("#app-article-body");
+			const shadow = appState.ui.shadow;
+			const body = shadow.getElementById("app-article-body");
 
-			body?.replaceChildren();
-			body?.style.removeProperty("--app-frame-height");
-			body?.style.removeProperty("--app-frame-fit");
+			const nextUp = shadow.getElementById("next-up");
+			nextUp.classList.add("hidden");
+			body.before(shadow.getElementById("app-article-coverage"));
+			body.after(nextUp);
+			body.parentElement.scrollTop = 0;
+			body.replaceChildren();
+			body.style.removeProperty("--app-frame-height");
+			body.style.removeProperty("--app-frame-fit");
 			paintAppDiscussionTheme();
 		}
 	}
@@ -46316,6 +50612,9 @@ ${frontPageChooserHTML()}
 
 		scroller.className = "app-reader-scroll";
 		scroller.innerHTML = '<slot name="reader"></slot>';
+		const shadow = appState.ui.shadow;
+		scroller.prepend(shadow.getElementById("app-article-coverage"));
+		scroller.append(shadow.getElementById("next-up"));
 		pane.appendChild(scroller);
 	}
 
@@ -46866,11 +51165,16 @@ ${frontPageChooserHTML()}
 
 	const appKeysBehind = new WeakSet();
 
+	function appNativeDialogOpen(shadow = appState?.ui.shadow) {
+		return Boolean(shadow?.querySelector("dialog[open]"));
+	}
+
 	function appSurfaceOpen() {
 		const shadow = appState.ui.shadow;
 		const drawn = (surface) => Boolean(surface) && !surface.hidden && !surface.classList.contains("hidden") && surface.getClientRects().length > 0;
 
 		return (
+			appNativeDialogOpen(shadow) ||
 			["app-settings-modal", "app-search-page", "app-row-menu", "app-view-menu", "source-menu"].some((id) => drawn(shadow.getElementById(id))) ||
 			drawn(cardMenuOpener?.getRootNode().querySelector(".card-menu")) ||
 			drawn(composeTargetsMenu)
@@ -46998,6 +51302,8 @@ ${frontPageChooserHTML()}
 			};
 		}
 
+		if (appState.bulk) return () => endAppSelection({ refocus: true });
+
 		return appIsPhone() && shadow.querySelector("#app").dataset.stage !== "list" ? lowerAppSheet : null;
 	}
 
@@ -47038,6 +51344,7 @@ ${frontPageChooserHTML()}
 
 	function appShortcutFor(event, mod, shortcuts = appShortcuts) {
 		if (sidebarUI?.shadow?.querySelector("#reddit-read-modal")) return null;
+		if (appNativeDialogOpen()) return null;
 		const key = appKeyName(event.key);
 		const held = appIsApple() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
 
@@ -47090,6 +51397,7 @@ ${frontPageChooserHTML()}
 		if (!appState || event.defaultPrevented || event.isComposing) {
 			return;
 		}
+		if (appNativeDialogOpen()) return;
 
 		const action = appShortcutFor(event, false);
 
@@ -47197,6 +51505,7 @@ ${frontPageChooserHTML()}
 	}
 
 	function stepAppSelection(step) {
+		if (appState.bulk) return;
 		const rows = [...appState.ui.shadow.querySelectorAll("#app-list-body .app-row")];
 
 		if (!rows.length) {
@@ -50721,8 +55030,15 @@ ${frontPageChooserHTML()}
 			.map((story) => sourceKey(story.source, story.id));
 	}
 
+	function rowReadKeys(row) {
+		const keys = rowDiscussionKeys(row);
+		const url = normalizeURL(row?.story?.url);
+		if (url) keys.push(`url:${url}`);
+		return keys;
+	}
+
 	function rowIsUnread(row, seen) {
-		return !rowDiscussionKeys(row).some((key) => Number(seen?.[key]) > 0);
+		return !rowReadKeys(row).some((key) => Number(seen?.[key]) > 0);
 	}
 
 	function rowCarriesSource(row, sourceId) {
@@ -50730,7 +55046,7 @@ ${frontPageChooserHTML()}
 	}
 
 	function rowCarriesTopic(row, topicId) {
-		return [row?.story, ...(row?.also || [])].some((story) => story?.topic === topicId);
+		return [row?.story, ...(row?.also || [])].some((story) => storyCarriesTopic(story, topicId));
 	}
 
 	function appViewRows(rows, view, seen) {
@@ -51091,11 +55407,11 @@ ${frontPageChooserHTML()}
 		} }).then((rows) => { finishDiscovery(rows); return rows; }, (error) => { finishDiscovery([]); throw error; });
 		if (earlyOpening) {
 			await earlyOpening;
-			scheduleCollectedChecks(settings);
+			scheduleCollectedChecks();
 			return;
 		}
 
-		scheduleCollectedChecks(settings);
+		scheduleCollectedChecks();
 
 		const recoverable = arrivedFromClick && last.source === "hn";
 

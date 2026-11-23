@@ -27,9 +27,75 @@ test('desktop Discussion shows the mobile total to the right and follows the sel
   });
   assert(geometry.badgeLeft>=geometry.iconRight+3,'the total sits beside the icon');
   assert(geometry.badgeRight<=geometry.buttonRight&&geometry.badgeHeight>0,'the count fits its hit target');
+  const buttons=await app.page.locator('#app-list-sync, #app-mark-read, #app-discussion-meta .page-header-disclosure').evaluateAll(nodes=>nodes.map(node=>{
+   const {width,height}=node.getBoundingClientRect(),style=getComputedStyle(node);
+   const radius=style.borderTopLeftRadius;
+   return{id:node.id||node.className,rounded:radius==='50%'||parseFloat(radius)>=Math.min(width,height)/2,color:style.borderTopColor,border:style.borderTopWidth};
+  }));
+  for(const button of buttons){
+   assert(button.rounded,`${button.id} is circular or pill-shaped`);
+   assert.equal(button.border,'1px');
+   assert.equal(button.color,'rgb(214, 214, 214)');
+  }
   await app.page.locator('#app-list-body .browse-title-link').filter({hasText:STORIES[7].title}).first().click();
   assert(await waitFor(async()=>await desktop.textContent()==='3',4000),'the count follows the next story');
   assert.equal(await desktop.textContent(),await mobile.textContent());
+  assert.deepEqual(app.errors,[]);
+ }finally{await app.browser.close()}
+});
+
+test('Next in queue follows the article inside the Reader scroller',{timeout:20000},async()=>{
+ const [next,current]=STORIES;
+ const app=await launchApp({sharedStore:true,viewport:{width:1600,height:950},settings:{...settings,sourceRefreshMinutes:0},values:{
+  'HNewhere:queue':[current,next].map((story,i)=>({...story,source:'hn',addedAt:i+1})),
+ }});
+ try{
+  const {page}=app;
+  page.setDefaultTimeout(5000);
+  await page.goto('https://backchnnl.app/');
+  await page.locator('#app-rail [data-app-view="queue"]').click();
+  await page.locator('#app-list-body').getByRole('link',{name:current.title,exact:true}).click();
+  const pane=page.locator('#app-article-body[data-mode="reader"]');
+  await pane.waitFor();
+  const queue=page.locator('#next-up');
+  await queue.getByRole('link',{name:next.title,exact:true}).waitFor();
+  assert.equal(await page.locator('#panel #next-up').count(),0,'the discussion does not contain the queue footer');
+  assert(await queue.evaluate(node=>node.previousElementSibling?.matches('slot[name="reader"]')),'the queue follows the full article in the same scroller');
+  await queue.getByRole('link',{name:next.title,exact:true}).click();
+  assert.equal(await page.locator('#app-article-open').getAttribute('href'),next.url);
+  await queue.waitFor({state:'hidden'});
+  assert(await waitFor(()=>app.store.get('HNewhere:queue')?.every(entry=>entry.readAt)));
+  assert.deepEqual(app.errors,[]);
+ }finally{await app.browser.close()}
+});
+
+test('Next in queue scrolls into view after the full embedded article',{timeout:20000},async()=>{
+ const [current,next]=[STORIES[0],STORIES[4]];
+ const app=await launchApp({sharedStore:true,viewport:{width:1600,height:950},settings:{...settings,sourceRefreshMinutes:0},values:{
+  'HNewhere:queue':[current,next].map((story,i)=>({...story,source:'hn',addedAt:i+1})),
+ }});
+ try{
+  const {page}=app;
+  page.setDefaultTimeout(5000);
+  await page.goto('https://backchnnl.app/');
+  await page.locator('#app-rail [data-app-view="queue"]').click();
+  await page.locator('#app-list-body').getByRole('link',{name:current.title,exact:true}).click();
+  const article=page.locator('#app-article');
+  const footer=article.locator('#next-up');
+  const link=footer.getByRole('link',{name:next.title,exact:true});
+  await link.waitFor();
+  await article.locator('#app-article-body[data-mode="frame-agent"]').waitFor();
+  const articleBox=await article.boundingBox();
+  const footerTop=(await footer.boundingBox()).y;
+  assert(footerTop>=articleBox.y+articleBox.height-1,'the queue starts below the article viewport');
+
+  const frame=article.frameLocator('.app-article-frame');
+  assert(await waitFor(()=>frame.locator('html').evaluate(root=>innerHeight>1000&&root.scrollHeight<=innerHeight+1),5000),'the embedded document can be read using the article scroller');
+  await link.scrollIntoViewIfNeeded();
+  const after=await link.boundingBox();
+  assert(after.y>=articleBox.y&&after.y+after.height<=articleBox.y+articleBox.height+1,'the queue link scrolls into the article viewport');
+  await link.click();
+  assert.equal(await page.locator('#app-article-open').getAttribute('href'),next.url);
   assert.deepEqual(app.errors,[]);
  }finally{await app.browser.close()}
 });
@@ -56,7 +122,7 @@ test('Front Pages kebab opens its own original page while another article stays 
  try{
   const row=app.page.locator('#app-list-body .browse-row').filter({has:app.page.locator('.browse-title-link').filter({hasText:STORIES[7].title})}).first();
   await row.locator('.browse-more').click();
-  const original=app.page.locator('#app-row-menu a').filter({hasText:'Open the original page'});
+  const original=app.page.locator('#app-row-menu a').filter({hasText:'Open in new tab'});
   assert.equal(await original.count(),1,'the row menu provides a native original-page link');
   assert.equal(await original.getAttribute('href'),STORIES[7].url);
   await original.focus();
@@ -99,7 +165,7 @@ test('keyboard users enter both article menus and return to their openers',{time
   const menu=app.page.locator('#app-row-menu');
   assert(await menu.evaluate(node=>node.querySelector('[role="menuitem"]')===node.getRootNode().activeElement),'the row menu starts at its first item');
   await app.page.keyboard.press('End');
-  assert(await menu.evaluate(node=>node.lastElementChild===node.querySelector('a')&&node.lastElementChild===node.getRootNode().activeElement),'the original-page link is the final action');
+  assert(await menu.evaluate(node=>[...node.querySelectorAll('[role="menuitem"]')].at(-1)===node.getRootNode().activeElement),'End reaches the final action');
   await app.page.keyboard.press('ArrowDown');
   assert(await menu.evaluate(node=>node.getRootNode().activeElement===node.querySelector('[role="menuitem"]')),'ArrowDown wraps to the first action');
   await app.page.keyboard.press('Escape');
@@ -223,19 +289,43 @@ for(const width of [1600,1100])test(`${width}px panel motion keeps article layou
  try{
   assert(await waitFor(()=>app.page.locator('#panel').evaluate(node=>getComputedStyle(node).transform==='none'),2000));
   for(const pane of ['list','discussion'])for(const direction of ['close','open']){
-   const frames=await app.page.locator('#app').evaluate(async(app,pane)=>{
-    const root=app.getRootNode(),start=performance.now(),frames=[];
-    const record=()=>{const r=root.querySelector('#app-article').getBoundingClientRect();frames.push({t:document.timeline.currentTime,x:r.x,width:r.width,height:r.height})};
-    record();root.querySelector('#app-toggle-'+pane).click();
-    await new Promise(resolve=>{const tick=()=>{record();if(performance.now()-start<360)requestAnimationFrame(tick);else resolve()};requestAnimationFrame(tick)});
-    return frames;
+   const {frames,settled}=await app.page.locator('#app').evaluate(async(app,pane)=>{
+    const root=app.getRootNode(),article=root.querySelector('#app-article');
+    const paneElement=root.querySelector(pane==='list'?'#app-list':'#panel');
+    const paneAnimations=()=>[...app.getAnimations(),...paneElement.getAnimations()];
+    const previous=new Set(paneAnimations()),frames=[];
+    const record=fraction=>{const {x,width,height}=article.getBoundingClientRect();frames.push({fraction,x,width,height})};
+    record(0);
+    root.querySelector('#app-toggle-'+pane).click();
+    const animations=paneAnimations().filter(animation=>!previous.has(animation));
+    if(!animations.length)throw new Error(`No animation started for ${pane}`);
+
+    // Sample the computed layout even when the browser skips intermediate frames.
+    for(const animation of animations)animation.pause();
+    await Promise.all(animations.map(animation=>animation.ready));
+    const duration=Math.max(...animations.map(animation=>animation.effect.getComputedTiming().endTime));
+    for(let step=0;step<=20;step++){
+     const fraction=step/20;
+     for(const animation of animations)animation.currentTime=duration*fraction;
+     record(fraction);
+    }
+
+    const finished=Promise.all(animations.map(animation=>animation.finished));
+    for(const animation of animations)animation.finish();
+    await finished;
+    record(1);
+    return {frames,settled:!app.classList.contains(pane+'-moving')};
    },pane);
+   assert(settled,`${pane} ${direction} settles after the animation finishes`);
+   const first=frames[0],last=frames.at(-1);
+   const axis=pane==='list'?'x':width===1600?'width':'height';
+   assert(Math.abs(last[axis]-first[axis])>=10,`${pane} ${direction} changes article ${axis}`);
    for(const key of ['x','width','height']){
-    const range=Math.abs(frames.at(-1)[key]-frames[0][key]);
+    const min=Math.min(first[key],last[key]),max=Math.max(first[key],last[key]),range=max-min;
     if(range<10)continue;
-    assert(frames.some(frame=>Math.abs(frame[key]-frames[0][key])>range*.15&&Math.abs(frame[key]-frames.at(-1)[key])>range*.15),`${pane} ${direction} interpolates article ${key}`);
+    assert(frames.some(frame=>frame[key]>min+range*.15&&frame[key]<max-range*.15),`${pane} ${direction} interpolates article ${key}`);
     for(let i=1;i<frames.length;i++){
-     const elapsed=frames[i].t-frames[i-1].t,allowed=range*Math.min(1,elapsed/240*3+.03)+1;
+     const elapsed=frames[i].fraction-frames[i-1].fraction,allowed=range*(elapsed*3+.03)+1;
      assert(Math.abs(frames[i][key]-frames[i-1][key])<=allowed,`${pane} ${direction} article ${key} does not jump between frames: ${JSON.stringify({before:frames[i-1],after:frames[i],allowed,frames})}`);
     }
    }

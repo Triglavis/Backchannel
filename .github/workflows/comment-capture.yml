@@ -43,6 +43,7 @@ jobs:
         run: npm run test:capture
         env:
           CAPTURE_ENGINES: ${{ matrix.browser }}
+          CAPTURE_CONCURRENCY: ${{ matrix.browser == 'firefox' && '2' || '1' }}
 
   account:
     name: Account Worker

@@ -9,8 +9,61 @@ const key = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const account = 'test-account';
 const session = {account, token: 'test-session', expiresAt: Date.now() + 600000, recoveryKey: key, protocol: 2, revision: 0, base: null};
 
-async function settings(app, url = appURL, {recordPasskeyDetails = false, beforeOpen} = {}) {
-  app.page.setDefaultTimeout(4000);
+test('an offline bookmark import and its undo sync across devices', {timeout: 25000}, async () => {
+  const remote = {revision:0, ciphertext:null, capabilities:{emailAvailable:true}, email:'birb@example.com'};
+  const options = {sharedStore:true, values:{[storage]:session}, settings:{updateCheck:false,sourceRefreshMinutes:0}};
+  const first = await launchApp(options);
+  const second = await launchApp(options);
+  try {
+    const firstAccount = mockAccount(first,remote);
+    await Promise.all([
+      firstAccount.start, mockAccount(second,remote).start,
+      mockPasskeySupport(first), mockPasskeySupport(second),
+    ]);
+    first.page.setDefaultTimeout(4500);
+    await first.page.goto(appURL);
+    assert(await waitFor(() => first.store.get(storage)?.base));
+    const revision = remote.revision;
+    const syncAttempts = firstAccount.requests.filter(path => path === '/account/snapshot').length;
+    remote.offline = true;
+    await first.page.locator('#app-rail [data-app-view="collection"]').click();
+    const [picker] = await Promise.all([
+      first.page.waitForEvent('filechooser'),
+      first.page.locator('#app-list-body').getByRole('button',{name:'Import bookmarks'}).click(),
+    ]);
+    await picker.setFiles({name:'bookmarks.html',mimeType:'text/html',buffer:Buffer.from(
+      '<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><DT><A HREF="https://books.example.com/collected" ADD_DATE="1700000000">A saved library link</A></DL>',
+    )});
+    await first.page.getByRole('button',{name:'Import 1 link'}).click();
+    await first.page.locator('#app-list-body').getByRole('link',{name:'A saved library link'}).waitFor();
+    assert(await waitFor(() => firstAccount.requests.filter(path => path === '/account/snapshot').length > syncAttempts),'the import queues sync');
+    assert.equal(remote.revision,revision,'the saved link remains available locally while the service is offline');
+    remote.offline = false;
+    await first.page.locator('#settings-toggle').click();
+    await first.page.getByRole('button',{name:'Account',exact:true}).click();
+    await first.page.getByRole('button',{name:'Sync now',exact:true}).click();
+    assert(await waitFor(() => remote.revision > revision),'retry uploads the encrypted library');
+    assert(!remote.ciphertext.includes('A saved library link'));
+    await second.page.goto(appURL);
+    assert(await waitFor(() => second.store.get('HNewhere:collected')?.some(entry=>entry.key==='books.example.com/collected')));
+    const imported = second.store.get('HNewhere:collected').find(entry=>entry.key==='books.example.com/collected');
+    assert.equal(imported.title,'A saved library link');
+    assert.equal(imported.previewOnOpen,true);
+    assert.equal(Object.hasOwn(imported,'unwatched'),false);
+    assert.equal(imported.addedAt,1700000000000);
+
+    const importedRevision = remote.revision;
+    await first.page.locator('#app-settings-close').click();
+    await first.page.locator('#toast').getByRole('button',{name:'Undo',exact:true}).click();
+    assert(await waitFor(() => remote.revision > importedRevision),'undo uploads the removal');
+    await second.page.locator('#settings-toggle').click();
+    await second.page.getByRole('button',{name:'Account',exact:true}).click();
+    await second.page.getByRole('button',{name:'Sync now',exact:true}).click();
+    assert(await waitFor(() => second.store.get('HNewhere:collected')?.length === 0),'the second device receives the removal');
+  } finally { await Promise.all([first.browser.close(),second.browser.close()]); }
+});
+
+async function mockPasskeySupport(app, {recordPasskeyDetails = false} = {}) {
   await app.context.addInitScript(({recordPasskeyDetails}) => {
     // Some headless WebKit builds lack WebAuthn. These UI tests mock the
     // ceremony. The Account Worker suite exercises the real Chromium API.
@@ -26,10 +79,17 @@ async function settings(app, url = appURL, {recordPasskeyDetails = false, before
       window.passkeyDetails = [];
       Object.defineProperty(PublicKeyCredential, 'signalCurrentUserDetails', {value: details => {
         window.passkeyDetails.push(details);
-        return new Promise(() => {});
+        return new Promise((resolve, reject) => {
+          window.finishPasskeyDetails = (accepted) => accepted ? resolve() : reject(new DOMException('Update dismissed', 'NotAllowedError'));
+        });
       }});
     }
   }, {recordPasskeyDetails});
+}
+
+async function settings(app, url = appURL, {recordPasskeyDetails = false, beforeOpen} = {}) {
+  app.page.setDefaultTimeout(4000);
+  await mockPasskeySupport(app, {recordPasskeyDetails});
   await app.page.goto(url);
   await beforeOpen?.();
   await app.page.locator('#settings-toggle').click();
@@ -87,6 +147,7 @@ test('Reader source diagnostics require a signed-in account with sharing enabled
     assert(await waitFor(() => reports.some(({body}) => body.operation === 'feed' && body.source === 'hn')));
     assert(reports.every(({body,authorization}) => !authorization && Object.keys(body).sort().join(',') === 'duration,operation,outcome,source,version'));
 
+    assert(await waitFor(() => app.store.get(storage)?.base?.preferences?.shareDiagnostics === true), 'consent sync finishes before reopening Account');
     await openPrivacy();
     await reportCheckbox.uncheck();
     assert(await waitFor(() => app.store.get(diagnosticsKey) === 0));
@@ -164,6 +225,7 @@ function mockAccount(app, remote) {
 
 test('diagnostics consent follows the signed-in account across devices', {timeout: 24000}, async () => {
   const remote = {revision:0, ciphertext:null, email:'birb@example.com', capabilities:{emailAvailable:true}};
+  const diagnosticsKey = 'HNewhere:account_diagnostics:' + account;
   const first = await launchApp({sharedStore:true, values:{[storage]:session, 'HNewhere:share_diagnostics':Date.now()-1000}});
   const second = await launchApp({sharedStore:true, values:{[storage]:session}, viewport:{width:390,height:844}, hasTouch:true});
   const managePrivacy = async app => {
@@ -175,18 +237,39 @@ test('diagnostics consent follows the signed-in account across devices', {timeou
     await Promise.all([mockAccount(first,remote).start,mockAccount(second,remote).start]);
     const firstChoice = await managePrivacy(first);
     assert(await waitFor(() => first.store.get(storage)?.revision === 1));
+    const back = first.page.locator('#account-manage-back');
+    assert(await waitFor(async () => !(await back.isDisabled()) && !(await firstChoice.isDisabled())));
     assert.equal(await firstChoice.isChecked(),false,'alpha consent was limited to the old device');
-    await firstChoice.check();
+    await firstChoice.hover();
+    await first.page.mouse.down();
+    await firstChoice.evaluate((input, diagnosticsKey) => {
+      const getValue = GM.getValue;
+      const resume = new Promise(resolve => { window.resumeDiagnosticsRefresh = resolve; });
+      GM.getValue = async (key, fallback) => {
+        if (key !== diagnosticsKey) return getValue(key, fallback);
+        GM.getValue = getValue;
+        const value = await getValue(key, fallback);
+        window.diagnosticsRefreshPending = true;
+        await resume;
+        return value;
+      };
+      input.closest('#settings-account-sync').dispatchEvent(new Event('account-settings-shown'));
+    }, diagnosticsKey);
+    assert(await waitFor(() => first.page.evaluate(() => window.diagnosticsRefreshPending)));
+    await first.page.mouse.up();
+    assert(await waitFor(() => first.store.get(diagnosticsKey) > 0), 'a profile refresh does not drop the click');
+    await first.page.evaluate(() => window.resumeDiagnosticsRefresh());
     assert(await waitFor(() => first.store.get(storage)?.revision === 2));
+    assert(await firstChoice.isChecked());
     const secondChoice = await managePrivacy(second);
     assert(await waitFor(() => secondChoice.isChecked()),'the second device receives consent');
     await secondChoice.uncheck();
     assert(await waitFor(() => second.store.get(storage)?.revision === 3));
-    await first.page.locator('#account-manage-back').click();
+    await back.click();
     await first.page.getByRole('button',{name:'Sync now',exact:true}).click();
     assert(await waitFor(() => first.store.get(storage)?.revision === 3));
     await first.page.getByRole('button',{name:'Manage account',exact:true}).click();
-    assert.equal(await firstChoice.isChecked(),false,'turning sharing off syncs too');
+    assert(await waitFor(async () => !(await firstChoice.isChecked())), 'turning sharing off syncs too');
   } finally { await Promise.all([first.browser.close(),second.browser.close()]); }
 });
 
@@ -224,7 +307,7 @@ test('Account sync uploads a private snapshot and another local profile can appl
   const saved = [{key: 'hn:42', kind: 'comment', url:'https://example.com/article', text:'Secret fixture comment', page:'example.com/article', addedAt: 15}];
   const collection = [{key:'example.com/article', url:'https://example.com/article', title:'Fixture article', addedAt: 6, unwatched:true, checkedAt:100, marks:{hn:23}}];
   const queue = [{id:'queued', key:'example.org/queued', url:'https://example.org/queued', title:'Queued fixture', addedAt:10, readAt:null}];
-  const first = await launchApp({sharedStore: true, settings: {theme:'dark', sourceRefreshMinutes:15}, values: {[storage]: session, [queueStorage]:queue, 'HNewhere:favorites': saved, 'HNewhere:collected': collection}});
+  const first = await launchApp({sharedStore: true, settings: {theme:'dark', sourceRefreshMinutes:15, hiddenTopics:['Browser privacy']}, values: {[storage]: session, [queueStorage]:queue, 'HNewhere:favorites': saved, 'HNewhere:collected': collection}});
   const second = await launchApp({sharedStore: true, values: {[storage]: session}});
   try {
     const firstAccount = mockAccount(first, remote);
@@ -406,11 +489,13 @@ test('Account sync uploads a private snapshot and another local profile can appl
     assert.equal(await secondPanel.getByLabel('Recovery key', {exact:true}).isVisible(), false);
     assert(await waitFor(() => second.store.get(storage)?.revision === remote.revision));
     assert.equal(second.store.get('HNewhere:settings').theme,'dark');
+    assert.deepEqual(second.store.get('HNewhere:settings').hiddenTopics,['Browser privacy']);
     assert.deepEqual(second.store.get('HNewhere:favorites'), saved);
     assert.deepEqual(second.store.get(queueStorage),queue);
     const folder = second.store.get('HNewhere:collected')[0];
     assert.equal(folder.key,collection[0].key);
-    assert.equal(folder.unwatched,true);
+    assert.equal(folder.previewOnOpen,true);
+    assert.equal(Object.hasOwn(folder,'unwatched'),false);
     assert.equal(folder.checkedAt ?? 0,0,'folder check state stays on its own device');
     await second.page.getByRole('button', {name:'Appearance', exact:true}).click();
     assert(await waitFor(() => second.page.locator('#settings-panel input[data-setting="theme"][value="dark"]').isChecked()));
@@ -677,6 +762,56 @@ test('phone Account controls match Settings typography and show passkey progress
   } finally { await app.browser.close(); }
 });
 
+test('reloading Reader skips the same passkey details and still sends a changed email', {timeout:20000}, async () => {
+  const app = await launchApp({sharedStore:true, values:{[storage]:{...session, base:{}}}});
+  try {
+    const remote = {email:'birb@example.com',capabilities:{emailAvailable:true}};
+    const mock = mockAccount(app,remote);
+    await mock.start;
+    const panel = await settings(app, appURL, {recordPasskeyDetails:true});
+    const emails = () => app.page.evaluate(() => window.passkeyDetails.map(details => details.name));
+    const detailsKey = 'HNewhere:account_passkey_details:' + account;
+    const waitForEmail = () => panel.locator('#account-email-value').getByText(remote.email,{exact:true}).waitFor();
+    const expectUpdate = async () => {
+      assert(await waitFor(async () => (await emails()).length === 1));
+      assert.deepEqual(await emails(), [remote.email]);
+    };
+    const reloadAccount = async () => {
+      await app.page.reload();
+      await app.page.locator('#settings-toggle').click();
+      await app.page.getByRole('button',{name:'Account',exact:true}).click();
+      await waitForEmail();
+    };
+    await waitForEmail();
+    await expectUpdate();
+
+    await reloadAccount();
+    assert.equal(await waitFor(async () => (await emails()).length > 0, 750), false, 'reload does not resend an in-flight update');
+
+    remote.email = 'new-birb@example.com';
+    await reloadAccount();
+    await expectUpdate();
+    await app.page.evaluate(() => window.finishPasskeyDetails(false));
+    assert(await waitFor(() => !app.store.has(detailsKey)), 'a dismissed update can be retried after reload');
+    const manage = panel.getByRole('button',{name:'Manage account',exact:true});
+    assert(await waitFor(async () => !(await manage.isDisabled())));
+    const emailReads = () => mock.requests.filter(path => path === '/account/email').length;
+    const previousReads = emailReads();
+    await panel.dispatchEvent('account-settings-shown');
+    assert(await waitFor(() => emailReads() > previousReads));
+    assert.equal(await waitFor(async () => (await emails()).length > 1, 750), false, 'a profile refresh respects the dismissal');
+
+    await reloadAccount();
+    await expectUpdate();
+    await app.page.evaluate(() => window.finishPasskeyDetails(true));
+    assert(await waitFor(() => app.store.get(detailsKey)?.fingerprint && !app.store.get(detailsKey)?.attempt));
+    await app.page.clock.setFixedTime(Date.now() + 2 * 60_000);
+    await reloadAccount();
+    assert.equal(await waitFor(async () => (await emails()).length > 0, 750), false, 'reload does not resend a completed update');
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
+});
+
 test('email updates confirm the passkey before sending a code and anchor request errors to Update', {timeout:20000}, async () => {
   const app = await launchApp({sharedStore:true, values:{[storage]:{...session, base:{}}}});
   try {
@@ -690,6 +825,7 @@ test('email updates confirm the passkey before sending a code and anchor request
       rpId:'backchnnl.app', userId:Buffer.from(account).toString('base64url'), name, displayName:'Backchannel account',
     });
     await panel.locator('#account-email-value').getByText(remote.email,{exact:true}).waitFor();
+    assert(await waitFor(() => app.page.evaluate(() => window.passkeyDetails.length === 1)));
     assert.deepEqual(await app.page.evaluate(() => window.passkeyDetails), [passkeyDetails(remote.email)]);
     await panel.getByRole('button',{name:'Manage account',exact:true}).click();
     const manage = panel.locator('#account-manage-page');
@@ -833,12 +969,18 @@ test('new account creation requires email delivery while existing users can sign
 });
 
 test('a stalled deletion passkey times out and can be retried or cancelled', {timeout:15000}, async () => {
-  const app = await launchApp({sharedStore:true, values:{[storage]: session}});
+  const app = await launchApp({
+    sharedStore:true, values:{[storage]:{...session,base:{}}}, settings:{updateCheck:false,sourceRefreshMinutes:0},
+  });
   try {
+    app.page.setDefaultTimeout(4000);
     await app.page.clock.install();
-    const proxy = mockAccount(app, {email:'birb@example.com',capabilities:{emailAvailable:true}});
-    await proxy.start;
-    const panel = await settings(app);
+    const remote = {revision:0,ciphertext:null,email:'birb@example.com',capabilities:{emailAvailable:true}};
+    const proxy = mockAccount(app, remote);
+    await Promise.all([proxy.start,mockPasskeySupport(app)]);
+    await app.page.goto(appURL+'#account-sync');
+    const panel = app.page.locator('#settings-account-sync');
+    await panel.locator('#account-email-value').getByText(remote.email,{exact:true}).waitFor();
     await app.page.evaluate(() => {
       window.deletionPrompts = [];
       window.accountActionFades = [];
@@ -966,14 +1108,39 @@ test('a passkey timeout cannot appear on sign-in after the account session is re
   } finally { await app.browser.close(); }
 });
 
-test('Sidebar account settings direct the user to Reader without loading account APIs', {timeout:12000}, async () => {
+test('Sidebar Account shows the saved profile and sync status without loading account APIs', {timeout:15000}, async () => {
   const article = STORIES[0].url;
-  const app = await launchApp({appHost:new URL(article).hostname, sharedStore:true, settings:{autoOpenSidebar:true}});
+  const lastSync = Date.now() - 60_000;
+  const app = await launchApp({
+    appHost:new URL(article).hostname, sharedStore:true, settings:{autoOpenSidebar:true,updateCheck:false},
+    values:{[storage]:{...session,lastSync},['HNewhere:account_avatar:' + account]:{shape:'wide',color:'blue',background:'sky'}},
+  });
   try {
-    const account = await settings(app, article);
-    await account.getByRole('link', {name:'Open Reader'}).waitFor({timeout:2500});
-    assert.equal(await account.getByRole('link', {name:'Open Reader'}).getAttribute('href'), appURL + '#account-sync');
-    assert.equal(await account.getByRole('button', {name:'Create passkey'}).count(),0);
+    const api = mockAccount(app, {email:'birb@example.com',capabilities:{emailAvailable:true}});
+    await api.start;
+    const panel = await settings(app, article);
+    const manage = panel.getByRole('link', {name:'Manage account in Reader'});
+    await manage.waitFor({timeout:2500});
+    assert.equal(await manage.getAttribute('href'), appURL + '#account-sync');
+    assert.equal(await manage.getAttribute('target'), '_blank');
+    assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'), 'wide');
+    assert(await panel.getByText('Signed in on this device', {exact:true}).isVisible());
+    assert.equal(await panel.locator('#account-last-sync time').getAttribute('datetime'), new Date(lastSync).toISOString());
+    assert.equal(await panel.getByRole('button', {name:'Create passkey'}).count(),0);
+    const markup = await panel.innerHTML();
+    for (const privateValue of [session.token, session.account, session.recoveryKey, 'birb@example.com']) {
+      assert(!markup.includes(privateValue), 'private account fields stay out of the page');
+    }
+
+    app.store.delete(storage);
+    await app.page.locator('#app-settings-close').click();
+    await app.page.locator('#settings-toggle').click();
+    await app.page.getByRole('button', {name:'Account',exact:true}).click();
+    await panel.getByRole('link', {name:'Sign in to Backchannel'}).waitFor({timeout:2500});
+    assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'),null);
+    assert.equal(await panel.locator('#account-last-sync').isVisible(),false);
+    assert.deepEqual(api.requests,[]);
+    assert(!app.requests.some(({url})=>url.startsWith(appURL + 'account/')));
     assert.deepEqual(app.errors,[]);
   } finally { await app.browser.close(); }
 });

@@ -62,12 +62,16 @@ Worth stating plainly, because the permissions are broad by necessity:
   | Hypothes.is | `api.hypothes.is` | the URL of each page you visit, to find public annotations on it. No account, signed in or out |
   | *no source enabled* | none | nothing -- the script performs no lookup at all. Kind of weird to use it this way, but no judgements. |
 
-  Eleven sit outside that table because they are not lookups:
+  The script also makes these requests.
 
   | Host | When | What it is told |
   | --- | --- | --- |
   | `old.reddit.com` | only when you press vote, reply or submit | the post or comment you are acting on, or the page you submit, in a popup window you can see. Nothing at page load |
   | `backchnnl.app` | when the Reddit connection notice is shown | a fixed illustration image, requested without a referrer. No article URL or Reddit session is sent |
+  | `topics.backchnnl.app` or `backchannel-topics.triglavis-llc.workers.dev` | when a view uses the shared topic index | an anonymous request for the public index. Link and topic matching takes place on your device |
+  | `en.wikipedia.org`, `commons.wikimedia.org` | when Reader needs a topic image or its credit | short topic subject names and the names of the resulting Wikimedia files. Anonymous requests omit saved link addresses and article bodies |
+  | `topics.backchnnl.app` | when you confirm a topic report for a link in Reader | your Backchannel session, the link's address, the displayed topic, and any suggested topic. Backchannel stores the report for internal review with a hashed account identifier to count one report per account per link |
+  | `upload.wikimedia.org` or `thumb.wikimedia.org` | when a topic with a verified subject image comes into view | the image address without a referrer. The Topics Worker looks up images using subjects from public feeds |
   | `cdn.jsdelivr.net` | when your manager fetches the script's declared resources, and again from the page itself if it did not | nothing about you -- it is a file download of a fixed, versioned URL |
   | the page you open in the reader on backchnnl.app | only when that page gives no answer from inside its frame | nothing but the request itself: one `GET` without cookies, to read whether it may be framed, whether it is a picture and, if it may not be framed, its text |
   | the site of each article in the reader's list on backchnnl.app or the Sidebar's Backchannel view | when the list shows the article, since 1.6.15 in Reader and 1.6.18.1 in the Sidebar | nothing but a request for its icon, `/favicon.ico`, sent without a referrer |

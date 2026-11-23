@@ -10,17 +10,35 @@ async function ready(app){
   assert(await waitFor(async()=>await app.page.locator('#panel').evaluate(panel=>getComputedStyle(panel).transform==='none'),2000),'pane entrance has settled before measuring its edge');
 }
 
+async function assertToolbarOrder(page, toolbar, selectors, axis = 'x') {
+  const controls = selectors.map(selector => toolbar.locator(selector));
+  const boxes = await Promise.all(controls.map(control => control.boundingBox()));
+  assert(boxes.every(Boolean), 'all expected toolbar controls are visible');
+  for (let index = 1; index < boxes.length; index++) {
+    assert(boxes[index][axis] > boxes[index - 1][axis], `${selectors[index]} follows ${selectors[index - 1]} visually`);
+  }
+
+  await controls[0].focus();
+  for (let index = 1; index < controls.length; index++) {
+    await page.keyboard.press(process.env.ENGINE === 'webkit' ? 'Alt+Tab' : 'Tab');
+    assert(await controls[index].evaluate(node => node.getRootNode().activeElement === node), `Tab reaches ${selectors[index]} after ${selectors[index - 1]}`);
+  }
+  return boxes;
+}
+
 test('wide Reader Front Pages toggle overlaps its panel and pane controls remain reachable when collapsed',{timeout:20000},async()=>{
   const app=await launchApp({sharedStore:true,viewport:{width:1600,height:950},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
     await ready(app);
+    const actions = app.page.locator('#app-list > .app-pane-head .app-pane-actions');
+    await assertToolbarOrder(app.page, actions, ['#app-list-sync', '#app-mark-read', '.app-select-links']);
     const edges=await app.page.locator('#app-reading').evaluate(reading=>{
       const root=reading.getRootNode(),list=root.querySelector('#app-list').getBoundingClientRect(),panel=root.querySelector('#panel').getBoundingClientRect();
       const b=id=>{const r=root.querySelector(id).getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,center:r.x+r.width/2}};
-      return{listRight:list.right,panelLeft:panel.left,syncRight:b('#app-list-sync').right,left:b('#app-toggle-list'),right:b('#app-toggle-discussion')};
+      return{listRight:list.right,panelLeft:panel.left,controlsRight:b('#app-list > .app-pane-head .app-select-links').right,left:b('#app-toggle-list'),right:b('#app-toggle-discussion')};
     });
     assert(Math.abs(edges.left.center-edges.listRight)<=1,'the Front Pages toggle straddles the list edge');
-    assert(edges.left.x-edges.syncRight>=4,`the pane toggle leaves the Sync button clear: ${JSON.stringify(edges)}`);
+    assert(edges.left.x-edges.controlsRight>=4,`the pane toggle leaves the last list action clear: ${JSON.stringify(edges)}`);
     assert.equal(await app.page.locator('#app-toggle-discussion').evaluate(node=>Boolean(node.closest('#app-chin'))),true,'Discussion is available in the desktop chin');
     for(const [id,hidden] of [['#app-toggle-list','list-hidden'],['#app-toggle-discussion','discussion-hidden']]){
       await app.page.locator(id).click();
@@ -39,13 +57,56 @@ test('wide Reader Front Pages toggle overlaps its panel and pane controls remain
   }finally{await app.browser.close()}
 });
 
+for (const [width, heading] of [[1600, '#app-list > .app-pane-head'], [390, '#app-list-heading']]) {
+  test(`${width}px Collection places view tabs between the toolbar and link list`, {timeout: 20000}, async () => {
+    const topic = {id: 'story:archive', kind: 'story', label: 'Preserving an online archive'};
+    const saved = [
+      {key: 'saved.example.com/article', url: 'https://saved.example.com/article', title: 'A saved article'},
+      {key: 'saved.example.org/article', url: 'https://saved.example.org/article', title: 'A related article'},
+    ];
+    const app = await launchApp({
+      sharedStore: true,
+      viewport: {width, height: 950},
+      settings: {sources: {hn: true}, frontPageMode: 'sources', updateCheck: false},
+      values: {
+        'HNewhere:collection_filed': true,
+        'HNewhere:collected_migrated': true,
+        'HNewhere:collected': saved.map(entry => ({...entry, addedAt: 1700000000000, unwatched: true})),
+      },
+      responses: [{match: url => url === 'https://topics.backchnnl.app/api/topics', json: {
+        version: 1, generatedAt: new Date().toISOString(), topics: [topic],
+        pages: saved.map(({key}) => ({key, topicIds: [topic.id]})),
+      }}],
+    });
+    try {
+      const {page} = app;
+      await page.goto('https://backchnnl.app/');
+      await page.locator('#app-rail [data-app-view="collection"]').click();
+      await page.locator('#app-list-body').getByRole('link', {name: 'A saved article', exact: true}).waitFor();
+      const controls = width === 1600 ? ['#app-list-sync', '.app-collection-filter', '.app-select-links'] : ['.app-collection-filter'];
+      await assertToolbarOrder(page, page.locator(`${heading} .app-pane-actions`), controls);
+      if (width === 390) {
+        assert.equal(await page.getByRole('button', {name: 'Select links', exact: true}).count(), 0);
+      }
+      const tabs = page.getByRole('tablist', {name: 'Link view', exact: true});
+      await tabs.waitFor();
+      const [toolbar, tabStrip, list] = await Promise.all([page.locator(heading), tabs, page.locator('#app-list-body')].map(node => node.boundingBox()));
+      assert(tabStrip.y >= toolbar.y + toolbar.height);
+      assert(tabStrip.y + tabStrip.height <= list.y);
+      assert.equal(await tabs.getByRole('tab', {name: 'All links', exact: true}).getAttribute('aria-selected'), 'true');
+      assert.deepEqual(app.errors, []);
+    } finally {
+      await app.browser.close();
+    }
+  });
+}
+
 test('wide Reader keeps its real article actions together in the chin',{timeout:20000},async()=>{
   const app=await launchApp({sharedStore:true,viewport:{width:1600,height:950},votable:{[STORIES[0].id]:'updown'},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
     await ready(app);
     const ids=['#app-article-actions [data-item-action="save"]','#app-view-toggle','#app-toggle-discussion'];
-    const boxes=[];for(const id of ids)boxes.push(await app.page.locator(id).boundingBox());
-    assert(boxes.every(Boolean),'all article controls are available');
+    const boxes = await assertToolbarOrder(app.page, app.page.locator('#app-chin-actions'), ids);
     const chin=await app.page.locator('#app-chin').boundingBox();
     for(const box of boxes){assert(Math.abs(box.y+box.height/2-(boxes[0].y+boxes[0].height/2))<1,'controls align horizontally');assert(box.y>=chin.y&&box.y+box.height<=chin.y+chin.height,'controls fit inside the chin')}
     await app.page.locator('#app-view-toggle').click();
@@ -60,20 +121,21 @@ test('wide Reader keeps its real article actions together in the chin',{timeout:
 });
 
 for(const width of [390])test(`${width}px Reader retains its bottom-right mobile-style action column`,{timeout:20000},async()=>{
-  const app=await launchApp({sharedStore:true,viewport:{width,height:900},votable:{[STORIES[0].id]:true},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
+  const story = STORIES[1];
+  const app=await launchApp({sharedStore:true,viewport:{width,height:900},votable:{[story.id]:true},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
-    await app.page.goto('https://backchnnl.app/');await app.page.locator('#app-list-body .browse-title-link').first().click();
+    await app.page.goto('https://backchnnl.app/');await app.page.locator('#app-list-body .browse-title-link').filter({hasText: story.title}).click();
     const like=app.page.locator('#app-bar-like');
     await like.waitFor();
-    const controls=app.page.locator('#app-bar > button:visible');
-    const boxes=await controls.evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}}));
-    assert(boxes.length>=3,'the action column has the available article actions');
+    await app.page.locator('#app-bar-view').waitFor();
+    const controls = ['#app-bar-save', '#app-bar-like', '#app-bar-view', '#app-bar-open', '#app-bar-discussion'];
+    const boxes = await assertToolbarOrder(app.page, app.page.locator('#app-bar'), controls, 'y');
     for(const box of boxes)assert(Math.abs(box.x+box.width/2-(boxes[0].x+boxes[0].width/2))<1,'controls share a vertical center line');
     const bounds=await app.page.locator(width===390?'#app':'#app-article').boundingBox();
     assert(bounds.x+bounds.width-boxes[0].x-boxes[0].width>=8&&bounds.x+bounds.width-boxes[0].x-boxes[0].width<=18,'the column stays at the right edge');
     const [vote]=await Promise.all([app.context.waitForEvent('page'),like.click()]);
     await vote.waitForURL(target=>target.hostname==='news.ycombinator.com'&&new URLSearchParams(target.hash.slice(1)).get('action')==='up');
-    assert.equal(new URLSearchParams(new URL(vote.url()).hash.slice(1)).get('item'),String(STORIES[0].id));
+    assert.equal(new URLSearchParams(new URL(vote.url()).hash.slice(1)).get('item'),String(story.id));
     await vote.close();
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}

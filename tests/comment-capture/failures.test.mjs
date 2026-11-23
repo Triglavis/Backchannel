@@ -478,7 +478,7 @@ test("Reader retains an early draft while a zero-count feed source is checked", 
     assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 15000));
     assert.equal(await composer.locator('.composer-text').inputValue(), 'A draft from a Bluesky feed');
     await app.page.locator('#comment-sort').click();
-    await app.page.getByRole('option', { name: 'Newest', exact: true }).click();
+    await app.page.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 1, 5000), 'changing sort refreshes the discussion');
     assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 15000));
     assert.equal(await composer.locator('.composer-text').inputValue(), 'A draft from a Bluesky feed', 'sorting keeps the draft after the collective discussion is resolved');

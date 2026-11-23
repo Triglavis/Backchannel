@@ -7,6 +7,7 @@ tests/*
 !tests/thread-cache.html
 !tests/comment-capture/
 !tests/account/
+!tests/topics/
 tests/comment-capture/node_modules/
 
 # Local Cloudflare secrets and database state.

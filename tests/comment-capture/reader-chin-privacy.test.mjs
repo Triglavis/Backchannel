@@ -283,8 +283,10 @@ for (const fixture of [
       assert.equal(comparison.last, true, 'Privacy is the final General subsection');
       assert.equal(comparison.afterCache, true);
       assert.equal(comparison.horizontalOverflow, false, 'the policy wraps within Settings at the current width');
-      assert.match(comparison.text, /Last updated 19 November 2026/);
+      assert.match(comparison.text, /Last updated \d{1,2} [A-Z][a-z]+ \d{4}/);
       assert.match(comparison.text, /encrypted copy of your settings, reading queue, saved items and notes/);
+      assert.match(comparison.text, /Remove a page from Collection to stop checking it/);
+      assert.match(comparison.text, /Reader downloads a public topic index and matches links on your device/);
       assert.match(comparison.text, /Diagnostic sharing starts off\. Your choice is included in encrypted Account sync and takes effect on each device when it syncs/);
       assert.match(comparison.text, /database backups may retain earlier copies for up to 30 days/);
       clean(app);

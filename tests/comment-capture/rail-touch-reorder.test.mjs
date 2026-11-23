@@ -8,7 +8,7 @@ test('holding an icon allows a touch reorder without canceling on capture transf
 },async()=>{
   const app=await launchApp({
     engine:'chromium',hasTouch:true,sharedStore:true,viewport:{width:1100,height:700},
-    settings:{sources:{hn:true,lemmy:true},frontPageMode:'topics',frontPageTopics:['technology'],updateCheck:false},
+    settings:{sources:{hn:true,lemmy:true},frontPageMode:'topics',frontPageTopics:['technology'],frontPageIncludeTopLinks:true,updateCheck:false},
   });
   try{
     await app.page.goto('https://backchnnl.app/');
@@ -29,7 +29,7 @@ test('holding an icon allows a touch reorder without canceling on capture transf
     }
     assert.equal(await section.evaluate(node=>node.classList.contains('is-reordering')),true,'the implicit capture loss on the original icon does not cancel the rail drag');
     await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
-    const expected=['source:lemmy','topic:technology','source:hn'];
+    const expected=['top-stories','source:lemmy','topic:technology','source:hn'];
     assert.deepEqual(await section.locator('.rail-button').evaluateAll(nodes=>nodes.map(node=>node.dataset.appView)),expected);
     assert(await waitFor(()=>app.store.get('HNewhere:app_rail_order')?.[0]==='source:lemmy',3000),'the completed touch reorder is saved');
     assert.equal(await app.page.locator('#app-rail [data-app-view="unread"]').getAttribute('aria-pressed'),'true','the drop does not activate a source');
@@ -43,7 +43,7 @@ test('an ordinary touch swipe scrolls an overflowing source rail without reorder
 },async()=>{
   const app=await launchApp({
     engine:'chromium',hasTouch:true,sharedStore:true,viewport:{width:1100,height:400},
-    settings:{sources:{hn:true,lemmy:true,lobsters:true,bsky:true},frontPageMode:'topics',frontPageTopics:['world','technology','science','health'],updateCheck:false},
+    settings:{sources:{hn:true,lemmy:true,lobsters:true,bsky:true},frontPageMode:'topics',frontPageTopics:['world','technology','science','health'],frontPageIncludeTopLinks:true,updateCheck:false},
   });
   try{
     await app.page.goto('https://backchnnl.app/');
@@ -55,6 +55,7 @@ test('an ordinary touch swipe scrolls an overflowing source rail without reorder
     const before=await section.locator('.rail-button').evaluateAll(nodes=>nodes.map(node=>node.dataset.appView));
     const start=await section.locator('.rail-button').nth(2).boundingBox();
     const x=start.x+start.width/2,y=start.y+start.height/2;
+    assert(await section.evaluate((node,point)=>node.contains(node.getRootNode().elementFromPoint(point.x,point.y)),{x,y}),'the swipe starts inside the scrollable rail');
     const cdp=await app.context.newCDPSession(app.page);
     await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{id:0,x,y}]});
     for(let step=1;step<=8;step++){
