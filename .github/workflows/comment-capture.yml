@@ -16,7 +16,7 @@ concurrency:
 jobs:
   regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.browser == 'webkit' && 45 || 35 }}
     strategy:
       fail-fast: false
       matrix:
