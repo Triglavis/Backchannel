@@ -93,7 +93,7 @@ for (const [width, heading] of [[1600, '#app-list > .app-pane-head'], [390, '#ap
       const [toolbar, tabStrip, list] = await Promise.all([page.locator(heading), tabs, page.locator('#app-list-body')].map(node => node.boundingBox()));
       assert(tabStrip.y >= toolbar.y + toolbar.height);
       assert(tabStrip.y + tabStrip.height <= list.y);
-      assert.equal(await tabs.getByRole('tab', {name: 'All links', exact: true}).getAttribute('aria-selected'), 'true');
+      assert.equal(await tabs.getByRole('tab', {name: 'By link', exact: true}).getAttribute('aria-selected'), 'true');
       assert.deepEqual(app.errors, []);
     } finally {
       await app.browser.close();
@@ -138,7 +138,7 @@ for (const [width, hasTouch] of [[1600, false], [320, true]]) {
         return [width, height];
       }));
       await page.goto('https://backchnnl.app/');
-      await page.getByRole('tab', {name: 'Topics', exact: true}).click();
+      await page.getByRole('tab', {name: 'By topic', exact: true}).click();
       await page.locator('.app-topic-row').filter({hasText: topic.label}).click();
       const backSize = await size(page.getByRole('button', {name: 'Back to topics', exact: true}));
       await page.locator('#app-list-body').getByRole('link', {name: STORIES[0].title, exact: true}).click();

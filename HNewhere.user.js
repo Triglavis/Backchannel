@@ -18298,6 +18298,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		if (collectionSort === "saved") matched.sort((a, b) => (b.collected?.addedAt || b.touched) - (a.collected?.addedAt || a.touched));
 		const projection = await appSavedTopicProjection(matched, (doc) => doc.url,
 			(index) => readerCollectionSubjectGroups(documents, tagsByPage, index), coverage, documents);
+		await applyAppTopicVisits(projection, isCurrent);
 		if (!isCurrent()) return;
 		list.replaceChildren();
 		paintAppTopicProjection(list, projection, isCurrent);
@@ -18785,6 +18786,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		const coverage = appState && entries.length ? await loadReaderArticleCoverage(entries) : null;
 		const projection = reader ? await appSavedTopicProjection(entries, (entry) => entry.url,
 			(index) => readerStorySubjectGroups(entries, (entry) => [entry], coverage, index, true), coverage) : null;
+		if (projection) await applyAppTopicVisits(projection, isCurrent);
 
 		if (!isCurrent()) {
 			return;
@@ -37445,7 +37447,8 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 	opacity:.42;
 }
 
-.reader-list .browse-row.is-unread .browse-thumb-wrap::after {
+.reader-list .browse-row.is-unread .browse-thumb-wrap::after,
+.reader-list .app-topic-row.is-unread .app-topic-media::after {
 	content:"";
 	position:absolute;
 	top:-4px;
@@ -39119,7 +39122,7 @@ ${SETTINGS_MODAL_CSS}
 
 .app-topic-header {
 	display:flex;
-	flex-wrap:wrap;
+	flex:none;
 	align-items:center;
 	gap:6px;
 	min-height:36px;
@@ -39129,7 +39132,12 @@ ${SETTINGS_MODAL_CSS}
 }
 
 .app-topic-summary { min-width:0; flex:1 1 96px; overflow-wrap:anywhere; }
-.app-topic-summary > :first-child { display:block; }
+.app-topic-summary > strong {
+	display:-webkit-box;
+	-webkit-box-orient:vertical;
+	-webkit-line-clamp:3;
+	overflow:hidden;
+}
 .app-topic-meta { color:var(--muted); font-size:11px; }
 .app-topic-more { min-height:36px; padding:6px 0; }
 .app-topic-more-status { color:var(--muted); }
@@ -39152,6 +39160,7 @@ ${SETTINGS_MODAL_CSS}
 
 .app-topic-row:hover { background:var(--hover-tint); }
 .app-topic-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.app-topic-row:not(.is-unread) .app-topic-name { color:var(--muted); }
 .app-topic-media {
 	display:block;
 	flex:none;
@@ -39162,6 +39171,7 @@ ${SETTINGS_MODAL_CSS}
 	overflow:hidden;
 	background:var(--hover-tint);
 }
+.app-topic-row .app-topic-media { overflow:visible; }
 
 .app-topic-icon {
 	display:grid;
@@ -39192,6 +39202,7 @@ ${SETTINGS_MODAL_CSS}
 	inset:0;
 	width:100%;
 	height:100%;
+	border-radius:inherit;
 	object-fit:cover;
 	opacity:0;
 }
@@ -44202,8 +44213,8 @@ ${listViewControls}
 <div id="app-list-pull" class="app-list-pull" aria-hidden="true"></div>
 <div id="app-list-heading" class="app-list-heading"><button id="app-list-heading-button" type="button" aria-haspopup="menu" aria-expanded="false"><span id="app-list-heading-text"></span></button><span class="app-pane-actions">${collectionFilterHTML()}</span></div>
 <div id="app-list-view" role="tablist" aria-label="Link view" hidden>
-<button id="app-all-links-tab" type="button" role="tab" aria-selected="true" aria-controls="app-list-body">All links</button>
-<button id="app-topics-tab" type="button" role="tab" aria-selected="false" aria-controls="app-list-body" tabindex="-1">Topics</button>
+<button id="app-all-links-tab" type="button" role="tab" aria-selected="true" aria-controls="app-list-body">By link</button>
+<button id="app-topics-tab" type="button" role="tab" aria-selected="false" aria-controls="app-list-body" tabindex="-1">By topic</button>
 </div>
 <div id="app-list-tags" class="app-list-tags" role="group" aria-label="Filters" hidden></div>
 <div id="app-list-topic" class="app-topic-header" hidden>
@@ -47756,6 +47767,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	let appSettingsCaret = null;
 
 	const APP_TOPICS_MODE_KEY = "HNewhere:app_browse_topics";
+	const APP_TOPIC_VISITS_KEY = "HNewhere:topic_visits";
 	const SHARED_TOPIC_INDEX_KEY = "HNewhere:shared_topic_index";
 	const SHARED_TOPIC_INDEX_URL = "https://topics.backchnnl.app/api/topics";
 	const SHARED_TOPIC_COVERAGE_URL = SHARED_TOPIC_INDEX_URL + "/coverage";
@@ -48060,16 +48072,24 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return { links: [...links.values()] };
 	}
 
-	function appTopicExtraIndexIds(group, index = sharedTopicCache?.index, allowed = () => true) {
-		const known = new Set([...group.rows, ...group.extraRows].map((row) => sharedTopicURLKey(appTopicRowURL(row))));
-		const ids = [];
-		for (const id of new Set([group.id, ...(group.equivalentIds || [])])) {
-			const extra = [...(index?.topicPages.get(id) || [])].filter((key) => !known.has(key) && !group.assignedElsewhere?.has(key) && allowed(key));
-			if (!extra.length) continue;
-			ids.push(id);
-			for (const key of extra) known.add(key);
-		}
-		return ids;
+	function appTopicLinkKey(url) {
+		return normalizeURL(canonicalSharedTopicURL(url)?.href || url);
+	}
+
+	function appTopicVisibleOrAssignedKeys(group) {
+		const known = new Set(group.rows.map((row) => appTopicLinkKey(appTopicRowURL(row))));
+		for (const key of group.assignedElsewhere || []) known.add(appTopicLinkKey("https://" + key));
+		return known;
+	}
+
+	function appTopicExtraIndexIds(group, index = sharedTopicCache?.index, excluded = appTopicVisibleOrAssignedKeys(group), matchesMuted) {
+		const local = new Set(group.extraRows.map((row) => appTopicLinkKey(appTopicRowURL(row))));
+		return [...new Set([group.id, ...(group.equivalentIds || [])])].filter((id) =>
+			[...(index?.topicPages.get(id) || [])].some((key) => {
+				const url = "https://" + key;
+				const article = appTopicLinkKey(url);
+				return article && !excluded.has(article) && !local.has(article) && !matchesMuted?.({ story: { url } });
+			}));
 	}
 
 	function clearAppTopicExtra() {
@@ -48080,25 +48100,43 @@ ${note ? appShortcutNoteHTML(note) : ""}
 
 	async function revealAppTopicExtra(ids, button) {
 		const state = appState;
-		if (state.topicExtra?.request) return;
-		const extra = state.topicExtra = { links: state.topicExtra?.links || [], loaded: !ids.length };
-		const focus = button.getRootNode().activeElement === button;
+		const previous = state.topicExtra;
+		if (previous?.request || previous?.loaded) return;
+		const extra = state.topicExtra = {
+			links: previous?.links || new Map(), completed: previous?.completed || new Set(), previousKeys: new Set(state.topicExtraRows?.keys()),
+		};
+		const root = state.ui.shadow;
+		const focus = root.activeElement === button;
 		button.disabled = true;
 		button.textContent = "Loading hidden links…";
-		if (ids.length) {
+		const pending = ids.filter((id) => !extra.completed.has(id));
+		if (pending.length) {
 			const request = extra.request = new AbortController();
-			const results = await Promise.all(ids.map((id) => requestSharedTopicCoverage(id, request.signal)));
+			const results = await Promise.all(pending.map((id) => requestSharedTopicCoverage(id, request.signal)));
 			if (appState !== state || state.topicExtra !== extra) return;
 			extra.request = null;
-			const links = new Map(extra.links.map((link) => [link.url, link]));
-			for (const result of results) for (const link of result?.links || []) links.set(link.url, link);
-			extra.links = [...links.values()];
-			extra.loaded = results.every((result) => result?.links || result?.status === "missing");
-			extra.failed = !extra.loaded;
+			for (const [i, result] of results.entries()) {
+				if (result?.links || result?.status === "missing") extra.completed.add(pending[i]);
+				else extra.failed = true;
+				for (const link of result?.links || []) {
+					const key = appTopicLinkKey(link.url);
+					if (!extra.links.has(key)) extra.links.set(key, { ...link, posts: new Map() });
+					const posts = extra.links.get(key).posts;
+					for (const post of link.posts) {
+						if (!posts.has(post.id) || post.comments > posts.get(post.id).comments) posts.set(post.id, post);
+					}
+				}
+			}
 		}
+		extra.loaded = !extra.failed;
+		const follow = !root.activeElement || root.activeElement === button;
 		await renderAppList();
-		if (focus && appState === state && state.topicExtra === extra && !state.ui.shadow.activeElement) {
-			state.ui.shadow.querySelector("#app-list-body [data-topic-extra] .browse-title-link, #app-list-body .app-topic-more")?.focus({ preventScroll: true });
+		if (follow && appState === state && state.topicExtra === extra && !root.activeElement) {
+			const list = root.getElementById("app-list-body");
+			const next = [...list.querySelectorAll("[data-topic-extra]")].find((row) => !extra.previousKeys.has(row.dataset.appKey));
+			const target = next?.querySelector(".browse-title-link") || list.querySelector(".app-topic-more") || list.querySelector(".app-topic-more-status");
+			if (focus) target?.focus({ preventScroll: true });
+			target?.scrollIntoView({ block: "nearest", inline: "nearest" });
 		}
 	}
 
@@ -48112,22 +48150,25 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		if (!isCurrent() || state.activeListTopic !== group) return;
 		const index = sharedTopicCache?.index;
 		const muted = new Set(settings.hiddenTopics.map(topicFilterKey));
-		const mutedTopic = (id) => {
-			const topic = index?.topics.get(id);
-			return topic && readerTopicLabels(topic).some((label) => muted.has(topicFilterKey(label)));
-		};
-		const allowed = (key) => !hidden.has(normalizeURL("https://" + key)) && !index?.pages.get(key)?.some(mutedTopic);
-		const matchesMuted = readerHiddenTopicMatcher(settings.hiddenTopics, muted);
+		const excluded = appTopicVisibleOrAssignedKeys(group);
+		for (const key of hidden) excluded.add(appTopicLinkKey("https://" + key));
+		if (muted.size && index) {
+			for (const [id, pages] of index.topicPages) {
+				if (!readerTopicLabels(index.topics.get(id)).some((label) => muted.has(topicFilterKey(label)))) continue;
+				for (const key of pages) excluded.add(appTopicLinkKey("https://" + key));
+			}
+		}
+		const matchesMuted = muted.size ? readerHiddenTopicMatcher(settings.hiddenTopics, muted) : null;
 		const canShow = (entry) => {
-			const key = sharedTopicURLKey(entry.story.url);
-			return !group.assignedElsewhere?.has(key) && !isStoryHidden(entry.story, hidden) && allowed(key) && !matchesMuted(entry);
+			const key = appTopicLinkKey(entry.story.url);
+			return key && !excluded.has(key) && !isStoryHidden(entry.story, hidden) && !matchesMuted?.(entry);
 		};
 		const local = group.extraRows.map((row) => row.story ? row : { story: row.discussions ? documentStory(row) : row, also: row.discussions || [] });
 		const extra = state.topicExtra;
-		const ids = appTopicExtraIndexIds(group, index, allowed);
+		const ids = appTopicExtraIndexIds(group, index, excluded, matchesMuted);
 		if (extra) {
-			const published = extra.links.toSorted((a, b) => (b.postedAt ?? 0) - (a.postedAt ?? 0)).map((link) => {
-				const [first, ...also] = link.posts.map((post) => ({
+			const published = [...extra.links.values()].sort((a, b) => (b.postedAt ?? 0) - (a.postedAt ?? 0)).map((link) => {
+				const [first, ...also] = [...link.posts.values()].map((post) => ({
 					id: post.sourceId, source: post.source, url: link.url, title: post.title, permalink: post.url,
 					time: (post.postedAt || 0) / 1000, descendants: post.comments, site: post.community || link.domain,
 					community: post.community.replace(/^!/, "").split("@")[0],
@@ -48135,13 +48176,12 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				return { story: { id: normalizeURL(link.url), ...first, url: link.url, title: link.title,
 					site: link.domain, time: (link.postedAt || 0) / 1000 }, also };
 			});
-			const seen = new Set(group.rows.map((row) => normalizeURL(appTopicRowURL(row))));
 			const queuedKeys = new Set(queue.map(queueKey));
 			const entries = state.topicExtraRows = new Map();
 			for (const entry of [...local, ...published]) {
+				if (!canShow(entry)) continue;
+				excluded.add(appTopicLinkKey(entry.story.url));
 				const key = normalizeURL(entry.story.url);
-				if (!key || seen.has(key) || !canShow(entry)) continue;
-				seen.add(key);
 				entries.set(key, entry);
 				const row = renderBrowseRow(entry.story, list, 0, {
 					also: entry.also, look: looks?.[key], queuedKeys, hideable: true, reload: () => renderAppList(),
@@ -48156,23 +48196,29 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				refreshSaveControls().catch(console.error);
 			}
 		}
-		if (extra?.loaded || !ids.length && !local.some(canShow)) return;
+		const exhausted = extra?.loaded && ![...state.topicExtraRows.keys()].some((key) => !extra.previousKeys.has(key));
+		if (extra?.loaded && !exhausted) return;
+		if (!extra && !ids.length && !local.some(canShow)) return;
 		const nav = document.createElement("div");
 		nav.className = "browse-nav";
-		const button = document.createElement("button");
-		button.type = "button";
-		button.className = "browse-nav-link app-topic-more";
-		button.textContent = extra?.request ? "Loading hidden links…" : "Load hidden links about this topic";
-		button.disabled = Boolean(extra?.request);
-		button.onclick = () => revealAppTopicExtra(ids, button).catch(console.error);
-		if (extra?.failed) {
-			const error = document.createElement("span");
-			error.className = "app-topic-more-status";
-			error.setAttribute("role", "status");
-			error.textContent = "Couldn’t load hidden links. Try again.";
-			nav.append(error);
+		if (extra?.failed || exhausted) {
+			const status = document.createElement("span");
+			status.className = "app-topic-more-status";
+			status.setAttribute("role", "status");
+			status.tabIndex = -1;
+			status.textContent = exhausted ? "No additional links to show for this topic." :
+				state.topicExtraRows.size ? "Some hidden links couldn’t be loaded. Try again." : "Couldn’t load hidden links. Try again.";
+			nav.append(status);
 		}
-		nav.append(button);
+		if (!exhausted) {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "browse-nav-link app-topic-more";
+			button.textContent = extra?.request ? "Loading hidden links…" : "Load hidden links about this topic";
+			button.disabled = Boolean(extra?.request);
+			button.onclick = () => revealAppTopicExtra(ids, button).catch(console.error);
+			nav.append(button);
+		}
 		list.append(nav);
 	}
 
@@ -48707,7 +48753,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				group.counts = appTopicDiscussionTotals(group.rows.map((row) => threads.get(row)));
 			}
 		}
-		return { rows: active?.rows || rows.filter((row) => !grouped.has(row)), groups, topics, active, threads };
+		return { rows: active?.rows ?? (topics.length ? [] : rows), groups, topics, active, threads };
 	}
 
 	function paintAppTopicCounts(target, group) {
@@ -49132,6 +49178,38 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 	}
 
+	function appTopicVisitIds(group) {
+		const ids = [group.id, ...(group.equivalentIds || [])];
+		if (!group.curated) {
+			const urls = [...group.rows, ...(group.extraRows || [])].map((row) => normalizeURL(appTopicRowURL(row))).filter(Boolean);
+			const [first, second] = [...new Set(urls)].sort();
+			if (second) ids.push(JSON.stringify([group.kind, topicFilterKey(group.label), first, second]));
+		}
+		return ids;
+	}
+
+	async function applyAppTopicVisits({ topics, active }, isCurrent) {
+		if (!isCurrent() || (!active && !topics?.length)) return;
+		const visits = (await load(APP_TOPIC_VISITS_KEY, {})) || {};
+		if (!isCurrent() || (!active && !Object.keys(visits).length)) return;
+		const missing = new Set();
+		for (const group of active ? [active] : topics) {
+			const ids = appTopicVisitIds(group);
+			group.visited = Boolean(active) || ids.some((id) => visits[id]);
+			if (!group.visited) continue;
+			for (const id of ids) {
+				if (!visits[id]) missing.add(id);
+			}
+		}
+		if (!missing.size) return;
+		await withSharedStorageLock("topic-visits", async (lease) => {
+			const latest = (await load(APP_TOPIC_VISITS_KEY, {})) || {};
+			if (!isCurrent() || [...missing].every((id) => latest[id])) return;
+			for (const id of missing) latest[id] = true;
+			await lease.commit(() => save(APP_TOPIC_VISITS_KEY, latest));
+		}).catch(console.error);
+	}
+
 	function paintAppTopicProjection(list, { topics = [], active, threads, tabCheck }, isCurrent) {
 		const state = appState;
 		const shadow = state.ui.shadow;
@@ -49153,6 +49231,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			bar.dataset.topicLabel = active.label;
 			const title = shadow.getElementById("app-list-topic-title");
 			title.textContent = topicDisplayName(active.label);
+			title.title = title.textContent;
 			paintAppTopicCounts(shadow.getElementById("app-list-topic-count"), active);
 			const existing = state.listTopicPhotos;
 			const index = sharedTopicCache?.index;
@@ -49179,6 +49258,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const button = document.createElement("button");
 			button.type = "button";
 			button.className = "app-topic-row";
+			button.classList.toggle("is-unread", !group.visited);
+			button.setAttribute("aria-description", group.visited ? "Read" : "Unread");
 			button.dataset.sharedTopic = group.id;
 			button.setAttribute("aria-keyshortcuts", "Shift+F10 ContextMenu");
 			const labels = document.createElement("span");
@@ -49439,6 +49520,8 @@ ${frontPageChooserHTML()}
 				const projection = state.topicsMode ? appTopicProjection(shown, groups, state.listTopic, coverage,
 					sharedTopicCache?.index, undefined, rows) : { rows: shown };
 				if (pending && state.listTopic && !projection.active) return;
+				await applyAppTopicVisits(projection, isCurrent);
+				if (!isCurrent()) return;
 				const failureText = frontPageFailureText(feedStates, view);
 				const unavailable = feedStates.length > 0 && feedStates.every((feed) => feed.status !== "ok" && feed.status !== "window");
 				const queuedKeys = new Set(queued.map(queueKey));

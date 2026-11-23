@@ -79,6 +79,20 @@ function topic(list, label) {
 	return list.locator(".app-topic-row").filter({ hasText: label });
 }
 
+async function expectLinkTitles(list, titles) {
+	await list.getByRole("link", { name: titles[0], exact: true }).first().waitFor();
+	const rows = list.locator(".browse-title-link");
+	await rows.nth(titles.length - 1).waitFor();
+	assert.deepEqual((await rows.allTextContents()).sort(), [...titles].sort());
+}
+
+async function expectTopicMembers(list, card, titles) {
+	await card.click();
+	await expectLinkTitles(list, titles);
+	await list.page().getByRole("button", { name: "Back to topics", exact: true }).click();
+	await card.waitFor();
+}
+
 const topicPhoto = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Subject.jpg/250px-Subject.jpg";
 const imageCredit = "https://commons.wikimedia.org/wiki/File:Subject.jpg";
 const previewPNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64");
@@ -124,7 +138,7 @@ test("equivalent topics share one subject image and count each discussion once",
 		await context.route(articlePreview, (route) => route.fulfill({ contentType: "image/png", body: previewPNG }));
 		page.setDefaultTimeout(7000);
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const list = page.locator("#app-list-body");
 		const merged = topic(list, /extension permissions/i);
 		await merged.first().waitFor();
@@ -189,7 +203,7 @@ test("saved topic counts use current public threads and update as the Queue refr
 		page.setDefaultTimeout(7000);
 		await page.goto("https://backchnnl.app/");
 		await rail(page, "queue").click();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const group = topic(page.locator("#app-list-body"), "Extension permissions");
 		await group.getByText("39 comments across 2 discussions in 2 links", { exact: true }).waitFor();
 		await expectTopicPhoto(group, /source code/i);
@@ -212,7 +226,7 @@ test("a broken exact topic image gives way to a subject photo and its credit", a
 		page.setDefaultTimeout(5000);
 		await context.route(topicPhoto, (route) => route.fulfill({ status: 404, body: "" }));
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const group = topic(page.locator("#app-list-body"), "Extension permissions");
 		await expectTopicPhoto(group, /source code/i);
 		await group.click();
@@ -508,7 +522,7 @@ test("story groups stay separate when the same subject is used as a filter alias
 			await list.getByRole("link", { name: title, exact: true }).waitFor({ timeout: 5000 });
 		}
 		assert(await waitFor(() => Boolean(app.store.get(catalogKey))));
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).count(), 0);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).count(), 0);
 		assert.equal(await list.locator(".app-topic-row").count(), 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -557,7 +571,7 @@ test("topic filters hide the tabs for a single link and can be undone after relo
 		await guideLink.waitFor({ state: "detached" });
 		await reportLink.waitFor();
 
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).count(), 0);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).count(), 0);
 		assert.equal(await list.locator(".app-topic-row").count(), 0);
 		await page.getByRole("button", { name: "Mark all as read" }).click();
 		assert(await waitFor(() => Number(app.store.get("HNewhere:seen_comments")?.["lemmy:9361"]) > 0));
@@ -642,7 +656,7 @@ test("a broad topic filter also hides more specifically grouped links", async ()
 		await list.getByText("No links match your topic filters.").waitFor();
 		assert.equal(await list.locator(".app-row").count(), 0);
 		assert.equal(app.requests.filter(({ url }) => url === catalogURL).length, 0);
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).count(), 0);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).count(), 0);
 		assert.equal(await list.locator(".app-topic-row").count(), 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -690,7 +704,7 @@ test("an inferred topic stays hidden as its group shrinks and is editable from a
 		const list = (page) => page.locator("#app-list-body");
 		await Promise.all([app.page, other].map((page) => list(page).getByRole("link", { name: first.title }).waitFor()));
 		const topicLabel = "Ceramic Glazes";
-		await app.page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await app.page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const ceramics = topic(list(app.page), topicLabel);
 		await ceramics.getByText(/in 2 links$/).waitFor();
 		await expectTopicPhoto(ceramics, /glazed pottery/i);
@@ -747,14 +761,86 @@ test("Sidebar Front Pages applies topic filters and restores links from Settings
 	}
 });
 
+test("By topic lists only groups and By link restores every link in the current view", async () => {
+	const app = await launchTopics({ stored: frontPageWithUnrelated });
+	try {
+		const { page } = app;
+		const list = page.locator("#app-list-body");
+		await page.goto("https://backchnnl.app/");
+		await rail(page, "all").click();
+		await list.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+		const links = page.locator("#app-all-links-tab");
+		const topics = page.locator("#app-topics-tab");
+		assert.deepEqual(await page.locator("#app-list-view [role=tab]").allTextContents(), ["By link", "By topic"]);
+		await topics.click();
+		const group = topic(list, "Extension permissions");
+		await group.waitFor();
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		await group.click();
+		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([guide.title, report.title]));
+		await page.getByRole("button", { name: "Back to topics" }).click();
+		await group.waitFor();
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		await links.click();
+		await list.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([guide.title, report.title, unrelated.title]));
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("a long topic byline stays inside its pane above the links on desktop and phone", async () => {
+	const label = "Researchers publish " + "a detailed regional comparison of the findings and ".repeat(5) + "interoperability".repeat(8);
+	const story = { id: "story:long-heading", kind: "story", label, curated: true };
+	const rows = Array.from({ length: 32 }, (_, i) => ({
+		...guide, id: 21300 + i, title: "Regional report " + (i + 1), url: "https://library.example/region/" + i, topic: "technology",
+	}));
+	const fixture = { ...catalog, topics: [story], pages: rows.map(({ url }) => ({ key: url.slice(8), topicIds: [story.id] })) };
+	const app = await launchTopics({ stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: rows },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [] },
+	}, responses: [{ match: (url) => url === catalogURL, json: fixture }] });
+	try {
+		const { page } = app;
+		await page.goto("https://backchnnl.app/");
+		await page.locator('[data-shared-topic="story:long-heading"]').click();
+		const header = page.locator("#app-list-topic");
+		await header.getByText(/in 32 links$/).waitFor();
+		for (const viewport of [{ width: 1100, height: 680 }, { width: 320, height: 580 }]) {
+			await page.setViewportSize(viewport);
+			const geometry = await header.evaluate((bar) => {
+				const rect = bar.getBoundingClientRect();
+				const title = bar.querySelector("strong");
+				const bounds = title.getBoundingClientRect();
+				const meta = bar.querySelector(".app-topic-meta").getBoundingClientRect();
+				const list = bar.getRootNode().getElementById("app-list-body").getBoundingClientRect();
+				return { width: rect.width, height: rect.height, scrollWidth: bar.scrollWidth, titleTop: bounds.top - rect.top,
+					titleWidth: bounds.width, metaBottom: meta.bottom - rect.top, linksBelow: list.top >= rect.bottom - 1,
+					listHeight: list.height, label: title.textContent, hint: title.title };
+			});
+			assert(geometry.width > 0 && geometry.scrollWidth <= geometry.width + 1 &&
+				geometry.titleTop >= 0 && geometry.metaBottom <= geometry.height + 1, JSON.stringify(geometry));
+			assert(geometry.linksBelow && geometry.listHeight > 100 && geometry.height <= 105, JSON.stringify(geometry));
+			assert.equal(geometry.label, "#" + label);
+			assert.equal(geometry.hint, geometry.label);
+		}
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
 test("public Topics scopes normal link rows and preserves their discussions and local-only imports", async () => {
 	const app = await launchTopics();
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		const list = page.locator("#app-list-body");
-		const linksTab = page.getByRole("tab", { name: "All links", exact: true });
-		const topicsTab = page.getByRole("tab", { name: "Topics", exact: true });
+		const linksTab = page.getByRole("tab", { name: "By link", exact: true });
+		const topicsTab = page.getByRole("tab", { name: "By topic", exact: true });
 		const permissions = topic(list, "Extension permissions");
 		const guideLink = list.getByRole("link", { name: guide.title, exact: true });
 		const reportLink = list.getByRole("link", { name: report.title, exact: true });
@@ -864,12 +950,12 @@ test("Headlines is an opt-in pill in the Front Pages Interests picker", async ()
 		assert.equal(await reportLink.count(), 0);
 		assert.equal(await top.getAttribute("aria-pressed"), "true");
 		assert.equal(await all.locator(".rail-badge").textContent(), "4");
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).count(), 0);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).count(), 0);
 		await technology.click();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(list, "Extension permissions").getByText(/in 2 links$/).waitFor();
 		assert.equal(await generalLink.count(), 0);
-		await page.getByRole("tab", { name: "All links", exact: true }).click();
+		await page.getByRole("tab", { name: "By link", exact: true }).click();
 		await top.click();
 		await generalLink.waitFor();
 		await page.locator("#app-mark-read").click();
@@ -982,10 +1068,10 @@ test("Front Page Topics gives recent stories with more publishers a higher posit
 		const list = page.locator("#app-list-body");
 		await list.getByRole("link", { name: articles.at(-1).title, exact: true }).waitFor();
 		const allLinks = await list.locator(".browse-title-link").allTextContents();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(list, groups[0].label).waitFor();
 		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), [groups[2], groups[1], groups[0]].map(({ label }) => `#${label}`));
-		await page.getByRole("tab", { name: "All links", exact: true }).click();
+		await page.getByRole("tab", { name: "By link", exact: true }).click();
 		await list.getByRole("link", { name: articles.at(-1).title, exact: true }).waitFor();
 		assert.deepEqual(await list.locator(".browse-title-link").allTextContents(), allLinks);
 		assert.deepEqual(app.errors, []);
@@ -1077,7 +1163,7 @@ test("indexed Bluesky discussion counts do not double-count cached interest-feed
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const group = topic(page.locator("#app-list-body"), "Extension permissions");
 		await group.waitFor();
 		assert.equal(await group.locator(".app-topic-meta").textContent(), "15 comments across 3 discussions in 2 links");
@@ -1093,14 +1179,15 @@ test("right-clicking a topic row opens its menu and can select its links", async
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
 		const list = page.locator("#app-list-body");
 		const group = topic(list, "Extension permissions");
 		const guideLink = list.getByRole("link", { name: guide.title, exact: true });
-		const reportLink = list.getByRole("link", { name: report.title, exact: true });
 		const otherLink = list.getByRole("link", { name: unrelated.title, exact: true });
 		const menu = page.locator("#app-row-menu");
 		await otherLink.waitFor();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
+		await group.waitFor();
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		await list.evaluate((body) => {
 			body.addEventListener("contextmenu", (event) => {
 				body.dataset.contextMenuHandled = String(event.defaultPrevented);
@@ -1117,8 +1204,7 @@ test("right-clicking a topic row opens its menu and can select its links", async
 
 		await group.press("Shift+F10");
 		await menu.getByRole("menuitem", { name: "Open", exact: true }).click();
-		await guideLink.waitFor();
-		await reportLink.waitFor();
+		await expectLinkTitles(list, [guide.title, report.title]);
 		await page.getByRole("button", { name: "Back to topics" }).click();
 		assert(await waitFor(() => group.evaluate((row) => row.getRootNode().activeElement === row)));
 		await group.locator(".app-topic-meta").click({ button: "right" });
@@ -1182,12 +1268,200 @@ const loadHiddenLinks = (page) => page.getByRole("button", { name: "Load hidden 
 
 async function openPermissionsTopic(page) {
 	await page.goto("https://backchnnl.app/");
-	await page.getByRole("tab", { name: "Topics", exact: true }).click();
+	await page.getByRole("tab", { name: "By topic", exact: true }).click();
 	const list = page.locator("#app-list-body");
 	await topic(list, coverageTopic.label).click();
 	await list.getByRole("link", { name: report.title, exact: true }).waitFor();
 	return list;
 }
+
+test("an outdated topic catalog explains an empty hidden-link result and keeps keyboard focus", async () => {
+	const detail = coverageResponse(coverageTopic.id);
+	const app = await launchTopics({ stored: { "HNewhere:settings": {
+		updateCheck: false, sourceRefreshMinutes: 0, sources: { hn: true, lemmy: true }, hiddenTopics: ["Ceramic Glazes"],
+		frontPageMode: "topics", frontPageTopics: ["technology"],
+	} }, responses: [
+		{ match: (url) => url === catalogURL, json: coverageIndex }, detail,
+	] });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(3500);
+		const list = await openPermissionsTopic(page);
+		const before = await list.locator(".browse-title-link").allTextContents();
+		const result = list.getByRole("status").filter({ hasText: /no (?:additional|more|hidden) links/i });
+		const changed = [[200, coverageFixture.links.slice(0, 2)], [200, []],
+			[200, [{ ...furtherLink, title: "New ceramic glazes tested in a studio" }]], [404, []], [410, []]];
+		for (const [i, [status, links]] of changed.entries()) {
+			detail.status = status;
+			detail.json = { ...coverageFixture, links };
+			if (i) {
+				await page.getByRole("button", { name: "Back to topics" }).click();
+				await topic(list, coverageTopic.label).click();
+			}
+			await loadHiddenLinks(page).press("Enter");
+			await result.waitFor();
+			assert.equal(await loadHiddenLinks(page).count(), 0);
+			assert.deepEqual(await list.locator(".browse-title-link").allTextContents(), before);
+			assert(await waitFor(() => result.evaluate((node) => node.getRootNode().activeElement === node)));
+			assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, i + 1);
+		}
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("public share variants of a visible topic link do not offer a hidden-links button", async () => {
+	const key = "www.nytimes.com/2026/11/22/climate/summit.html";
+	const article = { ...guide, url: "https://" + key + "?lang=en&edition=us&unlocked_article_code=example" };
+	const index = { ...coverageIndex, pages: [
+		{ key: key + "?edition=us&lang=en&unlocked_article_code=example", topicIds: [coverageTopic.id] },
+		coverageIndex.pages[1],
+		{ key: key + "?edition=us&lang=en&smid=mobile-share", topicIds: [coverageTopic.id] },
+		{ key: key + "?edition=us&lang=en", topicIds: [coverageTopic.id] },
+	] };
+	const app = await launchTopics({ stored: {
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [{ ...article, topic: "technology" }] },
+	}, responses: [{ match: (url) => url === catalogURL, json: index }] });
+	try {
+		const list = await openPermissionsTopic(app.page);
+		const back = app.page.getByRole("button", { name: "Back to topics", exact: true });
+		assert(await waitFor(() => back.evaluate((node) => node.getRootNode().activeElement === node)));
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([article.title, report.title]));
+		assert.equal(await loadHiddenLinks(app.page).count(), 0);
+		assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, 0);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("a distinct topic URL keeps its query and combines discussions from its public share variants", async () => {
+	const base = "https://www.nytimes.com/edition?issue=2";
+	const [hn, lemmy] = [coverageFixture.links[0].posts[0], coverageFixture.links[1].posts[0]];
+	const first = { ...furtherLink, url: base + "&smid=ios", posts: [
+		{ ...hn, id: "hn:9481", url: "https://news.ycombinator.com/item?id=9481", comments: 11 },
+	] };
+	const second = { ...first, url: base + "&smid=android", posts: [first.posts[0],
+		{ ...lemmy, id: "lemmy:9482", url: "https://lemmy.world/post/9482", comments: 13 },
+	] };
+	const article = { ...guide, url: "https://www.nytimes.com/edition?issue=1" };
+	const index = { ...coverageIndex, pages: [
+		{ key: article.url.slice(8), topicIds: [coverageTopic.id] }, coverageIndex.pages[1],
+		...[first, second].map(({ url }) => ({ key: url.slice(8), topicIds: [coverageTopic.id] })),
+	] };
+	const app = await launchTopics({ stored: {
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [{ ...article, topic: "technology" }] },
+	}, responses: [{ match: (url) => url === catalogURL, json: index },
+		coverageResponse(coverageTopic.id, { json: { ...coverageFixture, links: [first, second] } }),
+	] });
+	try {
+		app.page.setDefaultTimeout(3500);
+		const list = await openPermissionsTopic(app.page);
+		await loadHiddenLinks(app.page).press("Enter");
+		const additional = list.locator("[data-topic-extra] .browse-title-link");
+		await additional.first().waitFor();
+		assert.equal(await additional.count(), 1);
+		assert.equal(new URL(await additional.getAttribute("href")).searchParams.get("issue"), "2");
+		assert.equal(await app.page.locator("#app-list-topic-count").textContent(), "29 comments across 4 discussions in 3 links");
+		assert(await waitFor(() => additional.evaluate((node) => node.getRootNode().activeElement === node)));
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("a topic offers only the hidden links left by the reader’s filters", async () => {
+	const muted = { ...furtherLink, url: "https://another.example.com/ceramic-glazes/investigation" };
+	const index = { ...coverageIndex, pages: [
+		...coverageIndex.pages.slice(0, 2), { key: muted.url.slice(8), topicIds: [coverageTopic.id] },
+	] };
+	const app = await launchTopics({ stored: { "HNewhere:settings": {
+		updateCheck: false, sourceRefreshMinutes: 0, sources: { hn: true, lemmy: true }, hiddenTopics: ["Ceramic Glazes"],
+		frontPageMode: "topics", frontPageTopics: ["technology"],
+	} }, responses: [{ match: (url) => url === catalogURL, json: index }] });
+	try {
+		const list = await openPermissionsTopic(app.page);
+		const back = app.page.getByRole("button", { name: "Back to topics", exact: true });
+		assert(await waitFor(() => back.evaluate((node) => node.getRootNode().activeElement === node)));
+		assert.equal(await loadHiddenLinks(app.page).count(), 0);
+		assert.equal(await list.locator(".browse-title-link").count(), 2);
+		assert.equal(app.requests.filter(({ url }) => url.startsWith(coverageURL)).length, 0);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("loading a filtered Collection topic reveals its private saved link locally", async () => {
+	const saved = ["Firing ceramic glazes without defects", "Ceramic glazes for beginners", "Drying ceramic glazes in the studio"]
+		.map((title, i) => {
+			const key = "private" + i + ".example.org/notes?draft=" + i;
+			return { title, key, url: "https://" + key, addedAt: now * 1000, checkedAt: now * 1000, ...(i < 2 ? { foundAt: now * 1000 } : {}) };
+		});
+	const app = await launchTopics({ stored: { "HNewhere:collected": saved } });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(5000);
+		await page.goto("https://backchnnl.app/");
+		await rail(page, "collection").click();
+		const list = page.locator("#app-list-body");
+		await list.getByRole("link", { name: saved[2].title, exact: true }).waitFor();
+		await page.getByRole("button", { name: "Filter and sort Collection" }).click();
+		await page.getByRole("menuitemradio", { name: "New discussions" }).click();
+		await list.getByRole("link", { name: saved[2].title, exact: true }).waitFor({ state: "hidden" });
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
+		await topic(list, /ceramic glazes/i).click();
+		await loadHiddenLinks(page).press("Enter");
+		const revealed = list.locator("[data-topic-extra] .browse-title-link");
+		await revealed.waitFor();
+		assert.equal(await revealed.getAttribute("href"), saved[2].url);
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(saved.map(({ title }) => title)));
+		assert.deepEqual(app.requests.filter(({ url }) => url.startsWith("https://topics.backchnnl.app/")).map(({ method, url, hasBody }) =>
+			[method, url, Boolean(hasBody)]), [["GET", catalogURL, false]]);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("a partial coverage failure keeps its links and retries only the unfinished request", async () => {
+	const other = { ...coverageTopic, id: "story:another-extension-report" };
+	const last = { ...furtherLink, url: "https://archive.example.org/permissions", title: "Archive of extension changes" };
+	const index = { ...coverageIndex, topics: [coverageTopic, other], pages: [
+		...coverageIndex.pages.slice(0, 2).map((row) => ({ ...row, topicIds: [coverageTopic.id, other.id] })),
+		coverageIndex.pages[2], { key: last.url.slice(8), topicIds: [other.id] },
+	] };
+	const retry = coverageResponse(other.id, { status: 503, delay: 250 });
+	const app = await launchTopics({ responses: [
+		{ match: (url) => url === catalogURL, json: index }, coverageResponse(coverageTopic.id), retry,
+	] });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(5000);
+		const list = await openPermissionsTopic(page);
+		await loadHiddenLinks(page).press("Enter");
+		const loading = list.getByRole("button", { name: "Loading hidden links…" });
+		await loading.waitFor();
+		assert(await loading.isDisabled());
+		await loading.evaluate((button) => button.click());
+		await list.getByRole("status").getByText(/some hidden links couldn’t be loaded/i).waitFor();
+		assert.deepEqual(await list.locator("[data-topic-extra] .browse-title-link").allTextContents(), [furtherLink.title]);
+		Object.assign(retry, { status: 200, delay: 0, json: { ...coverageFixture, topic: other, links: [last] } });
+		await loadHiddenLinks(page).press("Enter");
+		const lastLink = list.getByRole("link", { name: last.title, exact: true });
+		await lastLink.waitFor();
+		assert(await waitFor(() => lastLink.evaluate((node) => node.getRootNode().activeElement === node)));
+		assert.deepEqual(new Set(await list.locator("[data-topic-extra] .browse-title-link").allTextContents()), new Set([furtherLink.title, last.title]));
+		const calls = app.requests.filter(({ url }) => url.startsWith(coverageURL)).map(({ url }) => new URL(url).searchParams.get("id"));
+		assert.equal(calls.filter((id) => id === coverageTopic.id).length, 1);
+		assert.equal(calls.filter((id) => id === other.id).length, 2);
+		assert.equal(await loadHiddenLinks(page).count(), 0);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
 
 test("Reader loads additional topic links after the current rows without navigating", async () => {
 	const preview = "https://another.example.com/preview.png";
@@ -1349,7 +1623,7 @@ test("a single visible story stays a link and hides the topic tabs", async () =>
 		await rail(page, "source:hn").click();
 		const row = list.locator(".browse-row").filter({ hasText: guide.title });
 		await row.getByRole("link", { name: guide.title, exact: true }).waitFor();
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).count(), 0);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).count(), 0);
 		assert.equal(await list.getAttribute("role"), "region");
 		await row.getByRole("button", { name: "More", exact: true }).click();
 		assert.equal(await page.getByRole("menuitem", { name: "All coverage", exact: true }).count(), 0);
@@ -1511,7 +1785,7 @@ test("reviewed standalone links and separately curated topics survive local regr
 		const cover = list.locator(`[data-shared-topic="${ids[1]}"] img[src="${topicPhoto}"]`);
 		await cover.waitFor();
 		assert.equal(await groups.locator(`img[src="${topicPhoto}"]`).count(), 1);
-		assert.deepEqual(await list.locator(".browse-title-link").allTextContents(), [stories[0].title]);
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		for (const [i, id] of ids.entries()) {
 			await list.locator(`[data-shared-topic="${id}"]`).click();
 			await list.locator(".browse-title-link").getByText(stories[i * 2 + 1].title, { exact: true }).waitFor();
@@ -1523,6 +1797,8 @@ test("reviewed standalone links and separately curated topics survive local regr
 			assert(header.titleWidth >= 96 && header.scrollWidth === header.width);
 			await page.getByRole("button", { name: "Back to topics", exact: true }).click();
 		}
+		await page.getByRole("tab", { name: "By link", exact: true }).click();
+		await expectLinkTitles(list, stories.map(({ title }) => title));
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1558,7 +1834,7 @@ test("right-clicking a link in a topic reports the link and the displayed assign
 		});
 		await page.goto("https://backchnnl.app/");
 		const list = page.locator("#app-list-body");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(list, "Extension permissions").click();
 		const row = list.locator(".browse-row").filter({ hasText: guide.title });
 		await row.click({ button: "right" });
@@ -1647,7 +1923,7 @@ test("universal search opens multi-link topics and opens single links directly",
 		const list = page.locator("#app-list-body");
 		const reportLink = list.getByRole("link", { name: report.title, exact: true });
 		await reportLink.waitFor();
-		await page.getByRole("tab", { name: "All links", exact: true, selected: true }).waitFor();
+		await page.getByRole("tab", { name: "By link", exact: true, selected: true }).waitFor();
 		const destination = [
 			["Front Pages", "2 links", "All articles"],
 			["Collection", "1 link", "Collection"],
@@ -1676,7 +1952,7 @@ test("universal search opens multi-link topics and opens single links directly",
 					scope + " opened " + await original.getAttribute("href") + " instead of " + openedURL);
 			}
 			await reportLink.waitFor({ state: scope === "Collection" ? "detached" : "visible" });
-			const topics = page.getByRole("tab", { name: "Topics", exact: true });
+			const topics = page.getByRole("tab", { name: "By topic", exact: true });
 			if (scope === "Front Pages") assert.equal(await topics.getAttribute("aria-selected"), "true");
 			else assert.equal(await topics.count(), 0);
 			assert.equal(await page.locator("#app-search-page").isVisible(), false);
@@ -1728,10 +2004,10 @@ test("the upgraded index refreshes an older cache and keeps its groups when offl
 		await page.goto("https://backchnnl.app/");
 		const list = page.locator("#app-list-body");
 		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		assert(await waitFor(() => app.requests.some(({ url }) => url === catalogURL)));
 		await topic(list, "Extension permissions").waitFor();
-		await page.getByRole("tab", { name: "All links", exact: true }).click();
+		await page.getByRole("tab", { name: "By link", exact: true }).click();
 		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -1758,9 +2034,11 @@ test("offline Collection regroups stale automatic assignments while preserving r
 		const group = list.locator('.app-topic-row[data-shared-topic^="reader-story:"]');
 		assert.equal(await group.count(), 1, (await list.locator(".app-topic-name").allTextContents()).join(", "));
 		await group.getByText("43 comments across 2 discussions in 2 links", { exact: true }).waitFor();
-		await list.locator('[data-shared-topic="story:editorial"]').getByText("#Access Denied", { exact: true }).waitFor();
-		await list.getByRole("link", { name: links[2][0], exact: true }).waitFor();
+		const editorial = list.locator('[data-shared-topic="story:editorial"]');
+		await editorial.getByText("#Access Denied", { exact: true }).waitFor();
 		assert.equal(await list.locator(".app-topic-row").count(), 2);
+		await expectTopicMembers(list, group, links.slice(0, 2).map(([title]) => title));
+		await expectTopicMembers(list, editorial, links.slice(3).map(([title]) => title));
 		assert(app.requests.some(({ url }) => url === catalogURL), "The old cache revision prompts an index refresh");
 	}, { stored: {
 		[catalogKey]: { revision: 9, fetchedAt: Date.now(), data: { ...catalog, topics: [story, coverage, curated], pages } },
@@ -1790,7 +2068,7 @@ test("recovering the shared index keeps the current topic open and restores focu
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const list = page.locator("#app-list-body");
 		const group = topic(list, published.label);
 		assert.match(await group.getAttribute("data-shared-topic"), /^reader-story:/);
@@ -1818,20 +2096,20 @@ test("mark all as read in a topic marks the current group", async () => {
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/");
 		const list = page.locator("#app-list-body");
-		await list.getByRole("link", { name: guide.title }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await expectLinkTitles(list, [guide.title, report.title, unrelated.title]);
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const group = topic(list, "Extension permissions");
 		await group.waitFor();
-		await list.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
-		assert.equal(await list.getByRole("link", { name: guide.title, exact: true }).count(), 0);
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		await group.click();
-		await list.getByRole("link", { name: guide.title }).waitFor();
+		await expectLinkTitles(list, [guide.title, report.title]);
 		await page.getByRole("button", { name: "Mark all as read" }).click();
 		assert(await waitFor(() => ["hn:9360", "lemmy:9361"].every((id) => Number(app.store.get("HNewhere:seen_comments")?.[id]) > 0)));
 		assert.equal(app.store.get("HNewhere:seen_comments")?.["hn:9362"], undefined);
 		await loadHiddenLinks(page).waitFor();
 		await page.getByRole("button", { name: "Back to topics" }).click();
-		await list.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+		await expectLinkTitles(list, [unrelated.title]);
+		assert.equal(await page.getByRole("tablist", { name: "Link view", exact: true }).count(), 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -1851,7 +2129,7 @@ test("clearing read Queue entries in a topic keeps the other queued links", asyn
 		await rail(page, "queue").click();
 		const list = page.locator("#app-list-body");
 		await list.getByRole("link", { name: guide.title }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(list, "Extension permissions").click();
 		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
 		await list.getByRole("button", { name: "clear read" }).click();
@@ -1872,7 +2150,7 @@ test("mark-read stays scoped while a topic list is still visible during navigati
 		const list = page.locator("#app-list-body");
 		const link = list.getByRole("link", { name: guide.title });
 		await link.waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(list, "Extension permissions").click();
 		await link.waitFor();
 		const stillShowingTopic = await page.getByRole("button", { name: "Back to topics" }).evaluate((button) => {
@@ -1911,7 +2189,7 @@ test("an empty source on a phone leaves the other filter chips tappable", async 
 		await list.locator(".browse-empty").waitFor();
 		await filters.locator('[data-app-view="source:hn"]').tap();
 		await list.getByRole("link", { name: guide.title }).waitFor();
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).count(), 0);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).count(), 0);
 		await list.getByRole("link", { name: guide.title, exact: true }).tap();
 		await page.locator('#app[data-stage="article"]').waitFor();
 	} finally {
@@ -1931,7 +2209,7 @@ test("Topics can use the same public index when the custom domain is unreachable
 		const { page } = app;
 		page.setDefaultTimeout(5000);
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		await topic(page.locator("#app-list-body"), "Extension permissions").waitFor();
 		const requests = app.requests.filter(({ url }) => [catalogURL, fallbackURL].includes(url));
 		assert.deepEqual(requests.map(({ url }) => url), [catalogURL, fallbackURL]);
@@ -1962,14 +2240,13 @@ test("Collection finds subjects in unindexed bookmark titles and URL paths witho
 		await page.goto("https://backchnnl.app/");
 		await rail(page, "collection").click();
 		const list = page.locator("#app-list-body");
-		await list.getByRole("link", { name: bookmarks[0].title }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await expectLinkTitles(list, bookmarks.map(({ title }) => title));
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const archives = topic(list, "Offline Web Archives");
 		await archives.getByText(/in 2 links$/).waitFor();
 		await expectTopicPhoto(archives, /library shelves/i);
-		for (const { title } of bookmarks.slice(2)) {
-			await list.getByRole("link", { name: title, exact: true }).waitFor();
-		}
+		assert.equal(await list.locator(".app-topic-row").count(), 1);
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		await archives.click();
 		await list.getByRole("link", { name: bookmarks[0].title }).waitFor();
 		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set([
@@ -2006,7 +2283,7 @@ test("Collection matches a saved headline to the exact public topic before alias
 		await rail(page, "collection").click();
 		const list = page.locator("#app-list-body");
 		await list.getByRole("link", { name: additional.title }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const privacy = topic(list, "Browser privacy");
 		await privacy.getByText(/in 2 links$/).waitFor();
 		assert.equal(await privacy.count(), 1);
@@ -2042,15 +2319,16 @@ test("Collection groups different wording with cached page metadata and specific
 		await page.goto("https://backchnnl.app/");
 		await rail(page, "collection").click();
 		const list = page.locator("#app-list-body");
-		await list.getByRole("link", { name: bookmarks[0].title }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await expectLinkTitles(list, bookmarks.map(({ title }) => title));
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const authentication = topic(list, "Authentication");
 		await authentication.getByText(/in 2 links$/).waitFor({ timeout: 5000 });
-		await topic(list, /Urban planning/i).getByText(/in 2 links$/).waitFor();
-		await list.getByRole("link", { name: bookmarks.at(-1).title, exact: true }).waitFor();
-		await authentication.click();
-		await list.getByRole("link", { name: bookmarks[1].title }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set(bookmarks.slice(0, 2).map(({ title }) => title)));
+		const urbanPlanning = topic(list, /Urban planning/i);
+		await urbanPlanning.getByText(/in 2 links$/).waitFor();
+		assert.equal(await list.locator(".app-topic-row").count(), 2);
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		await expectTopicMembers(list, authentication, bookmarks.slice(0, 2).map(({ title }) => title));
+		await expectTopicMembers(list, urbanPlanning, bookmarks.slice(2, 4).map(({ title }) => title));
 		const requests = app.requests.filter(({ url }) => url === catalogURL);
 		assert(requests.every(({ anonymous, method, hasBody }) => anonymous && method === "GET" && hasBody === undefined));
 		assert.deepEqual(app.errors, []);
@@ -2098,15 +2376,14 @@ test("Unread groups closely matching headlines from different publishers without
 	try {
 		const { page } = app;
 		await page.goto("https://backchnnl.app/");
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
 		const list = page.locator("#app-list-body");
+		await expectLinkTitles(list, [first.title, second.title, other.title]);
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const coverage = topic(list, first.title);
 		await coverage.getByText(/in 2 links$/).waitFor({ timeout: 5000 });
-		await coverage.click();
-		await list.getByRole("link", { name: second.title, exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([first.title, second.title]));
-		await page.getByRole("button", { name: "Back to topics" }).click();
-		await list.getByRole("link", { name: other.title, exact: true }).waitFor();
+		await expectTopicMembers(list, coverage, [first.title, second.title]);
+		assert.equal(await list.locator(".app-topic-row").count(), 1);
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -2151,17 +2428,17 @@ test("All articles and saved lists reserve topic cards for shared coverage and k
 			const [previous] = await list.locator(".app-topic-row").elementHandles();
 			await rail(page, view).click();
 			if (previous) await previous.waitForElementState("hidden");
+			await page.getByRole("tab", { name: "By link", exact: true }).click();
+			await expectLinkTitles(list, titles);
+			await page.getByRole("tab", { name: "By topic", exact: true }).click();
 			await list.locator(".app-topic-row").first().waitFor({ timeout: 5000 });
 			const labels = await list.locator(".app-topic-name").allTextContents();
 			assert.equal(labels.length, 2, view + " " + labels.join(", "));
-			assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(titles.slice(4)), view);
+			assert.equal(await list.locator(".browse-title-link").count(), 0, view);
 			for (const members of [titles.slice(0, 2), titles.slice(2, 4)]) {
 				const label = labels.find((label) => members.includes(label.slice(1)));
 				assert(label, view + " " + members.join(", "));
-				await topic(list, label).click();
-				await list.getByRole("link", { name: members[1], exact: true }).waitFor();
-				assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(members), view);
-				await page.getByRole("button", { name: "Back to topics" }).click();
+				await expectTopicMembers(list, topic(list, label), members);
 			}
 		}
 		assert.deepEqual(app.errors, []);
@@ -2190,7 +2467,7 @@ test("a published person's name stays available as a filter when the stories des
 		await list.locator(".app-topic-row, .browse-title-link").first().waitFor();
 		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), []);
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(rows.map((row) => row.title)));
-		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).isVisible(), false);
+		assert.equal(await page.getByRole("tab", { name: "By topic", exact: true }).isVisible(), false);
 		const settings = await openTopicFilters(page);
 		await settings.getByRole("searchbox", { name: "Search topics" }).fill(person.label);
 		await settings.getByRole("button", { name: "Hide " + person.label, exact: true }).waitFor();
@@ -2230,11 +2507,12 @@ test("All articles assigns overlapping published coverage to one visible card pe
 		const list = page.locator("#app-list-body");
 		await topic(list, titles[0]).waitFor();
 		assert.equal(await list.locator(".app-topic-row").count(), 2);
-		const shown = await list.locator(".browse-title-link").allTextContents();
-		for (const group of definitions) {
-			await topic(list, group.label).click();
-			await list.getByRole("link", { name: group.label, exact: true }).waitFor();
-			shown.push(...await list.locator(".browse-title-link").allTextContents());
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		const members = [titles.slice(0, 3), titles.slice(3)];
+		for (const [i, group] of definitions.entries()) {
+			const card = list.locator(`[data-shared-topic="${group.id}"]`).filter({ hasText: group.label });
+			await card.click();
+			await expectLinkTitles(list, members[i]);
 			if (group === definitions[1]) {
 				await loadHiddenLinks(page).click();
 				await list.getByRole("link", { name: extra.title, exact: true }).waitFor();
@@ -2242,7 +2520,8 @@ test("All articles assigns overlapping published coverage to one visible card pe
 			}
 			await page.getByRole("button", { name: "Back to topics" }).click();
 		}
-		assert.deepEqual(shown.sort(), [...titles].sort());
+		await page.getByRole("tab", { name: "By link", exact: true }).click();
+		await expectLinkTitles(list, titles);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -2285,8 +2564,11 @@ test("Topics put separate developments under specific headlines with or without 
 				assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set([rows[lead].title, rows[other].title]));
 				await page.getByRole("button", { name: "Back to topics" }).click();
 			}
-			await list.getByRole("link", { name: rows[4].title, exact: true }).waitFor();
+			await list.locator(".app-topic-row").first().waitFor();
 			assert.equal(await list.getByText("#Iran", { exact: true }).count(), 0);
+			assert.equal(await list.locator(".browse-title-link").count(), 0);
+			await page.getByRole("tab", { name: "By link", exact: true }).click();
+			await expectLinkTitles(list, rows.map(({ title }) => title));
 			assert.deepEqual(app.errors, []);
 		} finally {
 			await app.browser.close();
@@ -2337,15 +2619,15 @@ test("Topics gives a shared change of status one headline across differently wor
 	try {
 		await app.page.goto("https://backchnnl.app/");
 		const list = app.page.locator("#app-list-body");
-		await list.locator(".app-topic-row, .browse-title-link").first().waitFor();
+		await list.locator(".app-topic-row").first().waitFor();
 		const headings = await list.locator(".app-topic-name").allTextContents();
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert(titles.slice(0, 3).some((title) => "#" + title === headings[0]), headings[0]);
 		await list.getByText("10 comments across 4 discussions in 4 links", { exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(titles.slice(4)));
-		await list.locator(".app-topic-row").click();
-		await list.getByRole("link", { name: titles[3], exact: true }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(titles.slice(0, 4)));
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		await expectTopicMembers(list, list.locator(".app-topic-row"), titles.slice(0, 4));
+		await app.page.getByRole("tab", { name: "By link", exact: true }).click();
+		await expectLinkTitles(list, titles);
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -2448,29 +2730,29 @@ test("Collection groups corroborated subjects and keeps unrelated repeated words
 		await page.goto("https://backchnnl.app/");
 		await rail(page, "collection").click();
 		const list = page.locator("#app-list-body");
-		await list.getByRole("link", { name: bookmarks[0].title }).waitFor();
-		await page.getByRole("tab", { name: "Topics", exact: true }).click();
+		await expectLinkTitles(list, bookmarks.map(({ title }) => title));
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
 		const latches = topic(list, /Latch/);
 		await latches.getByText(/in 2 links$/).waitFor({ timeout: 5000 });
-		await topic(list, "acme/magpie").getByText(/in 2 links$/).waitFor();
-		await list.getByRole("link", { name: bookmarks[2].title, exact: true }).waitFor();
+		const project = topic(list, "acme/magpie");
+		await project.getByText(/in 2 links$/).waitFor();
 		assert.equal(await topic(list, "Disclose · Government").count(), 0);
-		for (const { title } of bookmarks.slice(5)) await list.getByRole("link", { name: title, exact: true }).waitFor();
-		await latches.click();
-		await list.getByRole("link", { name: bookmarks[1].title }).waitFor();
-		assert.deepEqual(new Set(await list.locator(".reader-collection-row .browse-title-link").allTextContents()), new Set(bookmarks.slice(0, 2).map(({ title }) => title)));
+		assert.equal(await list.locator(".app-topic-row").count(), 2);
+		assert.equal(await list.locator(".browse-title-link").count(), 0);
+		await expectTopicMembers(list, latches, bookmarks.slice(0, 2).map(({ title }) => title));
+		await expectTopicMembers(list, project, bookmarks.slice(3, 5).map(({ title }) => title));
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
 	}
 });
 
-async function withBookmarkTopics(links, check, { responses = [], prepare, stored = {} } = {}) {
+async function withBookmarkTopics(links, check, { responses = [], prepare, stored = {}, grouped = true, byLink = links } = {}) {
 	const bookmarks = links.map(([title, url]) => ({
 		title, url, key: new URL(url).host + new URL(url).pathname, addedAt: now * 1000, previewOnOpen: true,
 	}));
 	const app = await launchTopics({ responses: [{ match: (url) => url === catalogURL, status: 503 }, ...responses], stored: {
-		"HNewhere:collected": bookmarks, "HNewhere:app_browse_topics": true, ...stored,
+		"HNewhere:collected": bookmarks, ...stored,
 	} });
 	try {
 		await prepare?.(app);
@@ -2479,7 +2761,15 @@ async function withBookmarkTopics(links, check, { responses = [], prepare, store
 		await page.goto("https://backchnnl.app/");
 		await rail(page, "collection").click();
 		const list = page.locator("#app-list-body");
-		await list.locator(".reader-collection-row, .app-topic-row").first().waitFor();
+		const rows = list.locator(".reader-collection-row .browse-title-link");
+		await rows.nth(bookmarks.length - 1).waitFor();
+		const visible = await rows.evaluateAll((nodes) => nodes.map((node) => [node.textContent, node.href]));
+		assert.deepEqual(visible.sort(), [...byLink].sort());
+		if (grouped) {
+			await page.getByRole("tab", { name: "By topic", exact: true }).click();
+			await list.locator(".app-topic-row").first().waitFor();
+			assert.equal(await list.locator(".browse-title-link").count(), 0);
+		}
 		await check(list, app);
 		assert.deepEqual(app.errors, []);
 	} finally {
@@ -2500,7 +2790,6 @@ test("Collection names a shared development from the member headlines and exclud
 		await photo.waitFor();
 		assert.equal(await photo.getAttribute("src"), topicPhoto);
 		assert.match(await photo.getAttribute("title"), /BepiColombo.*Example author/);
-		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
 		await list.locator(".app-topic-row").click();
 		await list.getByRole("link", { name: links[0][0], exact: true }).waitFor();
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 3).map(([title]) => title)));
@@ -2525,7 +2814,7 @@ test("Collection names a shared development from the member headlines and exclud
 	});
 });
 
-test("Collection keeps different actors, milestones and placeholder titles individual alongside a shared technique", async () => {
+test("Collection groups a shared technique while leaving different actors, milestones and placeholder titles ungrouped", async () => {
 	const links = [
 		["Vesta reaches Mars after the long voyage", "https://vesta.example/1"],
 		["Psyche reaches Mars to study the canyons", "https://psyche.example/2"],
@@ -2550,8 +2839,7 @@ test("Collection keeps different actors, milestones and placeholder titles indiv
 	];
 	await withBookmarkTopics(links, async (list) => {
 		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#Ceramic Glazes"]);
-		assert.deepEqual((await list.locator(".browse-title-link").evaluateAll((items) => items.map((item) => item.href))).sort(),
-			links.slice(0, -2).map(([, url]) => url).sort());
+		await expectTopicMembers(list, topic(list, "Ceramic Glazes"), links.slice(-2).map(([title]) => title));
 	});
 });
 
@@ -2589,8 +2877,8 @@ test("attribution and auxiliary phrases do not make Topics from unrelated saved 
 	await withBookmarkTopics(links, async (list, app) => {
 		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), []);
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.map(([title]) => title)));
-		assert.equal(await app.page.getByRole("tab", { name: "Topics", exact: true }).isVisible(), false);
-	}, { stored: { [catalogKey]: { fetchedAt: Date.now(), data: {
+		assert.equal(await app.page.getByRole("tab", { name: "By topic", exact: true }).isVisible(), false);
+	}, { grouped: false, stored: { "HNewhere:app_browse_topics": true, [catalogKey]: { fetchedAt: Date.now(), data: {
 		...catalog, topics: [{ id: "topic:boilerplate", kind: "topic", label: "Study Finds" }],
 		pages: links.slice(0, 2).map(([, url]) => ({ key: new URL(url).host + new URL(url).pathname, topicIds: ["topic:boilerplate"] })),
 	} } } });
@@ -2609,7 +2897,6 @@ test("private bookmarks group the same accreditation change and keep other decis
 		const headings = await list.locator(".app-topic-name").allTextContents();
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert(links.slice(0, 2).some(([title]) => "#" + title === headings[0]), headings[0]);
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(2).map(([title]) => title)));
 		await list.locator(".app-topic-row").click();
 		await list.getByRole("link", { name: links[0][0], exact: true }).waitFor();
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 2).map(([title]) => title)));
@@ -2631,7 +2918,6 @@ test("a published status change and newly imported coverage open as one topic wi
 		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#" + story.label]);
 		const card = list.locator('[data-shared-topic="story:public-announcement"]');
 		await card.getByText(/in 4 links$/).waitFor();
-		await list.getByRole("link", { name: links[4][0], exact: true }).waitFor();
 		await card.click();
 		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 4).map(([title]) => title)));
@@ -2653,7 +2939,6 @@ test("a status headline covers early reporting and keeps its explanatory follow-
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert.match(headings[0], /^#(?:The U\.S\. (?:has |just )?lost|US loses) (?:its )?measles elimination status$/);
 		await list.getByText(/in 5 links$/).waitFor();
-		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(5).map(([title]) => title)));
 		await list.locator(".app-topic-row").click();
 		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
 		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 5).map(([title]) => title)));
@@ -2673,11 +2958,10 @@ test("Collection uses meaningful saved discussions and disregards access-page de
 		assert.equal(headings.length, 1, headings.join(", "));
 		assert.match(headings[0], /^#Selene.*Ceres/);
 		const rows = list.locator(".browse-title-link");
-		assert.deepEqual((await rows.evaluateAll((nodes) => nodes.map((node) => node.href))).sort(), links.slice(2).map(([, url]) => url).sort());
 		await list.locator(".app-topic-row").click();
 		await list.getByRole("link", { name: discussions[0].title, exact: true }).waitFor();
 		assert.deepEqual(new Set(await rows.allTextContents()), new Set(discussions.map(({ title }) => title)));
-	}, { stored: {
+	}, { byLink: [...discussions.map(({ title, url }) => [title, url]), ...links.slice(2)], stored: {
 		"HNewhere:favorites": [...discussions, { ...discussions[0], key: "hn:9902", id: 9902, title: "An apparent coincidence" }],
 		"HNewhere:looks": Object.fromEntries(links.slice(2).map(([, url]) => [
 			new URL(url).host + new URL(url).pathname, { description: "Save What Matters", at: now * 1000 },
@@ -2700,6 +2984,12 @@ async function withEventFeed(articles, check, shared = null) {
 		const list = app.page.locator("#app-list-body");
 		await list.locator(".app-topic-row, .browse-title-link").first().waitFor();
 		await check(list, app.page);
+		const byLink = app.page.getByRole("tab", { name: "By link", exact: true });
+		if (await byLink.isVisible()) await byLink.click();
+		const urls = [...new Set(articles.map(([, url]) => url))];
+		const rows = list.locator(".browse-title-link");
+		await rows.nth(urls.length - 1).waitFor();
+		assert.deepEqual((await rows.evaluateAll((nodes) => nodes.map((row) => row.href))).sort(), urls.sort());
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -2724,6 +3014,7 @@ const summitControls = [
 
 async function expectFeedEvent(list, page, reports, selector = '[data-shared-topic^="reader-story:"]') {
 	const cards = list.locator(selector);
+	await cards.first().waitFor();
 	assert.equal(await cards.count(), 1, (await cards.allTextContents()).join("\n"));
 	const label = (await cards.locator(".app-topic-name").textContent()).slice(1);
 	assert(reports.some(([title]) => title === label), label);
@@ -2827,6 +3118,7 @@ test("a status headline omits a publisher’s follow-up question and keeps the o
 	];
 	await withEventFeed(reports, async (list) => {
 		const card = list.locator('[data-shared-topic^="reader-story:"]');
+		await card.first().waitFor();
 		assert.equal(await card.count(), 1);
 		assert.doesNotMatch(await card.locator(".app-topic-name").textContent(), /\?/);
 		await card.click();
@@ -2841,6 +3133,7 @@ test("an intact member headline leads coverage when a second feed cuts off a quo
 	];
 	await withEventFeed(reports, async (list) => {
 		const card = list.locator('[data-shared-topic^="reader-story:"]');
+		await card.first().waitFor();
 		assert.equal(await card.count(), 1);
 		assert.equal(await card.locator(".app-topic-name").textContent(), "#" + reports[1][0].split(" | ")[0]);
 		await card.click();
@@ -2858,4 +3151,184 @@ test("an explicitly different agenda or hypothetical outcome stays outside a num
 		["Could G20 trade talks break down over fisheries?", "https://opinion.example/2026/11/22/g20-possible-scenarios"],
 	];
 	await withEventFeed([...controls, ...reports], (list, page) => expectFeedEvent(list, page, reports));
+});
+
+async function expectTopicStatus(card, status) {
+	await card.waitFor();
+	assert(await waitFor(() => card.evaluate((button, expected) => {
+		if (!button.isConnected || button.getAttribute("aria-description") !== expected) return false;
+		const media = button.querySelector(".app-topic-media");
+		const dot = getComputedStyle(media, "::after");
+		if (expected === "Read") return dot.content === "none" || dot.content === "normal";
+		return dot.content === '\"\"' && parseFloat(dot.width) > 0 && parseFloat(dot.height) > 0 &&
+			dot.backgroundColor !== "rgba(0, 0, 0, 0)" && getComputedStyle(media).overflow === "visible";
+	}, status)), "Expected the topic to display its " + status.toLowerCase() + " status");
+}
+
+test("opening a topic clears its unread dot across Reader views and reloads while its links stay unread", async () => {
+	const saved = [guide, report].map((story, index) => ({ ...story, key: catalog.pages[index].key, addedAt: now * 1000 }));
+	const app = await launchTopics({ colorScheme: "light", stored: { "HNewhere:queue": saved, "HNewhere:collected": saved } });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(5000);
+		const list = page.locator("#app-list-body");
+		const group = topic(list, "Extension permissions");
+		await page.goto("https://backchnnl.app/");
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
+		await expectTopicStatus(group, "Unread");
+		await group.press("Shift+F10");
+		await page.getByRole("menu", { name: "This topic" }).waitFor();
+		await page.keyboard.press("Escape");
+		await expectTopicStatus(group, "Unread");
+		await group.press("Enter");
+		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();
+		assert.equal(await list.locator(".browse-row.is-unread").count(), 2);
+		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
+		await page.getByRole("button", { name: "Back to topics" }).click();
+		await expectTopicStatus(group, "Read");
+		const checkView = async (view, heading) => {
+			const previous = await group.elementHandle();
+			await rail(page, view).click();
+			await page.locator("#app-list-title").getByText(heading, { exact: true }).waitFor();
+			assert(await waitFor(() => previous.evaluate((row) => !row.isConnected)));
+			await expectTopicStatus(group, "Read");
+		};
+		await checkView("all", "All articles");
+		await checkView("queue", "Queue");
+		await checkView("collection", "Collection");
+		await page.reload();
+		await expectTopicStatus(group, "Read");
+		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
+		await page.evaluate(() => {
+			const today = Date.now;
+			Date.now = () => today() + 120 * 86_400_000;
+		});
+		await checkView("collection", "Collection");
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+const observatory = { id: "story:telescope-mirror", label: "Observatory mirror repairs", kind: "story" };
+
+function launchTwoVisitTopics({ stored, ...options } = {}) {
+	const mirror = { ...guide, id: 9363, url: "https://optics.example.org/mirror", title: "New mirror arrives at the hilltop observatory" };
+	const fixture = { ...catalog, topics: [...catalog.topics, observatory], pages: [...catalog.pages,
+		{ key: "plain.example.org/post/262", topicIds: [observatory.id] },
+		{ key: "optics.example.org/mirror", topicIds: [observatory.id] },
+	] };
+	return launchTopics({
+		...options,
+		stored: {
+			"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [guide, unrelated, mirror].map((story) => ({ ...story, topic: "technology" })) },
+			...stored,
+		},
+		responses: [{ match: (url) => url === catalogURL, json: fixture }],
+	});
+}
+
+test("direct and search visits mark their own topics independently of earlier article reads", async () => {
+	const app = await launchTwoVisitTopics({ colorScheme: "dark", stored: { "HNewhere:seen_comments": { "hn:9362": now - 60, "hn:9363": now - 60 } } });
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(5000);
+		const list = page.locator("#app-list-body");
+		await page.goto("https://backchnnl.app/?topic=topic:permissions");
+		await page.locator("#app-list-topic-title").getByText("#Extension permissions").waitFor();
+		await page.getByRole("button", { name: "Back to topics" }).click();
+		await expectTopicStatus(topic(list, "Extension permissions"), "Read");
+		await rail(page, "all").click();
+		const other = topic(list, observatory.label);
+		await expectTopicStatus(other, "Unread");
+		await page.locator("#app-rail-search").click();
+		await page.locator("#app-search-input").fill("observatory mirror");
+		await page.getByRole("button", { name: "#Observatory mirror repairs Front Pages · 2 links", exact: true }).click();
+		await page.locator("#app-list-topic-title").getByText("#" + observatory.label).waitFor();
+		await page.getByRole("button", { name: "Back to topics" }).click();
+		await expectTopicStatus(other, "Read");
+		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("a visited local story keeps its read state when the same coverage is published between Reader sessions", async () => {
+	const first = { ...guide, title: "Browser adds hardware passkeys for account sign-in" };
+	const second = { ...report, title: first.title + " this week" };
+	const published = { id: "story:browser-passkeys", label: first.title, kind: "story" };
+	const index = { ...catalog, topics: [published], pages: catalog.pages.map(({ key }) => ({ key, topicIds: [published.id] })) };
+	let online = false;
+	const app = await launchTopics({
+		stored: {
+			"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [{ ...first, topic: "technology" }] },
+			"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [{ ...second, topic: "technology" }] },
+		},
+		responses: [{ match: (url) => url === catalogURL && !online, status: 503 }, { match: (url) => url === catalogURL, json: index }],
+	});
+	try {
+		const { page } = app;
+		page.setDefaultTimeout(5000);
+		const list = page.locator("#app-list-body");
+		const group = topic(list, published.label);
+		await page.goto("https://backchnnl.app/");
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
+		assert.match(await group.getAttribute("data-shared-topic"), /^reader-story:/);
+		await group.click();
+		await list.getByRole("link", { name: first.title, exact: true }).waitFor();
+		await page.getByRole("button", { name: "Back to topics" }).click();
+		await expectTopicStatus(group, "Read");
+		online = true;
+		await page.reload();
+		assert.equal(await group.getAttribute("data-shared-topic"), published.id);
+		await expectTopicStatus(group, "Read");
+		published.label = "Browser adds hardware passkeys for secure logins";
+		app.store.delete(catalogKey);
+		await page.reload();
+		await expectTopicStatus(topic(list, published.label), "Read");
+		const different = { ...published, id: "story:passkey-followup" };
+		const another = { ...second, id: 9364, url: "https://plain.example.org/new-coverage", title: "Researchers audit shared accounts" };
+		index.topics = [different];
+		index.pages = [catalog.pages[0].key, "plain.example.org/new-coverage"].map((key) => ({ key, topicIds: [different.id] }));
+		app.store.set("HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world", { timestamp: now * 1000, stories: [{ ...another, topic: "technology" }] });
+		app.store.delete(catalogKey);
+		await page.reload();
+		const followup = topic(list, different.label);
+		assert.equal(await followup.getAttribute("data-shared-topic"), different.id);
+		await expectTopicStatus(followup, "Unread");
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("overlapping topic visits from two Reader tabs preserve both read indicators after reload", async () => {
+	const slowSets = { prefix: "HNewhere:topic_visits", ms: 700, armed: false };
+	const app = await launchTwoVisitTopics({ slowSets });
+	try {
+		const first = app.page;
+		const second = await first.context().newPage();
+		for (const page of [first, second]) {
+			page.setDefaultTimeout(5000);
+			await page.goto("https://backchnnl.app/");
+			await page.getByRole("tab", { name: "By topic", exact: true }).click();
+		}
+		const firstList = first.locator("#app-list-body");
+		const secondList = second.locator("#app-list-body");
+		await expectTopicStatus(topic(firstList, "Extension permissions"), "Unread");
+		await expectTopicStatus(topic(secondList, observatory.label), "Unread");
+		slowSets.armed = true;
+		await topic(firstList, "Extension permissions").click();
+		assert(await waitFor(() => !slowSets.armed));
+		await topic(secondList, observatory.label).click();
+		await firstList.getByRole("link", { name: guide.title, exact: true }).waitFor();
+		await secondList.getByRole("link", { name: unrelated.title, exact: true }).waitFor();
+		await first.reload();
+		await expectTopicStatus(topic(firstList, "Extension permissions"), "Read");
+		await expectTopicStatus(topic(firstList, observatory.label), "Read");
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
 });
