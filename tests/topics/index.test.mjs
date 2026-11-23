@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { groupPages } from "../../topics/grouping.mjs";
-import { buildTopicsIndex } from "../../topics/index.mjs";
+import { buildTopicsIndex, retainedEvidenceKeys } from "../../topics/index.mjs";
 import worker from "../../topics/worker.mjs";
 
 const DAY = 86_400_000;
@@ -81,6 +81,71 @@ function blueskyPost(did, key, url, { indexedAt = START, quote = false, replies 
     indexedAt: new Date(indexedAt).toISOString(), replyCount: replies, repostCount: 1, likeCount: 2, labels: [],
   } };
 }
+
+test("public refresh repairs stored article titles and keeps discussions on links with missing titles", async (t) => {
+  const article = "https://paper.example/rent-cap";
+  const blocked = "https://paper.example/unknown";
+  const discussion = lemmyPost(80, article);
+  discussion.post.embed_title = "Access Denied";
+  discussion.post.name = "Council approves a citywide rent cap";
+  const other = lemmyPost(81, blocked);
+  other.post.embed_title = "Just a moment...";
+  other.post.name = "www.paper.example";
+  t.mock.method(Date, "now", () => START);
+  mockFeeds(t, () => ({
+    "hn.algolia.com": { hits: [] }, "lobste.rs": [], "public.api.bsky.app": { feed: [] },
+    "lemmy.world": { posts: [discussion, other] },
+  }));
+  const { db, refresh, request } = await service(t, { AI: fixtureAI() });
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("paper.example/rent-cap"));
+  const id = Buffer.from(hash).toString("hex").slice(0, 32);
+  await db.prepare("INSERT INTO pages VALUES (?, ?, 'Access Denied', 'paper.example', 'px-captcha')").bind(id, article).run();
+
+  const first = await (await refresh()).json();
+  assert.equal(first.stats.newEmbeddings, 1);
+  assert.equal(first.stats.inputCharacters, discussion.post.name.length);
+  const index = await (await request()).json();
+  assert.deepEqual(index.topics.map(({ label }) => label), [discussion.post.name]);
+  assert.equal(await db.prepare("SELECT title FROM pages WHERE id = ?").bind(id).first("title"), discussion.post.name);
+  assert.deepEqual(index.pages.find(({ key }) => key.endsWith("/unknown")), {
+    key: "paper.example/unknown", topicIds: [], posts: [["lemmy:81", 7]],
+  });
+  const coverage = async () => (await (await request("/api/topics/coverage?id=" + index.topics[0].id)).json()).links[0];
+  assert.equal((await coverage()).title, discussion.post.name);
+
+  discussion.post.embed_title = "City council approves rent cap for two years";
+  discussion.post.embed_description = "The council voted to limit rent increases for two years.";
+  await refresh();
+  assert.equal((await coverage()).title, discussion.post.embed_title);
+  assert.equal(await db.prepare("SELECT description FROM pages WHERE id = ?").bind(id).first("description"), discussion.post.embed_description);
+  discussion.post.embed_title = "Access Denied";
+  await refresh();
+  const link = await coverage();
+  assert.equal(link.title, "City council approves rent cap for two years");
+  assert.deepEqual(link.posts.map(({ id, title }) => [id, title]), [["lemmy:80", discussion.post.name]]);
+});
+
+test("a new discussion on an old link cannot turn it into coverage of a new event", async (t) => {
+  let now = START;
+  const title = "Harbor ferry resumes service after storms";
+  let feeds = publicPosts(now, "old-crossing", title);
+  t.mock.method(Date, "now", () => now);
+  mockFeeds(t, () => feeds);
+  const { refresh, request } = await service(t, { AI: fixtureAI() });
+  await refresh();
+
+  now += 12 * DAY;
+  feeds = publicPosts(now, "old-crossing", title, 2);
+  const fresh = publicPosts(now, "new-crossing", title, 3)["hn.algolia.com"].hits[0];
+  feeds["hn.algolia.com"].hits.push(fresh);
+  await refresh();
+  const { pages } = await (await request()).json();
+  const old = pages.find(({ key }) => key.endsWith("/old-crossing"));
+  const current = pages.find(({ key }) => key.endsWith("/new-crossing"));
+  assert.deepEqual(old.posts.map(([id]) => id).sort(), ["hn:1", "hn:2", "lobsters:1", "lobsters:2"]);
+  assert(current.topicIds.length > 0);
+  assert(!old.topicIds.some((id) => current.topicIds.includes(id)));
+});
 
 test("a refresh keeps the verified photo for the same topic when a new lookup is unavailable", () => {
   const topic = { id: "story:steam", kind: "story", label: "Valve announces Steam Machine preorders" };
@@ -889,4 +954,171 @@ test("operator decisions resolve reports and survive a fresh automatic classific
     assert.equal(detail.topic.id, scopeB);
     assert.deepEqual(new Set(detail.links.map(({ url }) => url)), new Set([sources[0].url, sources[2].url, sources[4].url]));
   }
+});
+
+test("a corrected story can reuse an ID without inheriting the access page's links or aliases", () => {
+  const old = { id: "story:anchor", kind: "story", label: "Access Denied", aliases: ["The earlier election"] };
+  const reviewed = { id: "story:reviewed", kind: "story", label: "Save What Matters" };
+  const earlier = [
+    { key: "press.example/anchor", topicIds: [old.id], posts: [["hn:1", 8]] },
+    { key: "press.example/unrelated", topicIds: [old.id], posts: [["hn:2", 13]] },
+    { key: "press.example/empty", topicIds: [old.id] },
+    { key: "briefly.co/first", topicIds: [reviewed.id] }, { key: "briefly.co/second", topicIds: [reviewed.id] },
+  ];
+  const previous = {
+    body: JSON.stringify({ topics: [old, reviewed], pages: earlier, redirects: { "story:earlier-election": old.id } }),
+    page_timestamps: JSON.stringify(earlier.map(() => START)),
+  };
+  const edit = { action: "edit", target: reviewed, changes: { label: "A collection selected by the editor" } };
+  const saved = buildTopicsIndex({
+    generatedAt: new Date(START + DAY).toISOString(),
+    topics: [{ id: old.id, kind: "story", label: "Croatians rally in Zagreb over a hospital death" }],
+    pages: ["press.example/anchor", "wire.example/zagreb"].map((key) => ({ url: "https://" + key, topicIds: [old.id] })),
+  }, previous, [edit]);
+  const index = JSON.parse(saved.body);
+  assert.deepEqual(index.pages.filter(({ topicIds }) => topicIds.includes(old.id)).map(({ key }) => key),
+    ["press.example/anchor", "wire.example/zagreb"]);
+  assert.equal(index.topics.find(({ id }) => id === old.id).aliases, undefined);
+  assert.equal(index.redirects?.["story:earlier-election"], undefined);
+  const older = index.pages.findIndex(({ key }) => key.endsWith("/unrelated"));
+  assert.deepEqual(index.pages[older], { key: "press.example/unrelated", topicIds: [], posts: [["hn:2", 13]] });
+  assert.equal(JSON.parse(saved.page_timestamps)[older], START);
+  assert(!index.pages.some(({ key }) => key.endsWith("/empty")));
+  assert.deepEqual(index.pages.filter(({ topicIds }) => topicIds.includes(reviewed.id)).map(({ key }) => key),
+    ["briefly.co/first", "briefly.co/second"]);
+  assert.equal(index.topics.find(({ id }) => id === reviewed.id).label, edit.changes.label);
+});
+
+test("publication reconciles complete retained stories from their source rows outside the live window", async (t) => {
+  let now = START + 8 * DAY;
+  t.mock.method(Date, "now", () => now);
+  mockFeeds(t, () => publicPosts(now, "current", "Local orchestra announces its winter season", 900));
+  const { db, refresh, request } = await service(t, { AI: fixtureAI() });
+  const certain = { id: "story:short", kind: "story", label: "FBI Criminal Database Hacked" };
+  const reported = { id: "story:investigation", kind: "story", label: "FBI reportedly investigating apparent hack of its criminal database" };
+  const other = { id: "story:other", kind: "story", label: certain.label };
+  const boilerplate = { id: "story:tagline", kind: "story", label: "News You Can Trust" };
+  const articles = [
+    ["first.example/ncic", certain, "FBI's NCIC criminal database hacked, Trump confirms"],
+    ["second.example/database", certain, certain.label],
+    ["third.example/bbc", reported, reported.label],
+    ["fourth.example/tribune", reported, "FBI investigating apparent hack of its key national criminal justice database, AP source says"],
+    ["fifth.example/cnn", reported, "The FBI was hacked again", "The FBI was hacked again, this time the breach targeted its crime database"],
+    ["sixth.example/email", other, "FBI investigating apparent hack of its email server"],
+    ["seventh.example/email", other, "FBI investigating apparent hack of its email server"],
+    ["press.example/council-opens-harbor-bridge", boilerplate, boilerplate.label, "Council opens the north harbor bridge"],
+    ["press.example/ancient-mammoth-bones-unearthed", boilerplate, boilerplate.label],
+  ];
+  const pages = [];
+  const statements = [];
+  for (const [i, [key, topic, title, postTitle = title]] of articles.entries()) {
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+    const id = Buffer.from(hash).toString("hex").slice(0, 32);
+    const post = "hn:" + i;
+    statements.push(db.prepare("INSERT INTO pages VALUES (?, ?, ?, ?, '')").bind(id, "https://" + key, title, key.split("/")[0]),
+      db.prepare("INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments) VALUES (?, ?, 'hn', '', ?, ?, ?, ?)")
+        .bind(post, id, postTitle, "https://news.ycombinator.com/item?id=" + i, START, i + 3));
+    pages.push({ key, topicIds: [topic.id], posts: [[post, i + 3]] });
+  }
+  const prior = { version: 1, generatedAt: new Date(START).toISOString(), topics: [certain, reported, other, boilerplate], pages,
+    redirects: { "story:original-short": certain.id } };
+  statements.push(db.prepare("INSERT INTO topics_index VALUES (1, ?, ?, ?)")
+    .bind(START, JSON.stringify(prior), JSON.stringify(pages.map(() => START))));
+  await db.batch(statements);
+  let publishedId;
+  for (let pass = 0; pass < 2; pass++, now += DAY) {
+    const response = await refresh();
+    assert.equal(response.status, 200);
+    const { stats } = await response.json();
+    assert.equal(stats.pages, 1);
+    assert.equal(stats.newEmbeddings, pass === 0 ? 1 : 0);
+    const index = await (await request()).json();
+    const member = (key) => index.pages.find((page) => page.key === key);
+    const fbi = new Set(articles.slice(0, 5).map(([key]) => member(key).topicIds[0]));
+    assert.equal(fbi.size, 1, "both previously published addresses share all five incident reports");
+    const [id] = fbi;
+    assert([certain.id, reported.id].includes(id));
+    if (pass) assert.equal(id, publishedId);
+    publishedId = id;
+    assert.match(index.topics.find((topic) => topic.id === id).label, /investigating apparent hack.*criminal.*database/i);
+    assert.deepEqual(member(articles[5][0]).topicIds, [other.id]);
+    assert.deepEqual(member(articles[6][0]).topicIds, [other.id]);
+    assert(!index.topics.some((topic) => topic.id === boilerplate.id || topic.label === boilerplate.label));
+    const bridge = index.topics.find((topic) => topic.label === "Council opens the north harbor bridge");
+    assert.deepEqual(member(articles[7][0]).topicIds, [bridge?.id]);
+    assert.deepEqual(member(articles[8][0]).topicIds, []);
+    const times = JSON.parse(await db.prepare("SELECT page_timestamps FROM topics_index").first("page_timestamps"));
+    for (const [i, { key, posts }] of pages.entries()) {
+      const position = index.pages.findIndex((page) => page.key === key);
+      assert.deepEqual(index.pages[position].posts, posts);
+      assert.equal(times[position], START, "historical link " + i + " retains its expiry");
+    }
+    for (const address of [certain.id, reported.id, "story:original-short"]) {
+      const detail = await (await request("/api/topics/coverage?id=" + encodeURIComponent(address))).json();
+      assert.equal(detail.topic.id, id);
+      assert.deepEqual(new Set(detail.links.map(({ url }) => url)), new Set(articles.slice(0, 5).map(([key]) => "https://" + key)));
+    }
+  }
+});
+
+test("bounded historical checks prioritize invalid headings and rotate complete older stories", () => {
+  const topics = Array.from({ length: 11 }, (_, i) => ({
+    id: "story:" + i, kind: "story", label: i ? "An observatory publishes finding " + i : "www.press.example",
+  }));
+  const pages = topics.flatMap(({ id }, i) => Array.from({ length: i % 3 + 2 }, (_, j) => ({
+    key: `source.example/article-${i}-${j}`, topicIds: [id],
+  })));
+  topics.at(-1).curated = true;
+  const timestamps = pages.map(() => START);
+  const seen = new Set();
+  for (let refresh = 0; refresh < 16; refresh++) {
+    const selected = retainedEvidenceKeys({ topics, pages }, timestamps, START + refresh * 3 * 3_600_000, 8);
+    assert(selected.length <= 8);
+    assert(selected.includes("source.example/article-0-0"), "invalid story gets evidence at every opportunity");
+    for (const [i, topic] of topics.entries()) {
+      const group = pages.filter(({ topicIds }) => topicIds.includes(topic.id));
+      const count = group.filter(({ key }) => selected.includes(key)).length;
+      assert(count === 0 || count === group.length);
+      if (count) seen.add(i);
+    }
+  }
+  assert.deepEqual([...seen].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+});
+
+test("newly arrived coverage can corroborate a complete retained story on the same publication", () => {
+  const label = "Space telescope photographs the Orion dust cloud";
+  const sources = ["a", "b", "c", "d", "e"].map((id) => ({
+    id, key: id + ".example/orion", domain: id + ".example", url: "https://" + id + ".example/orion",
+    title: label, postedAt: START, posts: [{ id: "hn:" + id, title: label, comments: 10, postedAt: new Date(START).toISOString() }],
+  }));
+  const a = { id: "story:a", label, kind: "story" };
+  const c = { id: "story:c", label, kind: "story" };
+  const pages = sources.slice(0, 4).map(({ key }, position) => ({ key, topicIds: [position < 2 ? a.id : c.id] }));
+  const previous = {
+    body: JSON.stringify({ topics: [a, c], pages }), page_timestamps: JSON.stringify(pages.map(() => START)),
+    sourcePages: sources.slice(0, 4),
+  };
+  const current = [sources[0], sources[4]];
+  const published = JSON.parse(buildTopicsIndex({
+    generatedAt: new Date(START + DAY).toISOString(), topics: [{ ...a, pageIds: current.map(({ id }) => id) }],
+    pages: current.map((source) => ({ ...source, topicIds: [a.id] })),
+  }, previous).body);
+  assert.equal(published.topics.length, 1);
+  assert.equal(published.pages.length, 5);
+  const [stable] = published.topics;
+  assert([a.id, c.id].includes(stable.id));
+  assert(published.pages.every(({ topicIds }) => topicIds.length === 1 && topicIds[0] === stable.id));
+  assert.equal(published.redirects[stable.id === a.id ? c.id : a.id], stable.id);
+
+  const original = {
+    body: JSON.stringify({ topics: [a], pages: pages.slice(0, 2) }), page_timestamps: JSON.stringify([START, START]),
+    sourcePages: sources.slice(0, 2),
+  };
+  const arriving = sources.slice(2);
+  const expanded = JSON.parse(buildTopicsIndex({
+    generatedAt: new Date(START + DAY).toISOString(), topics: [{ ...c, pageIds: arriving.map(({ id }) => id) }],
+    pages: arriving.map((source) => ({ ...source, topicIds: [c.id] })),
+  }, original).body);
+  assert.deepEqual(expanded.topics.map(({ id }) => id), [a.id], "new perspectives keep the already-published address");
+  assert.equal(expanded.redirects[c.id], a.id);
 });

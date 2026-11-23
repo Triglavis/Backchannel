@@ -1,6 +1,6 @@
-import { canonicalURL, fetchFeeds } from "./feeds.mjs";
+import { canonicalURL, fetchFeeds, topicPageEvidence, usableTopicTitle } from "./feeds.mjs";
 import { groupPages } from "./grouping.mjs";
-import { buildTopicsIndex, resolvePublishedTopic, RETENTION_MS } from "./index.mjs";
+import { buildTopicsIndex, resolvePublishedTopic, retainedEvidenceKeys, RETENTION_MS } from "./index.mjs";
 import { addTopicArtwork } from "./artwork.mjs";
 import { prepareTopicDecision } from "./decisions.mjs";
 import { serveTopicReviewPage } from "./review-page.mjs";
@@ -51,18 +51,36 @@ async function saveFeedItems(db, feeds) {
   const posts = new Map();
   for (const { items } of feeds) {
     for (const { page, post } of items) {
-      if (!pages.has(page.key)) pages.set(page.key, { ...page, id: await fingerprint(page.key) });
-      const saved = pages.get(page.key);
+      let saved = pages.get(page.key);
+      if (!saved) {
+        saved = { ...page, id: await fingerprint(page.key), alternateTitles: [], posts: [] };
+        pages.set(page.key, saved);
+      } else if (page.title && page.title !== saved.title) {
+        saved.alternateTitles.push(page.title);
+      }
       if (!saved.description && page.description) saved.description = page.description;
+      saved.posts.push(post);
       const comments = post.comments ?? posts.get(post.id)?.comments ?? null;
       posts.set(post.id, { ...post, key: page.key, pageId: saved.id, comments });
     }
   }
-  const statements = batches([...pages.values()], 50).map((entries) => db.prepare(
+  if (!pages.size) return posts;
+  const incoming = [...pages.values()];
+  const { results } = await db.prepare("SELECT id, title, description FROM pages WHERE id IN (SELECT value FROM json_each(?))")
+    .bind(JSON.stringify(incoming.map(({ id }) => id))).all();
+  const stored = new Map(results.map((page) => [page.id, page]));
+  for (const page of incoming) {
+    const prior = stored.get(page.id);
+    if (!prior) continue;
+    page.alternateTitles.push(prior.title);
+    if (usableTopicTitle(prior.description, page.domain)) page.description = prior.description;
+  }
+  const rows = topicPageEvidence(incoming).map(({ id, url, title, domain, description }) => ({ id, url, title, domain, description }));
+  const statements = batches(rows, 50).map((entries) => db.prepare(
     "INSERT INTO pages (id, url, title, domain, description) " +
     "SELECT value->>'id', value->>'url', value->>'title', value->>'domain', value->>'description' FROM json_each(?) WHERE true " +
-    "ON CONFLICT(id) DO UPDATE SET description = excluded.description " +
-    "WHERE pages.description = '' AND excluded.description <> ''"
+    "ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description " +
+    "WHERE pages.title <> excluded.title OR pages.description <> excluded.description"
   ).bind(JSON.stringify(entries)));
   statements.push(...batches([...posts.values()], 50).map((entries) => db.prepare(
     "INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments, changed_at) " +
@@ -98,7 +116,8 @@ async function recentPages(db, since, feeds) {
         ORDER BY posted_at DESC, id LIMIT ?
       )
     )
-    SELECT p.id, p.url, p.title, p.domain, p.description, s.id AS post_id, s.source,
+    SELECT p.id, p.url, p.title, p.domain, p.description,
+      (SELECT MIN(posted_at) FROM posts WHERE page_id = p.id) AS first_posted_at, s.id AS post_id, s.source,
       s.community, s.title AS post_title, s.url AS post_url, s.posted_at, s.comments
     FROM chosen JOIN posts AS s ON s.id = chosen.id JOIN pages AS p ON p.id = s.page_id
     ORDER BY chosen.priority, s.posted_at DESC, s.id
@@ -107,14 +126,14 @@ async function recentPages(db, since, feeds) {
   for (const row of results) {
     if (!pages.has(row.id)) pages.set(row.id, {
       id: row.id, url: row.url, title: row.title, domain: row.domain, description: row.description,
-      postedAt: row.posted_at, publishedAt: null, topicIds: [], posts: [],
+      postedAt: row.posted_at, firstPostedAt: row.first_posted_at, publishedAt: null, topicIds: [], posts: [],
     });
     pages.get(row.id).posts.push({
       id: row.post_id, source: row.source, community: row.community, title: row.post_title, url: row.post_url,
       postedAt: iso(row.posted_at), comments: row.comments,
     });
   }
-  return [...pages.values()];
+  return topicPageEvidence([...pages.values()]);
 }
 
 function packVector(values) {
@@ -212,7 +231,7 @@ function buildSnapshot(feeds, pages, embeddings) {
       posts: sources.reduce((count, source) => count + source.posts, 0),
     },
     topics,
-    pages: pages.map(({ vector, postedAt, ...page }) => page),
+    pages: pages.map(({ vector, postedAt, firstPostedAt, ...page }) => page),
   };
 }
 
@@ -222,13 +241,13 @@ async function readPreviewIndex(db) {
   return { generated_at: preview.generated_at, ...buildTopicsIndex(JSON.parse(preview.body)) };
 }
 
-async function publishIndexes(env, snapshot, owner, observations) {
+async function publishIndexes(env, snapshot, owner, observations, pages) {
   const db = env.TOPICS_DB;
   const previous = await db.prepare("SELECT generated_at, body, page_timestamps FROM topics_index WHERE id = 1").first() ||
     await readPreviewIndex(db);
   const generatedAt = Date.parse(snapshot.generatedAt);
   const { results } = await db.prepare("SELECT decision FROM topic_decisions WHERE decision->>'action' <> 'dismiss' ORDER BY id").all();
-  const recovered = await recoverPublishedCounts(db, previous, generatedAt);
+  const recovered = await recoverPublishedPages(db, previous, generatedAt);
   const since = Math.max(1, previous?.generated_at || 0, generatedAt - RETENTION_MS);
   const changed = await db.prepare(`SELECT s.id, p.url, s.comments FROM posts AS s
     JOIN pages AS p ON p.id = s.page_id WHERE s.changed_at >= ?`).bind(since).all();
@@ -236,7 +255,7 @@ async function publishIndexes(env, snapshot, owner, observations) {
     const page = canonicalURL(url);
     if (page) observations.set(id, { key: page.key, comments });
   }
-  const index = buildTopicsIndex(snapshot, recovered, results.map(({ decision }) => JSON.parse(decision)), observations);
+  const index = buildTopicsIndex({ ...snapshot, pages }, recovered, results.map(({ decision }) => JSON.parse(decision)), observations);
   const now = Date.now();
   const [, published] = await db.batch([
     db.prepare(
@@ -268,14 +287,14 @@ async function refresh(env) {
     if (feeds.every(({ status }) => status !== "ok")) return { status: SOURCES_UNAVAILABLE };
     const observations = await saveFeedItems(db, feeds);
     const pages = await recentPages(db, since, feeds);
-    const embeddings = await embedPages(env, pages);
+    const embeddings = await embedPages(env, pages.filter((page) => page.title));
     const snapshot = buildSnapshot(feeds, pages, embeddings);
     try {
       await addTopicArtwork(db, snapshot, now);
     } catch (error) {
       console.warn("Topic artwork unavailable", error.message);
     }
-    await publishIndexes(env, snapshot, owner, observations);
+    await publishIndexes(env, snapshot, owner, observations, pages);
     console.log("Topics refresh", JSON.stringify({ ...snapshot.stats, sources: snapshot.sources }));
     return { generatedAt: snapshot.generatedAt, sources: snapshot.sources, stats: snapshot.stats };
   } finally {
@@ -334,18 +353,37 @@ async function coverageRows(db, ids) {
   return results;
 }
 
-async function recoverPublishedCounts(db, previous, now) {
+async function recoverPublishedPages(db, previous, now) {
   if (!previous) return null;
   const index = JSON.parse(previous.body);
   const timestamps = JSON.parse(previous.page_timestamps);
   const missing = index.pages.filter((page, position) => !page.posts?.length && timestamps[position] >= now - RETENTION_MS);
-  if (!missing.length) return previous;
-  const ids = await Promise.all(missing.map(({ key }) => fingerprint(key)));
-  const pages = new Map(ids.map((id, index) => [id, missing[index]]));
-  for (const { page_id, post_id, comments } of await coverageRows(db, ids)) {
-    if (post_id) (pages.get(page_id).posts ??= []).push([post_id, comments]);
+  if (missing.length) {
+    const ids = await Promise.all(missing.map(({ key }) => fingerprint(key)));
+    const pages = new Map(ids.map((id, index) => [id, missing[index]]));
+    for (const { page_id, post_id, comments } of await coverageRows(db, ids)) {
+      if (post_id) (pages.get(page_id).posts ??= []).push([post_id, comments]);
+    }
   }
-  return { ...previous, body: JSON.stringify(index) };
+  const keys = retainedEvidenceKeys(index, timestamps, now);
+  const recovered = missing.length ? { ...previous, body: JSON.stringify(index) } : previous;
+  if (!keys.length) return recovered;
+  const ids = await Promise.all(keys.map(fingerprint));
+  const indexedKeys = new Map(ids.map((id, position) => [id, keys[position]]));
+  const { results } = await db.prepare(`
+    SELECT p.id, p.url, p.title, p.domain, p.description,
+      (SELECT MIN(posted_at) FROM posts WHERE page_id = p.id) AS firstPostedAt, (
+      SELECT json_group_array(json_object('title', title, 'postedAt', posted_at)) FROM (
+        SELECT title, posted_at FROM posts WHERE page_id = p.id ORDER BY posted_at DESC, id LIMIT 8
+      )
+    ) AS threads
+    FROM json_each(?) AS wanted JOIN pages AS p ON p.id = wanted.value
+  `).bind(JSON.stringify(ids)).all();
+  const sourcePages = results.filter(({ firstPostedAt }) => Number.isFinite(firstPostedAt)).map(({ threads, ...page }) => {
+    const posts = JSON.parse(threads);
+    return { ...page, key: indexedKeys.get(page.id), postedAt: posts[0].postedAt, posts };
+  });
+  return { ...recovered, sourcePages };
 }
 
 async function serveTopicCoverage(url, db) {
@@ -359,22 +397,24 @@ async function serveTopicCoverage(url, db) {
   if (!topic) return Response.json({ error: "Topic not found" }, { status: 404, headers: { ...headers, "Cache-Control": "no-store" } });
   const indexed = index.pages.filter(({ topicIds }) => topicIds.includes(topic.id));
   const ids = await Promise.all(indexed.slice(offset, offset + COVERAGE_PAGE_SIZE).map(({ key }) => fingerprint(key)));
-  const links = new Map();
+  const stored = new Map();
   for (const row of ids.length ? await coverageRows(db, ids) : []) {
-    if (!links.has(row.page_id)) links.set(row.page_id, {
-      url: row.url, title: row.title, domain: row.domain, postedAt: row.posted_at === null ? null : iso(row.posted_at), posts: [],
+    if (!stored.has(row.page_id)) stored.set(row.page_id, {
+      id: row.page_id, url: row.url, title: row.title, domain: row.domain, postedAt: row.posted_at === null ? null : iso(row.posted_at), posts: [],
     });
-    if (row.post_id) links.get(row.page_id).posts.push({
+    if (row.post_id) stored.get(row.page_id).posts.push({
       id: row.post_id, url: row.post_url, title: row.post_title, source: row.source, community: row.community,
       postedAt: iso(row.posted_at), comments: row.comments,
     });
   }
+  const links = new Map(topicPageEvidence([...stored.values()]).map(({ id, ...link }) => [id, link]));
   const page = [];
   let position = offset;
   let bytes = 4096;
   for (const id of ids) {
     const link = links.get(id);
     if (link) {
+      link.title ||= link.url;
       const size = utf8.encode(JSON.stringify(link)).byteLength + 1;
       if (page.length && bytes + size > COVERAGE_PAGE_BYTES) break;
       bytes += size;

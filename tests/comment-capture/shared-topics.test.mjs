@@ -1739,6 +1739,34 @@ test("the upgraded index refreshes an older cache and keeps its groups when offl
 	}
 });
 
+test("offline Collection regroups stale automatic assignments while preserving reviewed links and discussion counts", async () => {
+	const links = [
+		["Selene reaches Ceres orbit", "https://orbit.example/31"],
+		["Selene enters orbit around Ceres", "https://space.example/32"],
+		["Selene enters Ceres orbit for its science survey", "https://mission.example/33"],
+		["Oral histories from the library", "https://shelves.example/34"],
+		["An interview with the archivist", "https://library.example/35"],
+	];
+	const story = { id: "story:stale-access", kind: "story", label: "Access to this page has been denied" };
+	const coverage = { id: "coverage:stale-host", kind: "coverage", label: "reuters.com" };
+	const curated = { id: "story:editorial", kind: "story", label: "Access Denied", curated: true };
+	const pages = links.map(([, url], i) => ({
+		key: new URL(url).host + new URL(url).pathname, topicIds: i < 3 ? [story.id, coverage.id] : [curated.id],
+		reviewed: i >= 2, posts: i === 0 ? [["hn:9840", 12]] : i === 1 ? [["lemmy:9841", 31]] : [],
+	}));
+	await withBookmarkTopics(links, async (list, app) => {
+		const group = list.locator('.app-topic-row[data-shared-topic^="reader-story:"]');
+		assert.equal(await group.count(), 1, (await list.locator(".app-topic-name").allTextContents()).join(", "));
+		await group.getByText("43 comments across 2 discussions in 2 links", { exact: true }).waitFor();
+		await list.locator('[data-shared-topic="story:editorial"]').getByText("#Access Denied", { exact: true }).waitFor();
+		await list.getByRole("link", { name: links[2][0], exact: true }).waitFor();
+		assert.equal(await list.locator(".app-topic-row").count(), 2);
+		assert(app.requests.some(({ url }) => url === catalogURL), "The old cache revision prompts an index refresh");
+	}, { stored: {
+		[catalogKey]: { revision: 9, fetchedAt: Date.now(), data: { ...catalog, topics: [story, coverage, curated], pages } },
+	} });
+});
+
 test("recovering the shared index keeps the current topic open and restores focus to its new row", async () => {
 	const article = { ...guide, title: "Browser adds hardware passkeys for account sign-in", points: 30, by: "fixture" };
 	const other = { ...unrelated, title: "Browser adds hardware passkeys for account sign-in this week", points: 30, by: "fixture" };
@@ -2130,6 +2158,25 @@ test("Topics put separate developments under specific headlines with or without 
 	}
 });
 
+test("a local story headline retains reported uncertainty when another member states the event as fact", async () => {
+	const certain = { ...guide, title: "Northbridge national crime database hacked", topic: "technology" };
+	const qualified = { ...report, title: "Northbridge national crime database reportedly hacked", topic: "technology" };
+	const app = await launchTopics({ status: 503, stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [certain] },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [qualified] },
+	} });
+	try {
+		await app.page.goto("https://backchnnl.app/");
+		const list = app.page.locator("#app-list-body");
+		await list.locator(".app-topic-name").first().waitFor({ timeout: 5000 });
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#" + qualified.title]);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
 test("Unread keeps standalone links in their original rows with an empty shared index", async () => {
 	const stories = [
 		{ ...guide, title: "Language models can revise their own weights" },
@@ -2241,4 +2288,139 @@ test("Collection groups corroborated subjects and keeps unrelated repeated words
 	} finally {
 		await app.browser.close();
 	}
+});
+
+async function withBookmarkTopics(links, check, { responses = [], prepare, stored = {} } = {}) {
+	const bookmarks = links.map(([title, url]) => ({
+		title, url, key: new URL(url).host + new URL(url).pathname, addedAt: now * 1000, previewOnOpen: true,
+	}));
+	const app = await launchTopics({ responses: [{ match: (url) => url === catalogURL, status: 503 }, ...responses], stored: {
+		"HNewhere:collected": bookmarks, "HNewhere:app_browse_topics": true, ...stored,
+	} });
+	try {
+		await prepare?.(app);
+		const { page } = app;
+		page.setDefaultTimeout(5000);
+		await page.goto("https://backchnnl.app/");
+		await rail(page, "collection").click();
+		const list = page.locator("#app-list-body");
+		await list.locator(".reader-collection-row, .app-topic-row").first().waitFor();
+		await check(list, app);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+}
+
+test("Collection names a shared development from the member headlines and excludes the earlier milestone", async () => {
+	const links = [
+		["Spacecraft reaches Mercury on second-ever mission to enter its orbit", "https://www.theguardian.com/science/2026/nov/20/spacecraft-mercury-second-ever-mission-orbit-bepicolombo"],
+		["BepiColombo finally reaches Mercury after eight-year odyssey", "https://www.nature.com/articles/d41586-026-03803-8"],
+		["BepiColombo entering orbit around Mercury", "https://www.esa.int/media/about-us/directorates/science/bepicolombo-entering-orbit-around-mercury"],
+		["BepiColombo begins Mercury arrival with MTM separation success", "https://www.esa.int/ga/articles/about-us/directorates/operations/bepicolombo-begins-mercury-arrival-with-mtm-separation-success"],
+	];
+	await withBookmarkTopics(links, async (list, app) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#BepiColombo entering orbit around Mercury"]);
+		const photo = list.locator(".app-topic-row img[data-loaded]");
+		await photo.waitFor();
+		assert.equal(await photo.getAttribute("src"), topicPhoto);
+		assert.match(await photo.getAttribute("title"), /BepiColombo.*Example author/);
+		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
+		await list.locator(".app-topic-row").click();
+		await list.getByRole("link", { name: links[0][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 3).map(([title]) => title)));
+		const queries = app.requests.filter(({ url }) => new URL(url).hostname === "en.wikipedia.org")
+			.flatMap(({ url }) => (new URL(url).searchParams.get("titles") || new URL(url).searchParams.get("gsrsearch")).split("|"));
+		assert(queries.includes("BepiColombo"));
+		assert(queries.every((query) => /^(?:BepiColombo|Mercury)$/i.test(query)));
+		assert.equal(app.requests.some(({ url }) => links.some(([, bookmark]) => decodeURIComponent(url).includes(bookmark))), false);
+	}, {
+		prepare: ({ context }) => context.route(topicPhoto, (route) => route.fulfill({ contentType: "image/png", body: previewPNG })),
+		responses: [
+			{ match: (url) => new URL(url).hostname === "en.wikipedia.org", json: { query: { pages: [
+				{ ns: 0, title: "BepiColombo", pageimage: "Subject.jpg" },
+			] } } },
+			{ match: (url) => new URL(url).hostname === "commons.wikimedia.org", json: { query: { pages: [
+				{ ns: 6, title: "File:Subject.jpg", imagerepository: "local", imageinfo: [{
+					thumburl: topicPhoto, descriptionurl: imageCredit, thumbwidth: 240, thumbheight: 180,
+					extmetadata: { Artist: { value: "Example author" }, LicenseShortName: { value: "Public domain" } },
+				}] },
+			] } } },
+		],
+	});
+});
+
+test("Collection keeps different actors, milestones and placeholder titles individual alongside a shared technique", async () => {
+	const links = [
+		["Vesta reaches Mars after the long voyage", "https://vesta.example/1"],
+		["Psyche reaches Mars to study the canyons", "https://psyche.example/2"],
+		["Hesper Systems opens its initial public offering", "https://markets.example/3"],
+		["Hesper Systems closes its initial public offering", "https://finance.example/4"],
+		["Access Denied", "https://denied.example/5"],
+		["Access Denied", "https://gated.example/6"],
+		["reuters.com", "https://reuters.com/7"],
+		["reuters.com", "https://reuters.com/8"],
+		["Save What Matters", "https://reader.example/9"],
+		["Save What Matters", "https://reader.example/10"],
+		["Access to this page has been denied", "https://denied.example/13"],
+		["Access to this page has been denied", "https://denied.example/14"],
+		["Ananke launches Vela from Florida", "https://launch.example/15"],
+		["Ananke launches Corvus from Florida", "https://space.example/16"],
+		["Yarrow announces opening of its Toronto exchange", "https://market.example/17"],
+		["Yarrow announces closing of its Toronto exchange", "https://ledger.example/18"],
+		["Vireo enters Jupiter orbit", "https://archive.example/2014/11/20/vireo-jupiter"],
+		["Vireo enters orbit around Jupiter", "https://science.example/2026/nov/20/vireo-enters-orbit"],
+		["Firing ceramic glazes without defects", "https://studio.example/11"],
+		["Ceramic glazes for beginners", "https://pottery.example/12"],
+	];
+	await withBookmarkTopics(links, async (list) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#Ceramic Glazes"]);
+		assert.deepEqual((await list.locator(".browse-title-link").evaluateAll((items) => items.map((item) => item.href))).sort(),
+			links.slice(0, -2).map(([, url]) => url).sort());
+	});
+});
+
+test("Collection preserves a descriptive title that begins with an access error phrase", async () => {
+	const links = [
+		["Access Denied: An oral history of censorship", "https://books.example/19"],
+		["Writing an oral history of censorship", "https://essays.example/20"],
+	];
+	await withBookmarkTopics(links, async (list) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#Oral History of Censorship"]);
+	});
+});
+
+test("Collection can group a shared technique that contains an ordinary action word", async () => {
+	const links = [
+		["Adapting open source licenses for teaching", "https://lessons.example/21"],
+		["Comparing open source licenses across libraries", "https://legal.example/22"],
+	];
+	await withBookmarkTopics(links, async (list) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#Open Source Licenses"]);
+	});
+});
+
+test("Collection uses meaningful saved discussions and disregards access-page descriptions", async () => {
+	const links = [
+		["Access Denied", "https://bulletin.example/23"], ["Access Denied", "https://chronicle.example/24"],
+		["Access Denied", "https://journal.example/25"], ["Access Denied", "https://weekly.example/26"],
+	];
+	const discussions = ["Selene reaches Ceres orbit", "Selene enters orbit around Ceres"].map((title, i) => ({
+		...guide, key: "hn:" + (9900 + i), id: 9900 + i, title, url: links[i][1], addedAt: now * 1000,
+	}));
+	await withBookmarkTopics(links, async (list) => {
+		const headings = await list.locator(".app-topic-name").allTextContents();
+		assert.equal(headings.length, 1, headings.join(", "));
+		assert.match(headings[0], /^#Selene.*Ceres/);
+		const rows = list.locator(".browse-title-link");
+		assert.deepEqual((await rows.evaluateAll((nodes) => nodes.map((node) => node.href))).sort(), links.slice(2).map(([, url]) => url).sort());
+		await list.locator(".app-topic-row").click();
+		await list.getByRole("link", { name: discussions[0].title, exact: true }).waitFor();
+		assert.deepEqual(new Set(await rows.allTextContents()), new Set(discussions.map(({ title }) => title)));
+	}, { stored: {
+		"HNewhere:favorites": [...discussions, { ...discussions[0], key: "hn:9902", id: 9902, title: "An apparent coincidence" }],
+		"HNewhere:looks": Object.fromEntries(links.slice(2).map(([, url]) => [
+			new URL(url).host + new URL(url).pathname, { description: "Save What Matters", at: now * 1000 },
+		])),
+	} });
 });

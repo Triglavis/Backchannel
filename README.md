@@ -58,8 +58,10 @@ The sources you enable determine where Backchannel looks for discussions.
 Optional Account sync uses Cloudflare to store an encrypted snapshot and
 related account metadata.
 
-The Topics view in Reader groups coverage of specific stories under a publisher
-headline. Backchannel matches the shared index to your links and uses titles,
+The Topics view in Reader groups links that cover the same development under
+a headline drawn from the coverage. A public discussion can supply the headline
+when the publisher title is missing. Links with too little evidence stay in the
+list individually. Backchannel matches the shared index to your links and uses titles,
 URL paths, and saved page metadata to group more links on your device. Topics
 show the known counts for comments, distinct discussions, and links. The Topics
 Worker finds credited Wikipedia and Wikimedia Commons images for public subjects.

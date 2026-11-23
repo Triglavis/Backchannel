@@ -17698,6 +17698,18 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 	];
 	const READER_STORY_ACTION_WORDS = new Set(READER_STORY_ACTIONS.map(([word]) => word));
 	const READER_STORY_CONTEXT = /\b(?:attack|blockade|breach|ceasefire|change|closure|decision|election|investigation|launch|negotiations?|protests?|release|revolution|sanctions?|talks|trial|war)\b/i;
+	const READER_MILESTONE_VERBS = [
+		["arrival", /\b(?:arriv(?:es?|ed|ing)|reach(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b/i],
+		["departure", /\b(?:depart(?:s|ed|ing)?|leaves?|leaving|left)\b/i],
+		["opening", /\b(?:opens|opened|opening|begins?|began|beginning|starts?|started|starting)\b/i],
+		["closing", /\b(?:clos(?:es|ed|ing)|complet(?:es?|ed|ing)|ends?|ended|ending)\b(?![- ](?:form|loop|source)\b)/i],
+		["launch", /\b(?:launch(?:es|ed|ing)?|unveil(?:s|ed|ing)?)\b/i],
+		["separation", /\bseparat(?:es?|ed|ing)\b/i],
+		["approval", /\b(?:approv(?:es?|ed|ing)|adopt(?:s|ed|ing)?)\b/i],
+		["rejection", /\b(?:reject(?:s|ed|ing)?|den(?:ies|ied|ying))\b/i],
+		["plan", /\b(?:plans?|planned|planning|prepar(?:es?|ed|ing)|expects?|expected|will|could|may)\b/i],
+		["announcement", /\bannounc(?:es?|ed|ing)\b/i],
+	];
 
 	function readerHeadlineTags(title, tags = new Set()) {
 		for (const { id } of TOPICS) {
@@ -17785,6 +17797,35 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			!/^(?:reports?|reportedly|coverage|developments?)$/.test(word)).map(readerSubjectTerm));
 	}
 
+	function readerUsableTopicTitle(value) {
+		if (typeof value !== "string") return false;
+		const title = value.trim().split(/\s+[|–—]\s+/)[0].replace(/[.!…]+$/, "");
+		return Boolean(title) && !/^(?:https?:\/\/|www\.)|^(?:[\p{L}\d-]+\.)+[\p{L}]{2,}(?::\d+)?(?:[/?#]\S*)?$/iu.test(title) &&
+			!/^(?:(?:error\s+)?(?:401|403|404|429|503)[\s:-]*)?(?:access (?:denied|forbidden|to this (?:page|site) has been denied)|forbidden|not found|page not found|service unavailable|just a moment|sign in|log in|subscribe|home(?:page)?|untitled|save what matters)$/i.test(title);
+	}
+
+	function readerTopicTitles(row) {
+		const story = row.story || row;
+		const discussions = row.discussions || row.also || [];
+		return [...new Set([row.collected?.title, story.title, ...discussions.slice(0, 5).map((entry) => entry.title)]
+			.filter(readerUsableTopicTitle).map((title) => title.trim()))];
+	}
+
+	function readerTitleMilestone(title) {
+		if (!title || /^(?:how|why|what|a guide to|a history of|understanding)\b/i.test(title)) return null;
+		let first;
+		for (const [kind, pattern] of READER_MILESTONE_VERBS) {
+			const match = pattern.exec(title);
+			if (!match || first && first.start <= match.index) continue;
+			const end = match.index + match[0].length;
+			if (first && (kind === "announcement" || kind === "plan") &&
+				/^\s+(?:(?:the|its|to)\s+)?$/i.test(title.slice(end, first.start))) {
+				if (kind === "plan") first.kind = "planned " + first.kind;
+			} else first = { kind, start: match.index, end };
+		}
+		return first;
+	}
+
 	function readerLinkSubjectGroups(items, index) {
 		const nameFor = (label) => readerSubjectWords(label).join(" ").toLowerCase();
 		const namedTopics = [...(index?.topics.values() || [])].filter((topic) => topic.kind === "topic");
@@ -17802,7 +17843,10 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		}
 
 		const entries = items.filter(({ url }) => !index?.reviewedPages.has(sharedTopicURLKey(url)))
-			.map((item, position) => ({ ...item, position, paths: readerSubjectPaths(item.url) }));
+			.map((item, position) => ({ ...item, position, paths: readerSubjectPaths(item.url).filter(readerUsableTopicTitle),
+				description: readerUsableTopicTitle(item.description) ? item.description : "",
+				section: readerUsableTopicTitle(item.section) ? item.section : "",
+				milestone: readerTitleMilestone(item.titles[0]) }));
 		const phrases = new Map();
 		for (const entry of entries) {
 			for (const text of [...entry.titles, ...entry.paths, entry.description]) {
@@ -17850,7 +17894,8 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			const membership = matches.map(({ position }) => position).join(",");
 			if (!topic && memberships.has(membership)) continue;
 			memberships.add(membership);
-			add({ ...(topic || { id: "collection-subject:" + key, label: readerSubjectLabel(words), kind: "topic" }), nameOnly }, matches);
+			add({ ...(topic || { id: "collection-subject:" + key, label: readerSubjectLabel(words), kind: "topic" }),
+				nameOnly: nameOnly || !topic && matches.every((entry) => entry.milestone) }, matches);
 		}
 
 		for (const entry of entries) {
@@ -17861,6 +17906,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			const sectionWords = readerSubjectWords(section);
 			const named = readerNamedPageSubject(entry.url);
 			const declared = sectionWords.length <= 5 && sectionWords.some((word) => readerSubjectWord(word.toLowerCase())) ? section : "";
+			if (!entry.titles.length && !entry.description && !named && !declared) continue;
 			const label = named || cue?.[0] || declared || entry.subjects?.[0] || readerPublisherSubject(entry.url);
 			if (label) {
 				const key = readerSubjectWords(label).join(" ").toLowerCase();
@@ -17878,7 +17924,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		return readerLinkSubjectGroups(documents.map((doc) => ({
 			row: doc,
 			url: doc.url,
-			titles: [doc.title, ...doc.discussions.slice(0, 5).map((story) => story.title)],
+			titles: readerTopicTitles(doc),
 			description: doc.look?.description,
 			section: doc.look?.section,
 			tags: tagsByPage.get(doc.key),
@@ -17888,7 +17934,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 	function readerStorySubjectEvidence(stories) {
 		const description = stories.find((story) => typeof story.description === "string" && story.description.trim())?.description;
 		return {
-			titles: stories.map((story) => story.title),
+			titles: stories.map((story) => story.title).filter(readerUsableTopicTitle),
 			description: textExcerpt(description, 360),
 			subjects: stories.flatMap(readerStorySubjectLabels),
 		};
@@ -17928,7 +17974,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			if (!cached || !cached.permalink && story.permalink) article.stories.set(discussion, story);
 
 			const time = Number(story.time);
-			if (!Number.isFinite(time) || time <= 0) continue;
+			if (!Number.isFinite(time) || time <= 0 || !readerUsableTopicTitle(title)) continue;
 			const normalized = title.normalize("NFKC").toLowerCase().replace(/['’]/g, "");
 			const words = new Set((normalized.match(/[\p{L}\p{N}]+/gu) || []).filter((word) => word.length > 1 && !READER_HEADLINE_STOP_WORDS.has(word)));
 			if (words.size < 3) continue;
@@ -47570,7 +47616,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	const SHARED_TOPIC_COVERAGE_URL = SHARED_TOPIC_INDEX_URL + "/coverage";
 	const SHARED_TOPIC_REPORT_URL = "https://topics.backchnnl.app/api/topic-reports";
 	const SHARED_TOPIC_FALLBACK_URL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
-	const SHARED_TOPIC_CACHE_REVISION = 9;
+	const SHARED_TOPIC_CACHE_REVISION = 10;
 	const SHARED_TOPIC_CACHE_MS = 3 * 60 * 60 * 1000;
 	const SHARED_TOPIC_MAX_LINKS = 4000;
 	const WIKI_TOPIC_PHOTOS_KEY = "HNewhere:wikipedia_topic_images";
@@ -47721,6 +47767,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	function parseSharedTopic(topic) {
 		if (!isSharedTopicId(topic?.id) || typeof topic.kind !== "string" || !topic.id.startsWith(topic.kind + ":") ||
 			typeof topic.label !== "string" || !topic.label.trim() || topic.label.length > 512) return null;
+		if (topic.kind !== "topic" && topic.curated !== true && !readerUsableTopicTitle(topic.label)) return null;
 		return {
 			id: topic.id, label: topic.label.trim(), kind: topic.kind,
 			aliases: normalizeTopicLabels(Array.isArray(topic.aliases) ? topic.aliases.slice(0, 24) : []),
@@ -48127,21 +48174,70 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return mergeReaderTopicGroups(groups, order, index);
 	}
 
-	function readerStoryLead(rows) {
-		const candidates = rows.map((row) => {
-			const title = String((row.story || row).title || appTopicRowURL(row)).trim();
-			return { title, terms: readerStoryTerms(title) };
-		});
+	function readerMemberEvidence(row, url, article) {
+		const titles = readerTopicTitles(row);
+		if (!titles.length) {
+			for (const story of article?.stories.values() || []) {
+				if (readerUsableTopicTitle(story.title)) titles.push(story.title.trim());
+			}
+		}
+		const context = new Set();
+		for (const text of [readerSubjectPaths(url).at(-1), row.look?.description, (row.story || row).description]) {
+			if (text && readerUsableTopicTitle(text)) for (const term of readerStoryTerms(text)) context.add(term);
+		}
+		const support = new Set(context);
+		for (const title of titles) for (const term of readerStoryTerms(title)) support.add(term);
+		const datedPath = /\/(20\d{2})[/-](\d{2}|[a-z]{3})[/-](\d{2})(?:[/-]|$)/i.exec(url.split(/[?#]/)[0]);
+		let dated = (row.story || row).time || NaN;
+		if (datedPath) {
+			const month = Number(datedPath[2]) || "jan feb mar apr may jun jul aug sep oct nov dec".split(" ").indexOf(datedPath[2].toLowerCase()) + 1;
+			if (month >= 1 && month <= 12) dated = Date.UTC(Number(datedPath[1]), month - 1, Number(datedPath[3])) / 1000;
+		}
+		const title = titles[0];
+		const milestone = readerTitleMilestone(title);
+		if (!milestone) return { titles, support, dated };
+		const before = title.slice(0, milestone.start);
+		const after = title.slice(milestone.end).trim().split(/\s+(?:after|as|at|before|despite|during|from|while|with)\s+/i)[0];
+		const actors = (before.match(/\p{Lu}[\p{L}\p{N}’'-]*(?:\s+\p{Lu}[\p{L}\p{N}’'-]*)*/gu) || [])
+			.filter((name) => !/^(?:agency|company|officials?|probe|researchers?|scientists?|spacecraft|study)$/i.test(name))
+			.map((name) => [...readerStoryTerms(name)]).filter((terms) => terms.length);
+		const targets = new Set(readerSubjectWords(after).filter((word) => /^\p{Lu}/u.test(word) && readerSubjectWord(word.toLowerCase()))
+			.map((word) => readerSubjectTerm(word.toLowerCase())));
+		const actorContext = new Set([...readerStoryTerms(before), ...context]);
+		const numbers = (title.match(/\p{N}+(?:[.-]\p{N}+)*/gu) || []).join(" ");
+		return { titles, support, milestone: milestone.kind, actors, actorContext, targets, numbers, dated };
+	}
+
+	function readerSameActor(left, right) {
+		return left.actors.some((terms) => terms.every((term) => right.actorContext.has(term))) ||
+			right.actors.some((terms) => terms.every((term) => left.actorContext.has(term)));
+	}
+
+	function readerCompatibleMembers(left, right) {
+		if (Math.abs(left.dated - right.dated) > READER_COVERAGE_WINDOW) return false;
+		if (!left.milestone || !right.milestone) return true;
+		return left.milestone === right.milestone && !(left.numbers && right.numbers && left.numbers !== right.numbers) &&
+			(!left.targets.size || !right.targets.size || [...left.targets].some((term) => right.targets.has(term))) &&
+			(!left.actors.length || !right.actors.length || readerSameActor(left, right));
+	}
+
+	function readerStoryLead(members) {
 		const frequency = new Map();
-		for (const { terms } of candidates) for (const term of terms) frequency.set(term, (frequency.get(term) || 0) + 1);
-		return candidates.map(({ title, terms }) => ({
-			title, score: [...terms].reduce((sum, term) => sum + frequency.get(term) - 1, 0) -
-				(/(?:\.{3}|…)$/.test(title) ? candidates.length : 0),
-		})).sort((a, b) => b.score - a.score || a.title.length - b.title.length)[0].title;
+		for (const { support } of members) for (const term of support) frequency.set(term, (frequency.get(term) || 0) + 1);
+		const candidates = members.flatMap((member) => member.titles.map((title) => {
+			const shared = [...readerStoryTerms(title)].filter((term) => frequency.get(term) > 1);
+			const score = shared.reduce((sum, term) => sum + frequency.get(term) - 1, 0);
+			const qualified = shared.length >= 2 && /\b(?:alleged(?:ly)?|apparent(?:ly)?|reportedly|suspected|may have|investigat(?:es?|ing|ion))\b/i.test(title);
+			return { title, qualified, score: score - (/(?:\.{3}|…)$/.test(title) ? members.length : 0) };
+		}));
+		return candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.score - a.score ||
+			a.title.length - b.title.length || a.title.localeCompare(b.title))[0].title;
 	}
 
 	function readerUnindexedStoryGroups(rows, urlFor, coverage, index, subjects) {
 		const available = new Map();
+		const evidence = new Map();
+		const byTarget = new Map();
 		for (const row of rows) {
 			const url = urlFor(row);
 			const key = normalizeURL(url);
@@ -48150,14 +48246,30 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				const topic = index.topics.get(id);
 				return topic?.curated || topic?.kind === "story" && index.topicPages.get(id)?.size > 1;
 			});
-			if (key && !published) available.set(key, row);
+			if (!key || published) continue;
+			const member = readerMemberEvidence(row, url, coverage.articles.get(key));
+			if (!member.titles.length) continue;
+			available.set(key, row);
+			evidence.set(key, member);
+			for (const target of member.targets || []) {
+				const signature = member.milestone + ":" + target;
+				if (!byTarget.has(signature)) byTarget.set(signature, []);
+				byTarget.get(signature).push(key);
+			}
 		}
 		const remaining = new Map(available);
 		const links = new Map();
 		const neighbors = (key) => {
 			if (!links.has(key)) {
-				links.set(key, new Set(relatedReaderArticles(coverage, urlFor(available.get(key)), available.size, readerStorySimilarity)
-					.map(({ story }) => normalizeURL(story.url)).filter((url) => available.has(url))));
+				const member = evidence.get(key);
+				const matches = new Set(relatedReaderArticles(coverage, urlFor(available.get(key)), available.size, readerStorySimilarity)
+					.map(({ story }) => normalizeURL(story.url)).filter((url) => available.has(url)));
+				for (const target of member.targets || []) {
+					for (const other of byTarget.get(member.milestone + ":" + target)) {
+						if (key !== other && readerSameActor(member, evidence.get(other))) matches.add(other);
+					}
+				}
+				links.set(key, new Set([...matches].filter((url) => readerCompatibleMembers(member, evidence.get(url)))));
 			}
 			return links.get(key);
 		};
@@ -48174,7 +48286,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				subject.rows.filter((row) => memberSet.has(row)).length >= 2 &&
 				!READER_BROAD_TOPIC_LABELS.has(topicFilterKey(subject.label))).flatMap(readerTopicLabels)).slice(0, 12);
 			groups.push({
-				id: "reader-story:" + members.toSorted()[0], kind: "story", label: readerStoryLead(chosen), aliases, rows: chosen,
+				id: "reader-story:" + members.toSorted()[0], kind: "story", label: readerStoryLead(members.map((url) => evidence.get(url))), aliases, rows: chosen,
 			});
 			for (const url of members) remaining.delete(url);
 		}
@@ -48393,10 +48505,27 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	}
 
 	function wikiTopicTitles(group) {
+		const saved = appState?.view === "collection" || appState?.view === "queue";
+		const published = saved && sharedTopicCache?.index?.topics.get(group.id);
+		if (published) group = { ...published, rows: group.rows };
 		const label = group.label;
 		const software = appTopicSoftwareSubject(group);
 		if (software) {
 			return software === "rust" ? ["Rust (programming language)"] : ["Distributed version control"];
+		}
+		const privateTitles = new Set();
+		const words = (title) => readerSubjectWords(title).join(" ").toLowerCase();
+		if (saved && !published) {
+			for (const row of group.rows) for (const title of readerTopicTitles(row)) privateTitles.add(words(title));
+			if (group.kind === "story") {
+				const names = label.match(/\p{Lu}[\p{L}\p{N}’'-]*(?:\s+(?:of |the )?\p{Lu}[\p{L}\p{N}’'-]*){0,2}/gu) || [];
+				const members = group.rows.map((row) => readerMemberEvidence(row, appTopicRowURL(row)));
+				return normalizeTopicLabels(names).filter((name) => {
+					const terms = [...readerStoryTerms(name)];
+					return name.length <= 70 && terms.length && !privateTitles.has(words(name)) &&
+						members.filter(({ support }) => terms.every((term) => support.has(term))).length >= 2;
+				}).slice(0, 5);
+			}
 		}
 		const subjects = label.split(" · ");
 		const related = WIKI_TOPIC_RELATED_SUBJECTS.filter(([, pattern]) => pattern.test(label)).map(([title]) => title);
@@ -48404,7 +48533,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const conflictPlace = /^(\p{Lu}\p{L}{2,})\s+(?:[Ww]ar|[Cc]onflict)\b/u.exec(label)?.[1];
 		if (conflictPlace) names.push(conflictPlace);
 		return normalizeTopicLabels([...subjects, ...(group.aliases || []), ...related, ...names].filter((title) =>
-			title.length <= 70 && /^[\p{L}\p{N} .&()'’–-]+$/u.test(title) &&
+			!privateTitles.has(words(title)) && title.length <= 70 && /^[\p{L}\p{N} .&()'’–-]+$/u.test(title) &&
 			readerSubjectWords(title).length <= 5 && readerSubjectWords(title).some((word) => readerSubjectWord(word.toLowerCase())))).slice(0, 5);
 	}
 

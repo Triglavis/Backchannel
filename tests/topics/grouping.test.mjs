@@ -128,3 +128,145 @@ test("a subject suggested for story artwork is supported by multiple member head
   assert.equal(groups.length, 1);
   assert.deepEqual(groups[0].subjectTitles, ["Riemann Hypothesis"]);
 });
+
+test("the five published FBI database reports agree on the incident across reporting angles", () => {
+  const reports = [
+    page("cnn", "The FBI was hacked again", { posts: [
+      { title: "Trump downplays breach into FBI’s crime database while reviving complaints about agency’s Russia probe | CNN Politics" },
+      { title: "The FBI was hacked again, this time the breach targeted its crime database" },
+      { title: "The FBI was hacked again" },
+    ] }),
+    page("bbc", "FBI reportedly investigating apparent hack of its criminal database"),
+    page("tribune", "FBI investigating apparent hack of its key national criminal justice database, AP source says"),
+    page("ncic", "FBI's NCIC criminal database hacked, Trump confirms"),
+    page("france24", "FBI Criminal Database Hacked"),
+  ];
+  const groups = groupPages(reports);
+  assert.equal(groups.length, 1);
+  assert.deepEqual([...groups[0].pageIds].sort(), ["bbc", "cnn", "france24", "ncic", "tribune"]);
+  assert.match(groups[0].label, /FBI.*investigating apparent hack.*criminal.*database/i);
+  assert.deepEqual(groupPages([...reports].reverse()), groups);
+});
+
+test("a representative headline names the spacecraft when another member's lead supports it", () => {
+  const specific = "BepiColombo completes orbital insertion at Mercury";
+  const groups = groupPages([
+    page("short", "Orbital insertion at Mercury", { vector: [1], description: "The BepiColombo spacecraft has entered orbit around Mercury." }),
+    page("esa", specific, { vector: [1] }),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].label, specific);
+});
+
+test("on fixed members the headline preserves claim status and omits a single source's added claim", () => {
+  const report = "FBI investigating apparent hack of its criminal database";
+  const groups = groupPages([
+    page("terse", "FBI criminal database hacked"),
+    page("report", report),
+    page("angle", "FBI criminal database hacked, exposing millions of records", {
+      description: "The article reports that millions of records were exposed.",
+    }),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].label, report);
+  assert.equal(groups[0].pageIds[0], "report");
+});
+
+test("an action and a named organization still need matching evidence about the affected object", () => {
+  const article = page("investigation", "FBI investigating apparent hack of its national crime database", { vector: [1] });
+  for (const title of [
+    "FBI investigating apparent hack of its email server",
+    "FBI investigating apparent hack of its state crime database",
+    "FBI investigating apparent hack of its national fingerprint database",
+    "RCMP investigating apparent hack of its national crime database",
+    "FBI announces national crime database modernization",
+    "FBI was hacked again",
+  ]) {
+    const unrelated = page("unrelated", title, { vector: [1] });
+    assert.equal(groupPages([article, unrelated]).length, 2, title);
+  }
+  assert.equal(groupPages([
+    page("crime", article.title.toLowerCase(), { vector: [1] }),
+    page("email", "fbi investigating apparent hack of its email server", { vector: [1] }),
+  ]).length, 2);
+  assert.equal(groupPages([
+    page("portland", "FBI investigating breach of hospital network in Portland", { vector: [1] }),
+    page("boston", "FBI investigating breach of hospital network in Boston", { vector: [1] }),
+  ]).length, 2);
+  const unrelated = page("email", "FBI investigating apparent hack of its email server", { vector: [1] });
+  const bridge = page("both", "FBI investigating apparent hack of its crime database and email server", { vector: [1] });
+  assert(groupPages([article, bridge, unrelated]).every(({ pageIds }) =>
+    !(pageIds.includes("investigation") && pageIds.includes("email"))));
+});
+
+test("an offering's pricing and closing announcements are distinct milestones", () => {
+  const titles = [
+    "Anthropic announces initial public offering", "Anthropic announces pricing of initial public offering",
+    "Anthropic announces closing of initial public offering",
+  ];
+  assert.equal(groupPages(titles.map((title, i) => page(String(i), title, { vector: [1] }))).length, 3);
+});
+
+test("unverified scale in one policy headline gives way to a source-supported alternative", () => {
+  const groups = groupPages([
+    page("a", "Trump Threatens Massive Tax on US Companies Building Data Centers Overseas"),
+    page("b", "Donald Trump vows to tax US companies building data centres overseas"),
+    page("c", "US tech companies that build AI data centers in other countries will be penalized, Trump says"),
+  ]);
+  assert.equal(groups.length, 1);
+  assert.doesNotMatch(groups[0].label, /massive/i);
+  assert.match(groups[0].label, /Trump/i);
+});
+
+test("unusable titles stay unassigned while independent discussion and syndicated titles remain eligible", () => {
+  const syndicated = "County council approves a flood barrier for the harbor";
+  const posts = [{ id: "hn:1", title: "reuters.com" }, { id: "lemmy:2", title: "reuters.com" }];
+  const groups = groupPages([
+    page("missing", "reuters.com", { domain: "reuters.com", posts }),
+    page("other", "Access Denied"),
+    page("wire", "reuters.com", { domain: "reuters.com", posts: [{ id: "hn:3", title: syndicated }] }),
+    page("copy", syndicated, { domain: "reuters.com" }),
+  ]);
+  assert.deepEqual(groups.map(({ label, pageIds }) => ({ label, ids: [...pageIds].sort() })),
+    [{ label: syndicated, ids: ["copy", "wire"] }]);
+  assert.equal(posts.length, 2);
+});
+
+test("gift-link notes are removed from topic headlines and matching, leaving the source and its dated title intact", () => {
+  const title = "U.S. Tracked Alice Huang’s Contacts With China Spy Agency During Nvidia Affair";
+  const articles = [title, title + " (Gift Article)", title + " (gift link)"].map((headline, index) =>
+    page(String(index), headline, { domain: "nytimes.com", posts: [{ title: headline }] }));
+  articles.push(page("historical", title + " (2024)", { domain: "nytimes.com" }));
+  const groups = groupPages(articles);
+  assert.deepEqual(groups.map(({ label, pageIds }) => [label, [...pageIds].sort()]),
+    [[title, ["0", "1", "2"]], [title + " (2024)", ["historical"]]]);
+  assert.equal(articles[1].title, title + " (Gift Article)");
+  assert.equal(articles[2].posts[0].title, title + " (gift link)");
+});
+
+test("the event window uses available source dates when discussions resurface articles", () => {
+  const title = "FBI criminal database hacked";
+  const prior = NOW - 60 * 86_400_000;
+  const current = page("current", title, { publishedAt: new Date(NOW).toISOString() });
+  const old = page("old", title, { publishedAt: prior });
+  const syndicated = page("copy", title, { postedAt: prior, publishedAt: new Date(NOW - 86_400_000).toISOString() });
+  assert.equal(groupPages([current, old]).length, 2);
+  assert.deepEqual(groupPages([current, syndicated]).map(({ pageIds }) => [...pageIds].sort()), [["copy", "current"]]);
+  assert.equal(groupPages([current, page("rediscovered", title, { publishedAt: null, firstPostedAt: prior })]).length, 2);
+  assert.equal(groupPages([current, page("undated", title, { publishedAt: null, firstPostedAt: null })]).length, 1);
+  assert.equal(groupPages([
+    page("2018", title + " in 2018"), page("2026", title + " in 2026"),
+  ]).length, 2);
+});
+
+test("a specific question shared by independent explainers retains the technique and version", () => {
+  const first = "How to verify Riemann hypothesis proofs with Lean 4.2";
+  const groups = groupPages([
+    page("guide", first, { publishedAt: NOW - 60 * 86_400_000 }),
+    page("tutorial", "Verifying Riemann hypothesis proofs with Lean 4.2"),
+    page("other", "Why the Riemann hypothesis matters to number theorists"),
+    page("version", "How to verify Riemann hypothesis proofs with Lean 3.4"),
+  ]);
+  assert.deepEqual(groups.map(({ pageIds }) => [...pageIds].sort().join(" ")).sort(), ["guide tutorial", "other", "version"]);
+  assert.match(groups.find(({ pageIds }) => pageIds.includes("guide")).label, /verif.*riemann.*lean 4\.2/i);
+});

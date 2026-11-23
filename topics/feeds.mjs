@@ -27,7 +27,7 @@ const FEEDS = [
     entries: (data) => data.hits.map((item) => {
       const discussion = "https://news.ycombinator.com/item?id=" + encodeURIComponent(item.objectID);
       return {
-        id: item.objectID, title: item.title, page: item.url || discussion, discussion,
+        id: item.objectID, postTitle: item.title, page: item.url || discussion, discussion,
         description: item.story_text, postedAt: item.created_at, comments: item.num_comments,
       };
     }),
@@ -37,7 +37,7 @@ const FEEDS = [
     name: "Lobsters",
     feed: "https://lobste.rs/hottest.json",
     entries: (data) => data.map((item) => ({
-      id: item.short_id, title: item.title, page: item.url || item.comments_url,
+      id: item.short_id, postTitle: item.title, page: item.url || item.comments_url,
       discussion: item.comments_url, description: item.description_plain,
       postedAt: item.created_at, comments: item.comment_count,
     })),
@@ -76,7 +76,7 @@ function lemmyEntries(data, target) {
     if (target && (!link || link.pathname.startsWith("/pictrs/"))) return [];
     const host = webURL(community.actor_id)?.hostname;
     return [{
-      id: post.id, title: post.embed_title || post.name, postTitle: post.name, page: post.url || post.ap_id,
+      id: post.id, title: post.embed_title, postTitle: post.name, page: post.url || post.ap_id,
       discussion: "https://lemmy.world/post/" + post.id,
       community: "!" + community.name + (host ? "@" + host : ""),
       description: post.embed_description || post.body, postedAt: post.published, comments: counts?.comments,
@@ -94,7 +94,7 @@ function blueskyEntries(data) {
     const address = typeof post.uri === "string" && /^at:\/\/(did:[a-z]+:[A-Za-z0-9._:%-]+)\/app\.bsky\.feed\.post\/([A-Za-z0-9._:~-]{1,512})$/.exec(post.uri);
     if (!address || address[2] === "." || address[2] === "..") return [];
     return [{
-      id: post.uri, title: external.title || page.hostname, page: page.href,
+      id: post.uri, title: external.title, postTitle: external.title || page.hostname, page: page.href,
       discussion: "https://bsky.app/profile/" + address[1] + "/post/" + encodeURIComponent(address[2]),
       description: external.description, postedAt: post.indexedAt, comments: post.replyCount,
     }];
@@ -127,16 +127,81 @@ export function canonicalURL(value) {
   return { key, url: url.href, domain: url.hostname.replace(/^www\./, "") };
 }
 
+const NON_ARTICLE_TITLES = new Set([
+  "access denied", "access to this page has been denied", "request blocked", "request rejected",
+  "page not found", "this page not found", "just a moment", "attention required", "checking your browser",
+  "verify you are human", "verify that you are human", "enable javascript and cookies to continue",
+  "log in", "sign in", "log in to continue", "sign in to continue", "subscribe to continue", "untitled", "click here", "read more", "px-captcha",
+]);
+const HTTP_ERROR_TITLE = /^(?:error\s+)?(?:401|403|404|429|503)(?:\s*[-:–—]?\s*(?:error|unauthorized|forbidden|access denied|(?:page )?not found|too many requests|service unavailable))?$/iu;
+
+export function usableTopicTitle(value, domain = "") {
+  if (typeof value !== "string") return false;
+  const title = value.normalize("NFKC").trim();
+  if (!/[\p{L}\p{N}]/u.test(title) || /^(?:https?:\/\/|www\.)\S+$/iu.test(title)) return false;
+  const key = title.toLowerCase().replace(/^[\s–—-]+|[\s.!…]+$/gu, "");
+  const host = domain.toLowerCase().replace(/^www\./, "");
+  if (key === host || key === host.split(".")[0] || /^[\w.-]+\.(?:com|org|net|edu|gov|co|news|io)\/?$/u.test(key)) return false;
+  if (host === "briefly.co" && (key === "save what matters" || key === "curate feeds | make collections | customize email briefs")) return false;
+  const heading = key.split(/\s+\|\s+/u)[0].replace(/[.!…]+$/u, "");
+  return !NON_ARTICLE_TITLES.has(heading) && !HTTP_ERROR_TITLE.test(heading);
+}
+
+const SLUG_STOP_WORDS = new Set("about after and are for from has into that the their this with you your".split(" "));
+function headlineWords(value) {
+  return new Set((value.toLowerCase().match(/[\p{L}]{3,}/gu) || []).filter((word) => !SLUG_STOP_WORDS.has(word)));
+}
+
+function articleSlugWords(url) {
+  try {
+    const leaf = decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).at(-1) || "");
+    return /[-_]/u.test(leaf) ? headlineWords(leaf) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function topicPageEvidence(pages) {
+  const repeated = new Set();
+  const paths = new Map();
+  const candidates = pages.map((page) => [...new Set([page.title, ...(page.alternateTitles || []), ...(page.posts || []).map((post) => post.title)]
+    .filter((title) => usableTopicTitle(title, page.domain)).map((title) => title.trim()))]);
+  const siteKey = (page, title) => (page.domain || "") + "\n" + title.normalize("NFKC").toLowerCase();
+  for (const [index, page] of pages.entries()) {
+    const slug = articleSlugWords(page.url);
+    if (slug.size < 3) continue;
+    for (const title of candidates[index]) {
+      const words = headlineWords(title);
+      if (words.size > 8 || [...words].some((word) => slug.has(word))) continue;
+      const key = siteKey(page, title);
+      if (repeated.has(key)) continue;
+      const others = paths.get(key) || [];
+      if (others.some((other) => [...slug].filter((word) => !other.has(word)).length >= 2 &&
+        [...other].filter((word) => !slug.has(word)).length >= 2)) repeated.add(key);
+      else {
+        others.push(slug);
+        paths.set(key, others);
+      }
+    }
+  }
+  return pages.map((page, index) => ({
+    ...page, title: candidates[index].find((title) => !repeated.has(siteKey(page, title))) || "",
+    ...(page.description && !usableTopicTitle(page.description, page.domain) ? { description: "" } : {}),
+  }));
+}
+
 function normalizeEntry(source, item, since) {
   const page = canonicalURL(item.page);
   const thread = webURL(item.discussion);
   const title = text(item.title);
+  const description = text(item.description);
   const postedAt = Date.parse(item.postedAt);
-  if (!item.id || !page || !thread || !title || !Number.isFinite(postedAt) || postedAt < since) return null;
+  if (!item.id || !page || !thread || !Number.isFinite(postedAt) || postedAt < since) return null;
   const count = typeof item.comments === "number" || (typeof item.comments === "string" && item.comments.trim()) ? Number(item.comments) : NaN;
   const comments = Number.isFinite(count) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(count))) : null;
   return {
-    page: { ...page, title, description: text(item.description) },
+    page: { ...page, title: usableTopicTitle(title, page.domain) ? title : "",
+      description: usableTopicTitle(description, page.domain) ? description : "" },
     post: {
       id: source + ":" + item.id, source, community: text(item.community, 100),
       title: text(item.postTitle) || title, url: thread.href, postedAt,

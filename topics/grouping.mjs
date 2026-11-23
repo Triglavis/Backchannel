@@ -1,3 +1,5 @@
+import { topicPageEvidence } from "./feeds.mjs";
+
 const STOP_WORDS = new Set((
   "a an as at by in is it of on or so to up via vs about above after again also among and another are back been before being below both but can could did does doing down each " +
   "even ever every first for from get getting had has have having here how into its just last less like made make making " +
@@ -22,9 +24,17 @@ const EVENT_ACTIONS = new Map([
   ["disruption", "outage"], ["downtime", "outage"], ["outage", "outage"], ["unavailable", "outage"],
 ]);
 const GENERAL_EVENT_WORDS = new Set([
-  "alleg", "allegation", "apparent", "case", "confirm", "incident", "investigat", "investigate",
-  "investigation", "report", "reportedly", "warn",
+  "affect", "agency", "alleg", "allegation", "apparent", "case", "claim", "confirm", "incident",
+  "investigation", "key", "possible", "report", "reportedly", "source", "suffer", "suspect", "target", "warn",
 ]);
+const SCOPES = new Map([
+  ["federal", "national"], ["national", "national"], ["nationwide", "national"],
+  ["state", "state"], ["statewide", "state"], ["local", "local"], ["municipal", "local"],
+]);
+const QUALIFIED_CLAIM = /\b(?:alleg(?:e[ds]?|edly)|apparent(?:ly)?|possibly|possible|reportedly|suspected|unconfirmed|claims? (?:to|that|(?:a )?proof)|sources? says?)\b/i;
+const CLAIM_WORDS = new Set(["apparent", "alleg", "allege", "reportedly", "possible", "possibly", "suspect", "unconfirm"]);
+const EMPHATIC_DETAILS = new Set(["confirm", "definitive", "entire", "historic", "huge", "largest", "massive", "prove", "record", "unprecedented"]);
+const INSTRUCTIONAL = /\b(?:how to|(?:tutorial|guide) (?:on|to)|walkthrough)\b|^\p{L}+ing\b.*\b(?:using|with|in)\b/iu;
 
 function titleWords(title) {
   return title.match(/[\p{L}\p{N}]+/gu) || [];
@@ -40,8 +50,10 @@ function facts(page) {
   return { ...page, words, lower, terms: new Set(lower.filter(useful)), numbers: lower.filter((word) => /^\d+$/.test(word)).join(" ") };
 }
 
-function sharedWords(left, right) {
-  return [...left.terms].filter((word) => right.terms.has(word));
+function sharedCount(left, right) {
+  let count = 0;
+  for (const term of left) if (right.has(term)) count++;
+  return count;
 }
 
 function similarity(left, right) {
@@ -80,7 +92,7 @@ function relatedTopics(left, right, shared) {
 }
 
 function relatedHeadlines(left, right) {
-  const shared = sharedWords(left, right).length;
+  const shared = sharedCount(left.terms, right.terms);
   return left.numbers === right.numbers && shared >= 3 &&
     shared / (left.terms.size + right.terms.size - shared) >= 0.72;
 }
@@ -141,7 +153,10 @@ function eventWord(word) {
     else if (stem.endsWith("ized") || stem.endsWith("ised")) stem = stem.slice(0, -1);
     else if (stem.endsWith("ed")) stem = stem.slice(0, -2);
   }
-  return stem === "centre" ? "center" : stem;
+  if (stem === "centre") return "center";
+  if (stem === "criminal") return "crime";
+  if (["investigat", "investigate", "inquiry", "probe"].includes(stem)) return "investigation";
+  return stem;
 }
 
 function eventWords(words) {
@@ -149,12 +164,58 @@ function eventWords(words) {
 }
 
 function eventDetail(term) {
-  return !EVENT_ACTIONS.has(term) && !GENERAL_EVENT_WORDS.has(term);
+  return !EVENT_ACTIONS.has(term) && !GENERAL_EVENT_WORDS.has(term) && !SCOPES.has(term);
+}
+
+function incidentEvidence(words) {
+  const capitals = words.filter((word) => /^\p{Lu}/u.test(word)).length;
+  const titleCase = capitals > words.length * 0.6;
+  const names = new Set();
+  const objects = new Set();
+  const scopes = new Map();
+  const modifiers = new Map();
+  const terms = words.map((word) => eventWord(word.toLowerCase()));
+  for (const [i, word] of words.entries()) {
+    const term = terms[i];
+    if ((term === "in" || term === "at" || term === "near") && objects.has(terms[i - 1])) {
+      const start = terms[i + 1] === "the" ? i + 2 : i + 1;
+      const place = [];
+      for (const part of words.slice(start, start + 3)) {
+        if (!/^\p{Lu}/u.test(part) || !useful(part.toLowerCase())) break;
+        place.push(part.toLowerCase());
+      }
+      if (place.length) scopes.set("location of " + terms[i - 1], place.join(" "));
+      continue;
+    }
+    if (!useful(word.toLowerCase())) continue;
+    if (SCOPES.has(term)) {
+      for (const next of terms.slice(i + 1, i + 4)) {
+        if (!useful(next) || !eventDetail(next)) break;
+        scopes.set(next, SCOPES.get(term));
+      }
+    } else if (eventDetail(term)) {
+      const next = terms[i + 1];
+      const initialSubject = !capitals && i <= 1 && (next === "s" || GENERAL_EVENT_WORDS.has(next) || EVENT_ACTIONS.has(next));
+      if (initialSubject || (/^\p{Lu}/u.test(word) && (!titleCase || i === 0 || /\p{Lu}.*\p{Lu}/u.test(word)))) names.add(term);
+      else {
+        objects.add(term);
+        const prior = terms[i - 1];
+        if (objects.has(prior)) modifiers.set(term, prior);
+      }
+    }
+  }
+  return { names, objects, scopes, modifiers };
+}
+
+function offeringStage(title) {
+  const stage = /\b(fil|pric|clos|announc)(?:e[ds]?|ing|ement)\s+(?:of\s+|for\s+)?(?:(?:its|the|an?)\s+)?(?:IPO|initial public offering)\b/i.exec(title);
+  return stage ? stage[1].toLowerCase() + "ing" : "";
 }
 
 function eventPage(page) {
-  const title = page.title.replace(/^(?:Ask|Show|Tell|Launch) HN:\s*/i, "").trim() || page.title;
-  const item = facts({ ...page, title });
+  const title = page.title.replace(/^(?:Ask|Show|Tell|Launch) HN:\s*/i, "").replace(/\s+\(gift (?:article|link)\)\s*$/i, "").trim() || page.title;
+  const posts = page.posts || [];
+  const item = facts({ ...page, title, posts });
   const normalized = title.replace(/\bU\.S\./gi, "US").replace(/\bsell[ -]off\b/gi, "selloff");
   const words = titleWords(normalized);
   const terms = eventWords(words);
@@ -171,9 +232,33 @@ function eventPage(page) {
     ([, explicit, dotted]) => explicit || dotted);
   const actions = new Set(terms.map((term) => EVENT_ACTIONS.get(term)).filter(Boolean));
   const details = eventWords(words.filter((word) => /^\p{Ll}/u.test(word))).filter(eventDetail);
-  const context = [page.description, ...page.posts.map((post) => post.title)].filter(Boolean).join(" ");
-  const contextTerms = new Set(eventWords(titleWords(context)).filter((term) => !eventTerms.has(term)));
-  return { ...item, eventTerms, actions, details, contextTerms, marketMove, marketNames, versions, heading: item.lower.join(" ") };
+  const context = [...new Set([page.description, ...posts.map((post) => post.title)].filter((text) => text && text !== title))];
+  const contextWords = context.map(titleWords);
+  const otherWords = contextWords.flat();
+  const contextTerms = new Set(eventWords(otherWords).filter((term) => !eventTerms.has(term)));
+  const headline = incidentEvidence(words);
+  const incident = [headline];
+  if (actions.size && !headline.objects.size && eventTerms.size <= 3) {
+    for (const passage of contextWords) {
+      if (!eventWords(passage).some((term) => actions.has(EVENT_ACTIONS.get(term)))) continue;
+      const excerpt = incidentEvidence(passage);
+      if (!excerpt.names.size || sharedCount(headline.names, excerpt.names)) incident.push(excerpt);
+    }
+  }
+  const headlineTerms = new Set([...eventTerms].map((term) => EVENT_ACTIONS.get(term) || term));
+  const contextEvidence = new Set([...contextTerms].map((term) => EVENT_ACTIONS.get(term) || term));
+  const namedEvidence = new Set([...headline.names, ...eventWords(otherWords.filter((word) => /^\p{Lu}/u.test(word)))]);
+  for (const number of item.lower.filter((word) => /^\d+$/.test(word))) headlineTerms.add(number);
+  for (const number of otherWords.filter((word) => /^\d+$/.test(word))) contextEvidence.add(number);
+  const eventAt = [page.publishedAt, page.firstPostedAt, page.postedAt]
+    .map((value) => typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN).find(Number.isFinite);
+  const years = new Set(Array.from(title.matchAll(/\b(?:in|during)\s+(?:\p{L}+\s+)?((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/giu),
+    ([, described, dated]) => described || dated));
+  return {
+    ...item, eventTerms, actions, details, contextTerms, marketMove, marketNames, versions, heading: item.lower.join(" "),
+    names: headline.names, incident, stage: offeringStage(title), eventAt, years, instructional: INSTRUCTIONAL.test(title),
+    headlineTerms, contextEvidence, namedEvidence, qualified: QUALIFIED_CLAIM.test(title),
+  };
 }
 
 function corroboratedHeadline(left, right, shared) {
@@ -184,19 +269,37 @@ function corroboratedHeadline(left, right, shared) {
   return confirmed >= 2 && (shared + confirmed) / full.eventTerms.size >= 0.5;
 }
 
+function matchingObjects(left, right) {
+  let best = 0;
+  for (const a of left.incident) for (const b of right.incident) {
+    if ([...a.scopes].some(([noun, scope]) => b.scopes.has(noun) && b.scopes.get(noun) !== scope)) continue;
+    const shared = sharedCount(a.objects, b.objects);
+    if (shared === 1 && [...a.modifiers].some(([noun, modifier]) => b.modifiers.has(noun) && b.modifiers.get(noun) !== modifier)) continue;
+    best = Math.max(best, shared);
+  }
+  return best;
+}
+
 function eventScore(left, right) {
-  if (Math.abs(left.postedAt - right.postedAt) > EVENT_WINDOW) return 0;
   if (left.versions.length && right.versions.length && !left.versions.some((version) => right.versions.includes(version))) return 0;
+  if (left.years.size && right.years.size && !sharedCount(left.years, right.years)) return 0;
+  const shared = sharedCount(left.eventTerms, right.eventTerms);
+  if (Math.abs(left.eventAt - right.eventAt) > EVENT_WINDOW &&
+    !(left.instructional && right.instructional && shared >= 4 && shared / Math.max(left.eventTerms.size, right.eventTerms.size) >= 0.7)) return 0;
   if (left.heading === right.heading && left.eventTerms.size >= 2) return 2;
   if (left.domain === right.domain) return 0;
+  if (left.stage && right.stage && left.stage !== right.stage) return 0;
 
-  let shared = 0;
-  for (const term of left.eventTerms) if (right.eventTerms.has(term)) shared++;
+  const matchesAction = sharedCount(left.actions, right.actions);
+  if ((left.actions.size || right.actions.size) && !matchesAction) return 0;
+  if (matchesAction && left.names.size && right.names.size) {
+    if (!sharedCount(left.names, right.names)) return 0;
+    const common = matchingObjects(left, right);
+    if (!common) return 0;
+    if (common >= 2) return 0.95;
+  }
   if (shared < 2) return 0;
-  const matchesAction = [...left.actions].some((action) => right.actions.has(action));
-  if (left.actions.size && right.actions.size && !matchesAction) return 0;
-  const supportsAction = matchesAction || (!left.actions.size && !right.actions.size);
-  if (supportsAction && corroboratedHeadline(left, right, shared)) return 0.8;
+  if (corroboratedHeadline(left, right, shared)) return 0.8;
   if (shared < 3) return 0;
   const overlap = shared / (left.eventTerms.size + right.eventTerms.size - shared);
   const contained = shared / Math.min(left.eventTerms.size, right.eventTerms.size);
@@ -205,7 +308,7 @@ function eventScore(left, right) {
     if (left.eventTerms.has("stock") && right.eventTerms.has("stock") && overlap >= 0.24) return overlap + 0.25;
   }
   if (overlap >= 0.64 || (shared >= 4 && overlap >= 0.36 && contained >= 0.6)) return overlap + 0.5;
-  if (supportsAction && overlap >= 0.24 && (left.details.some((term) => right.eventTerms.has(term)) ||
+  if (overlap >= 0.24 && (left.details.some((term) => right.eventTerms.has(term)) ||
     right.details.some((term) => left.eventTerms.has(term))) && similarity(left, right) >= 0.88) return overlap + 0.25;
   return 0;
 }
@@ -254,17 +357,28 @@ function namedSubjects(items) {
 }
 
 function leadPages(pages) {
-  const frequency = new Map();
-  const context = new Set();
+  if (pages.length === 1) return pages;
+  const evidence = new Map();
+  const namedSources = new Map();
   for (const page of pages) {
-    for (const term of page.eventTerms) frequency.set(term, (frequency.get(term) || 0) + 1);
-    for (const term of page.contextTerms) context.add(term);
+    for (const term of page.namedEvidence) namedSources.set(term, (namedSources.get(term) || 0) + 1);
+    for (const term of page.headlineTerms) evidence.set(term, (evidence.get(term) || 0) + 1);
+    for (const term of page.contextEvidence) {
+      if (!page.headlineTerms.has(term)) evidence.set(term, (evidence.get(term) || 0) + 0.65);
+    }
   }
-  return pages.map((page) => ({
-    page,
-    support: [...page.eventTerms].reduce((sum, term) => sum + frequency.get(term) - 1 + (context.has(term) ? 0.25 : 0), 0) -
-      (/(?:\.{3}|…)$/.test(page.title) ? pages.length : 0),
-  })).sort((left, right) => right.support - left.support || left.page.title.length - right.page.title.length ||
+  return pages.map((page) => {
+    let support = page.qualified ? 1 : 0;
+    for (const term of page.headlineTerms) {
+      if (CLAIM_WORDS.has(term)) continue;
+      const fraction = (evidence.get(term) - 1) / (pages.length - 1);
+      support += fraction - 0.5 * (1 - fraction);
+      if ((page.names.has(term) && namedSources.get(term) > 1) || page.actions.has(term)) support += 0.5 * fraction;
+      if (!fraction && (EMPHATIC_DETAILS.has(term) || /^\d+$/.test(term))) support -= 0.5;
+    }
+    if (/(?:\.{3}|…)$/.test(page.title)) support -= 1;
+    return { page, support };
+  }).sort((left, right) => right.support - left.support ||
     left.page.id.localeCompare(right.page.id)).map(({ page }) => page);
 }
 
@@ -293,7 +407,7 @@ function storyGroup(cluster, subjects) {
 }
 
 export function groupPages(pages) {
-  const items = pages.map(eventPage).sort((left, right) => left.id.localeCompare(right.id));
+  const items = topicPageEvidence(pages).filter(({ title }) => title).map(eventPage).sort((left, right) => left.id.localeCompare(right.id));
   const subjects = namedSubjects(items);
   return storyClusters(items).map((cluster) => storyGroup(cluster, subjects));
 }

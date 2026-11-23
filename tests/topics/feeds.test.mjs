@@ -4,6 +4,29 @@ import test from "node:test";
 import { setTimeout } from "node:timers/promises";
 import { runInNewContext } from "node:vm";
 import { fetchFeeds } from "../../topics/feeds.mjs";
+import { groupPages } from "../../topics/grouping.mjs";
+
+test("repeated site taglines cannot join unrelated articles or overwrite their discussion headlines", () => {
+  const page = (id, path, title, thread = title) => ({
+    id, url: "https://paper.example/" + path, domain: "paper.example", title,
+    postedAt: 1800000000000, posts: [{ id: "lemmy:" + id, title: thread }],
+  });
+  const pages = [
+    page("housing", "council-approves-rent-cap", "Stories that stay with you", "City council adopts rent cap"),
+    page("sports", "azpilicueta-reflects-on-chelsea-defeat", "Stories that stay with you"),
+    page("domain", "world/123", "www.paper.example"),
+    page("login", "world/456", "Access to this page has been denied"),
+    page("essay", "criticism", "Access Denied: An oral history of censorship"),
+    page("syndicated", "local/seawall-reopens", "Harbor seawall reopens"),
+    page("reprint", "regional/seawall-reopens-after-repairs", "Harbor seawall reopens"),
+  ];
+  const groups = groupPages(pages);
+  assert.deepEqual(groups.map(({ label, pageIds }) => [label, [...pageIds].sort()]).sort(), [
+    ["Access Denied: An oral history of censorship", ["essay"]],
+    ["City council adopts rent cap", ["housing"]],
+    ["Harbor seawall reopens", ["reprint", "syndicated"]],
+  ]);
+});
 
 test("the Worker requests the same public interest listings as the userscript", async (t) => {
   const script = await readFile(new URL("../../HNewhere.user.js", import.meta.url), "utf8");
