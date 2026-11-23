@@ -563,6 +563,45 @@ test("most discussed originals survive both caps regardless of input order, whil
   assert.deepEqual(await select(input), await select(input.toReversed()));
 });
 
+test("a reported response can replace a late repeat while the primary source, popular originals and specific details retain their reads", async () => {
+  const subject = { id: "story:crossing", label: "Northport opens River Street footbridge" };
+  const source = (host, title, replies) => ({ url: "https://" + host + "/report", title, replyCount: replies, posts: [] });
+  const core = [
+    source("northport.org", subject.label, 0),
+    source("gazette.org", "Ferry traffic falls after the footbridge opening", 300),
+    source("engineer.org", "Contractors describe the arch reconstruction", 180),
+    source("ledger.org", "Reconstruction accounts show savings on steel procurement", 90),
+    source("bulletin.org", "Northport opens River Street footbridge, council says", 60),
+    source("harbor.org", "Harbormaster issues revised clearance charts for sailboats", 40),
+    source("transit.org", "Bus operator reinstates the night service to Eastern Quay", 30),
+    source("archive.org", "Historic stonework catalogued during bridge repairs", 20),
+  ];
+  const forecast = source("forecast.org", "Wheelchair users may endorse Northport opening River Street footbridge", 17);
+  const unrelated = source("sport.org", "Athletes endorse Northport opening River Street stadium", 16);
+  const response = source("access.org", "Disability advocates endorse Northport opening River Street footbridge", 4);
+  const pool = [...core, forecast, unrelated, response];
+  const keys = (pages) => articleModule.articleFetchKeys(subject, pages);
+  const key = ({ url }) => articleModule.articleSourceKey(url);
+  const expected = [...core.filter((page) => page !== core[4]), response].map(key);
+  assert.deepEqual(keys(pool), expected);
+  assert.deepEqual(keys(pool.toReversed()), expected);
+  assert.deepEqual(keys([...core, forecast, unrelated]), core.map(key));
+  for (const title of ["Athletes endorse a stadium after Northport opens River Street footbridge",
+    "Disability advocates endorse proposed Northport opening of River Street footbridge"]) {
+    assert.deepEqual(keys([...core, { ...response, title }]), core.map(key));
+  }
+  const distinct = core.map((page, i) => i === 4 ? { ...page, title: "Surveyors release the flood-risk map for the new ramps" } : page);
+  assert.deepEqual(keys([...distinct, response]), distinct.map(key));
+
+  const fetched = [];
+  const article = await buildTopicArticle(subject, pool, { now, fetcher: async (url) => {
+    fetched.push(url);
+    return html("<title>Public notice</title>");
+  } });
+  assert.deepEqual(fetched.map(articleModule.articleSourceKey), expected);
+  assert.deepEqual(article.sections, []);
+});
+
 test("a publisher's detailed public article yields a cited lead and additional facts even during a model outage", async () => {
   const lead = "Harbor engineers closed the footbridge after corrosion weakened the eastern deck.";
   const cost = "The city council approved $4.2 million to replace the damaged steel beams.";

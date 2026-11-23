@@ -1,7 +1,8 @@
 import { canonicalURL, publisherArticleKey, usableTopicTitle } from "./feeds.mjs";
+import { compatibleStoryTitles, relatedStoryTitles } from "./grouping.mjs";
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-export const ARTICLE_PIPELINE_VERSION = MODEL + ":report-v5.2";
+export const ARTICLE_PIPELINE_VERSION = MODEL + ":report-v5.3";
 export const MAX_ARTICLE_SOURCES = 12;
 const MAX_FETCHED_SOURCES = 8;
 const MAX_HTML_BYTES = 768 * 1024;
@@ -139,6 +140,40 @@ function compareInterest(a, b) {
   return b.replies - a.replies || b.threads - a.threads || Number(b.formal) - Number(a.formal) || a.key.localeCompare(b.key);
 }
 
+const REPORTED_RESPONSE = /\b(?:criticiz\w*|criticis\w*|question(?:s|ed|ing)?|oppose[sd]?|contest(?:s|ed)?|dispute[sd]?|urge[sd]?|call(?:s|ed)? for|request(?:s|ed)?|warn(?:s|ed)?|defend(?:s|ed)?|endorse[sd]?|reject(?:s|ed)?)\b/i;
+
+function fetchOriginals(topic, ranked, distinct) {
+  const selected = ranked.slice(0, MAX_FETCHED_SOURCES);
+  const alternatives = distinct.slice(MAX_FETCHED_SOURCES, MAX_ARTICLE_SOURCES);
+  if (!alternatives.length) return selected;
+  const headline = (record) => record.source.title.split(/\s+[|｜]\s+/u)[0];
+  const covered = new Set(selected.flatMap((record) => terms(headline(record))));
+  const event = topic.label.split(/\s+(?:after|amid|during|while|following)\s+/i)[0];
+  const wanted = new Set(terms(event));
+  const details = terms((event.match(/\b\p{Ll}{4,}\b/gu) || []).join(" "));
+  const response = alternatives.find((record) => {
+    const title = headline(record), action = REPORTED_RESPONSE.exec(title);
+    if (!action?.index || /(?:ing|isms?)$/i.test(action[0]) ||
+        /\?|\b(?:if|whether|unless|may|might|could|would|will|should|expected|likely|reportedly|rumou?red|proposed|plans? to|set to)\b/i.test(title) ||
+        !compatibleStoryTitles(topic.label, title)) return false;
+    const speaker = title.slice(0, action.index).trim();
+    if (/\b(?:is|are|was|were|been|be|to)$/i.test(speaker) || !terms(speaker).some((word) => !wanted.has(word) && !covered.has(word))) return false;
+    const object = title.slice(action.index + action[0].length).split(/[;!?]|\s+(?:after|amid|during|while|before|following|ahead of)\s+/i)[0];
+    const subject = new Set(terms(object));
+    return [...wanted].filter((word) => subject.has(word)).length >= Math.max(2, Math.ceil(wanted.size * 2 / 3)) &&
+      details.every((word) => subject.has(word));
+  });
+  if (!response) return selected;
+  const leader = [...selected].sort(compareInterest)[0];
+  const repeat = selected.findLastIndex((record, i) => i >= MAX_FETCHED_SOURCES / 2 && !record.named && record !== leader &&
+    selected.slice(0, i).some((other) => relatedStoryTitles(headline(other), headline(record))));
+  if (repeat !== -1) {
+    selected.splice(repeat, 1);
+    selected.push(response);
+  }
+  return selected;
+}
+
 function articleSelection(topic, pages) {
   const records = sourceRecords(pages);
   const names = new Set((topic.label.match(/\b\p{Lu}[\p{L}\p{N}]+/gu) || []).map(folded));
@@ -164,7 +199,7 @@ function articleSelection(topic, pages) {
   const sources = records.length <= MAX_ARTICLE_SOURCES ? records :
     [...ranked, ...records.filter(({ canFetch }) => !canFetch).sort(compareInterest)].slice(0, MAX_ARTICLE_SOURCES);
   sources.forEach(({ source }, i) => { source.id = "s" + (i + 1); });
-  return { sources, selected: ranked.slice(0, MAX_FETCHED_SOURCES) };
+  return { sources, selected: fetchOriginals(topic, ranked, distinct) };
 }
 
 export function articleFetchKeys(topic, pages) {
@@ -635,7 +670,7 @@ function coverage(topic, records, generatedAt, draft, sources) {
     if (!finding.detail && finding.shared >= Math.min(3, wanted.size) && !hasNewAmount(finding) && !finding.background && finding.angle < 2) continue;
     if (details.length >= 3 && !(extensive && finding.direct && finding.angle > 0 &&
       [...finding.citations.keys()].some((id) => !coveredOrigins.has(origins.get(id))) &&
-      /\b(?:criticiz\w*|criticis\w*|question(?:s|ed|ing)?|oppose[sd]?|contest(?:s|ed)?|dispute[sd]?|urge[sd]?|call(?:s|ed)? for|request(?:s|ed)?|warn(?:s|ed)?|defend(?:s|ed)?|endorse[sd]?|reject(?:s|ed)?)\b/i.test(finding.sentence))) continue;
+      REPORTED_RESPONSE.test(finding.sentence))) continue;
     const words = new Set(terms(finding.sentence));
     if (used.some((previous) => {
       const shared = [...words].filter((word) => previous.has(word)).length;
