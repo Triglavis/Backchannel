@@ -17738,20 +17738,26 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 	const RETURN_LAST = new RegExp("(?:^|[^\\p{L}\\d'-])(" + RETURN_NAME + ")$", "u");
 	const RETURN_OWNER = new RegExp("(" + RETURN_NAME + ")(?:'s)?\\s+(?:'[^']{1,32}'\\s+)?(?:board|decision|denies|plans|considers|may|might|could|will|stock|shares|skyrockets?|surges?|soars?|rallies|jumps?|live updates)\\b", "gu");
 
-	function leadershipReturn(title) {
+	function leadershipRole(word) {
+		const role = word.toLowerCase();
+		return ({ executive: "ceo", financial: "cfo", technology: "cto", operating: "coo" })[role.split(" ")[1]] || role;
+	}
+
+	function leadershipMention(title) {
 		if (!RETURN_ACTION.test(title)) return null;
 		const text = title.normalize("NFKC").replace(/[’‘]/g, "'")
-			.replace(/\b(?:a|after|amid|and|as|at|back|before|board|by|chief|decision|for|from|get|has|have|in|is|it|live updates|of|on|says|shares|stock|the|to|with)\b/gi, (word) => word.toLowerCase());
+			.replace(/\b(?:a|after|amid|and|as|at|back|before|board|by|chief|decision|for|from|get|has|have|in|is|it|live updates|of|on|says|shares|stock|the|to|with|without)\b/gi, (word) => word.toLowerCase());
 		const action = /\breinstat(?:e[ds]?|ement|ing)\b/i.exec(text) || RETURN_ACTION.exec(text);
 		const verb = action[0].toLowerCase();
 		const before = text.slice(0, action.index).trimEnd();
 		const after = text.slice(action.index + verb.length).trimStart();
 		const first = (part) => RETURN_FIRST.exec(part)?.[1] || "";
 		const last = (part) => RETURN_LAST.exec(part)?.[1] || "";
-		let person = "", organization = "", tail = after;
+		let person = "", organization = "", tail = after, embeddedRole = "", needsContext = false;
 		const subject = before.replace(/'s$|\s+(?:(?:has|have|had) been|is|was|gets?|got)$/i, "").trimEnd();
-		if (/^reinstat(?:es?|ing)$/.test(verb) || /^(?:bring|brought)/.test(verb) || verb === "reinstated" && first(after)) {
-			const object = after.replace(/^back\s+/i, "");
+		if (/^reinstat(?:es?|ing)$/.test(verb) || /^(?:bring|brought)/.test(verb) || verb === "reinstated" && first(after) ||
+			verb === "reinstatement" && /^of\s/i.test(after)) {
+			const object = after.replace(/^(?:back|of)\s+/i, "");
 			const owner = first(object);
 			const possessive = owner && object.slice(owner.length).startsWith("'s ");
 			person = possessive ? first(object.slice(owner.length + 3)) : owner;
@@ -17766,42 +17772,61 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			const owner = person && /'s\s*$/.exec(subject.slice(0, -person.length));
 			if (owner) organization = last(subject.slice(0, owner.index));
 		}
-		if (!person) return null;
+		const position = person.match(RETURN_ROLE)?.[0];
+		if (position) {
+			const split = person.indexOf(position);
+			organization = person.slice(0, split).trim() || organization;
+			person = person.slice(split + position.length).trim();
+			embeddedRole = position;
+		}
+		if (verb === "reinstated" && /^at\s+/i.test(tail)) {
+			const location = tail.replace(/^at\s+/i, "");
+			organization = first(location);
+			tail = location.slice(organization.length).trimStart();
+		}
 		if (/^return/.test(verb) && /^to\s+/i.test(after)) {
 			const destination = after.replace(/^to\s+/i, "");
 			organization = first(destination);
 			tail = destination.slice(organization.length).trimStart();
-			if (!organization || !before.endsWith("'s") && !/^as\s/i.test(tail) || /^(?:for|to)\s/i.test(tail)) return null;
+			if (!organization || /^(?:for|to)\s/i.test(tail)) return null;
+			needsContext = !before.endsWith("'s") && !/^as\s/i.test(tail);
 		}
 		const roleText = /^as\s+(?:(?:the|its|interim|acting|permanent)\s+)*/i.exec(tail);
 		const office = roleText ? tail.slice(roleText[0].length).split(/\s+(?:after|amid|as|at|for|from|of|on|while|with)\b|[;:|.!?]/i)[0] : "";
-		const roles = [...office.matchAll(RETURN_ROLE)].map(([word]) => {
-			const role = word.toLowerCase();
-			return ({ executive: "ceo", financial: "cfo", technology: "cto", operating: "coo" })[role.split(" ")[1]] || role;
-		});
-		if (roles.length) {
-			const role = office.match(RETURN_ROLE)[0];
+		const roles = [...(embeddedRole + " " + office).matchAll(RETURN_ROLE)].map(([word]) => leadershipRole(word));
+		const role = office.match(RETURN_ROLE)?.[0];
+		if (role) {
 			const employer = office.slice(0, office.indexOf(role)).trim();
 			organization ||= first(employer) || first(tail.replace(/^as\s+.+?\s+(?:of|at|for)\s+/i, ""));
 		}
 		organization ||= [...before.matchAll(RETURN_OWNER)].at(-1)?.[1] || (verb === "reinstatement" && [...after.matchAll(RETURN_OWNER)][0]?.[1]) || "";
-		if (!organization || organization === person || /^return|^back/.test(verb) && !roles.length && !before.endsWith("'s")) return null;
+		if ((!person && !organization) || organization === person) return null;
+		needsContext ||= /^(?:return|back)/.test(verb) && !roles.length && !before.endsWith("'s");
 		const roleClaim = before.split(/[;:!?]/).at(-1);
 		const stated = !/\b(?:may|might|could|should|would|will|whether|if|unless|not|never|den(?:y|ies|ied)|reject(?:s|ed)?|against|urges?|asks?|wants?|hopes?|plans?|consider(?:s|ing)?|rumou?red|potential|possible)\b|n't\b/i.test(roleClaim) &&
 			!/\?\s*$/.test(text) && !/\s+(?:if|unless|pending)\s/i.test(tail.split(/[,;:.!]/)[0]);
 		const direct = [organization, person].some((name) => text.toLowerCase().startsWith(name.toLowerCase() + " ")) &&
 			!/\b(?:after|as|on|live updates|return|shares|stock)\b|[;:]/i.test(subject);
 		const year = /\b(?:in|during)\s+((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/.exec(text);
-		return { person: person.toLowerCase(), organization: organization.toLowerCase(), roles, stated, direct,
+		return { person: person.toLowerCase(), organization: organization.toLowerCase(), roles, stated, direct, needsContext,
 			explicit: verb.startsWith("reinstat"), year: year && Number(year[1] || year[2]) };
 	}
 
-	function sameLeadershipReturn(a, b) {
-		if (!a || !b || !a.stated || !b.stated || a.organization !== b.organization ||
+	function leadershipReturn(title) {
+		const claim = leadershipMention(title);
+		return claim?.person && claim.organization && !claim.needsContext ? claim : null;
+	}
+
+	function compatibleLeadershipMentions(a, b) {
+		if (!a || !b || !a.stated || !b.stated || a.organization && b.organization && a.organization !== b.organization ||
 			a.year && b.year && a.year !== b.year ||
 			a.roles.length && b.roles.length && !a.roles.some((role) => b.roles.includes(role))) return false;
-		return a.person === b.person || !b.person.includes(" ") && a.person.endsWith(" " + b.person) ||
+		return !a.person || !b.person || a.person === b.person || !b.person.includes(" ") && a.person.endsWith(" " + b.person) ||
 			!a.person.includes(" ") && b.person.endsWith(" " + a.person);
+	}
+
+	function sameLeadershipReturn(a, b) {
+		return Boolean(a?.person && b?.person && a.organization && b.organization && compatibleLeadershipMentions(a, b));
 	}
 
 	function readerHeadlineTags(title, tags = new Set()) {
@@ -48091,7 +48116,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	const SHARED_TOPIC_COVERAGE_URL = SHARED_TOPIC_INDEX_URL + "/coverage";
 	const SHARED_TOPIC_REPORT_URL = "https://topics.backchnnl.app/api/topic-reports";
 	const SHARED_TOPIC_FALLBACK_URL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
-	const SHARED_TOPIC_CACHE_REVISION = 11;
+	const SHARED_TOPIC_CACHE_REVISION = 12;
 	const SHARED_TOPIC_CACHE_MS = 3 * 60 * 60 * 1000;
 	const SHARED_TOPIC_MAX_LINKS = 4000;
 	const WIKI_TOPIC_PHOTOS_KEY = "HNewhere:wikipedia_topic_images";

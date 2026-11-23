@@ -42,6 +42,34 @@ test("return to a named leadership role distinguishes the person, organization, 
   assert.deepEqual(groups.find(({ pageIds }) => pageIds.includes("5")).pageIds.toSorted(), ["5", "finance"]);
 });
 
+test("a headline can corroborate an executive's reinstatement using the page's reporting", () => {
+  const report = "Harbor Labs reinstates Mira Vale as CEO";
+  const pages = [
+    page("board", report),
+    page("at", "Critics respond as Mira Vale reinstated at Harbor Labs"),
+    page("noun", "Harbor Labs CEO’s reinstatement criticized as a governance failure", {
+      description: "Analysts discussed the reinstatement of Mira Vale as chief executive of Harbor Labs.",
+    }),
+    page("market", "Stocks rally as Mira Vale returns to Harbor Labs", { description: report }),
+    page("official", "Council members question Mira Vale's reinstatement", { alternateTitles: [report] }),
+    page("returning-role", "Lawmakers criticize Mira Vale reinstatement", { url: "https://news.example.org/mira-vale-harbor-labs-ceo",
+      description: "The committee is scheduled to meet with the once-again Harbor Labs CEO next week." }),
+    page("unidentified", "Lawmakers criticize Tara Vale reinstatement", { url: "https://wire.example.org/mira-vale-harbor-labs-ceo",
+      description: "The committee is scheduled to meet with the once-again Harbor Labs CEO next week." }),
+    page("proposal", "Council members urge Harbor Labs to reinstate Mira Vale", { description: report }),
+    page("denial", "Harbor Labs denies reports of Mira Vale’s reinstatement", { description: report }),
+    page("other", "Council members question Tara Vale’s reinstatement", { description: report }),
+    page("other-office", "Harbor Labs CFO's reinstatement criticized", { description: report }),
+    page("other-company", "Meridian CEO's reinstatement criticized", { description: report }),
+    page("resignation", "Mira Vale resigns from Harbor Labs", { description: report }),
+    page("editorial", "Don't bring Mira back", { description: report }),
+    page("unsupported", "Council members debate Mira Vale’s reinstatement"),
+    page("old", "Council members debate Mira Vale’s reinstatement in 2001", { description: report }),
+  ];
+  const groups = groupPages(pages);
+  assert.deepEqual(groups.find(({ pageIds }) => pageIds.includes("board")).pageIds.toSorted(), ["at", "board", "market", "noun", "official", "returning-role"]);
+});
+
 test("a freight market reaction corroborates the grounding decision while a route approval stays separate", () => {
   const groups = groupPages([
     page("regulator", "FAA grounds Meridian cargo jets after engine failure"),

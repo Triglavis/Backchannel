@@ -1,5 +1,5 @@
 import { canonicalURL, publisherArticleKey, topicPageEvidence, usableTopicTitle } from "./feeds.mjs";
-import { coalesceTopics, compatibleStoryTitles, groupPages, informativeTopicAlias, leadershipReturn, relatedStoryTitles, sameLeadershipReturn } from "./grouping.mjs";
+import { coalesceTopics, compatibleLeadershipMentions, compatibleStoryTitles, groupPages, informativeTopicAlias, leadershipMention, leadershipReturn, pageLeadershipReturn, relatedStoryTitles, sameLeadershipReturn } from "./grouping.mjs";
 import { topicArtworkFitsEdition } from "./artwork.mjs";
 import { applyTopicDecisions } from "./decisions.mjs";
 
@@ -100,9 +100,8 @@ function selectRetainedWindow(groups, selected, limit, now) {
   }
 }
 
-function returnCandidateKey(title) {
-  const claim = leadershipReturn(title);
-  return claim?.stated ? claim.organization + "\n" + claim.person.split(" ").at(-1) : "";
+function returnCandidateKey(claim) {
+  return claim?.stated && claim.person && claim.organization ? claim.organization + "\n" + claim.person.split(" ").at(-1) : "";
 }
 
 export function retainedEvidenceKeys(index, timestamps, now, limit = MAX_RETAINED_EVIDENCE) {
@@ -118,14 +117,16 @@ export function retainedEvidenceKeys(index, timestamps, now, limit = MAX_RETAINE
   const invalid = [];
   const multiple = [];
   const returns = new Map();
+  const partialReturns = [];
   for (const story of stories.values()) {
     if (story.keys.some((key) => !usableRetainedTitle(story.topic.label, key))) invalid.push(story);
     else {
-      const key = returnCandidateKey(story.topic.label);
+      const mention = leadershipMention(story.topic.label);
+      const key = returnCandidateKey(mention);
       if (key && story.keys.length) {
         if (!returns.has(key)) returns.set(key, { keys: [] });
         returns.get(key).keys.push(...story.keys);
-      }
+      } else if (story.keys.length && mention?.stated && mention.explicit) partialReturns.push(story);
       if (story.keys.length > 1) multiple.push(story);
     }
   }
@@ -133,6 +134,7 @@ export function retainedEvidenceKeys(index, timestamps, now, limit = MAX_RETAINE
   const selected = new Set();
   selectRetainedWindow(invalid, selected, limit, now);
   selectRetainedWindow([...returns.values()].sort((a, b) => b.keys.length - a.keys.length), selected, limit, now);
+  selectRetainedWindow(partialReturns, selected, limit, now);
   selectRetainedWindow(multiple, selected, limit, now);
   return [...selected];
 }
@@ -140,11 +142,16 @@ export function retainedEvidenceKeys(index, timestamps, now, limit = MAX_RETAINE
 function comparisonPages(sourcePages, snapshot) {
   const sources = new Map(sourcePages.map((page) => [page.id, page]));
   const current = new Map(snapshot.pages.map((page) => [page.id, page]));
-  const sourceEvents = new Map(sourcePages.map((page) => [page.id, returnCandidateKey(page.title)]));
+  const sourceEvents = new Map(sourcePages.map((page) => [page.id, returnCandidateKey(pageLeadershipReturn(page))]));
   const events = new Set([...sourceEvents.values()].filter(Boolean));
   const groups = snapshot.topics.filter(({ kind, pageIds }) => kind !== "topic" && pageIds?.length);
-  const matching = groups.filter(({ label }) => events.has(returnCandidateKey(label)));
-  const active = new Set(matching.map(({ label }) => returnCandidateKey(label)));
+  const matching = new Map();
+  for (const group of groups) {
+    const single = group.pageIds.length === 1 && current.get(group.pageIds[0]);
+    const key = returnCandidateKey(leadershipReturn(group.label) || single && pageLeadershipReturn(single));
+    if (events.has(key)) matching.set(group, key);
+  }
+  const active = new Set(matching.values());
   const pages = new Map(sourcePages.filter(({ id }) => active.has(sourceEvents.get(id))).map((page) => [page.id, page]));
   const add = ({ pageIds }) => {
     const extra = pageIds.filter((id) => !pages.has(id));
@@ -158,7 +165,7 @@ function comparisonPages(sourcePages, snapshot) {
       }
     }
   };
-  for (const group of matching) add(group);
+  for (const group of matching.keys()) add(group);
   for (const page of sourcePages) {
     if (pages.size >= MAX_RETAINED_EVIDENCE) break;
     if (!pages.has(page.id)) pages.set(page.id, page);
@@ -206,32 +213,52 @@ function reconcilePublishedStories({ definitions, assignments, sourcePages, deta
     return page && !page.reviewed && page.topicIds.every((id) => !definitions.get(id)?.curated);
   }) : [];
   const keys = new Map(eligible.map(({ id, key }) => [id, key]));
+  const observed = new Set(keys.values());
   const groups = groupPages(eligible).filter(({ pageIds }) => pageIds.some((id) => archived.has(id)))
     .map((group) => ({ ...group, keys: group.pageIds.map((id) => keys.get(id)) }));
   groups.push(...articleCopyGroups(definitions, assignments, members));
   for (const group of groups) {
     const grouped = new Set(group.keys);
-    const prior = new Set();
+    const owners = new Set();
     for (const key of grouped) for (const id of assignments.get(key).topicIds) {
       const topic = definitions.get(id);
-      if (topic && topic.kind !== "topic") prior.add(id);
+      if (topic && topic.kind !== "topic") owners.add(id);
     }
-    if (!prior.size && ![...grouped].some((key) => detached.has(key))) continue;
-    // Reclassify a sound published story only when all of its links support the same development.
-    if ([...prior].some((id) => [...members.get(id)].some((key) => !grouped.has(key)))) continue;
+    if (!owners.size && ![...grouped].some((key) => detached.has(key))) continue;
     const claim = leadershipReturn(group.label);
+    const partial = [...owners].filter((id) => [...members.get(id)].some((key) => !grouped.has(key)));
+    if (partial.length) {
+      if (!claim?.stated || grouped.size < 2) continue;
+      for (const id of partial) {
+        const old = members.get(id);
+        if ([...old].some((key) => !observed.has(key))) for (const key of old) grouped.delete(key);
+      }
+      if (grouped.size < 2) continue;
+    }
+    const prior = new Set([...owners].filter((id) => [...members.get(id)].every((key) => grouped.has(key))));
+    const confirmedLabels = [];
     if (claim?.stated && grouped.size > 1) for (const [id, previous] of history) {
-      if (!sameLeadershipReturn(claim, previous.leadership) || [...previous.keys].some((key) => !grouped.has(key)) ||
+      if (previous.leadership === false || [...previous.keys].some((key) => !grouped.has(key)) ||
         [...(members.get(id) || [])].some((key) => !grouped.has(key))) continue;
+      if (!sameLeadershipReturn(claim, previous.leadership)) {
+        if (!compatibleLeadershipMentions(claim, leadershipMention(previous.topic.label)) || [...previous.keys].some((key) => !observed.has(key))) continue;
+        confirmedLabels.push(previous.topic.label);
+      }
       prior.add(id);
     }
-    const existing = [...prior].sort((a, b) => (history.get(b)?.keys.size || 0) - (history.get(a)?.keys.size || 0) ||
+    const displaced = (id) => {
+      const previous = history.get(id);
+      const anchor = keys.get(id.slice(id.indexOf(":") + 1));
+      return previous?.keys.size >= 2 && sameLeadershipReturn(claim, previous.leadership) && grouped.has(anchor) && !previous.keys.has(anchor);
+    };
+    const existing = [...prior].sort((a, b) => Number(displaced(b)) - Number(displaced(a)) ||
+      (history.get(b)?.keys.size || 0) - (history.get(a)?.keys.size || 0) ||
       (members.get(b)?.size || 0) - (members.get(a)?.size || 0) || a.localeCompare(b));
     const definition = (id) => definitions.get(id) || history.get(id)?.topic;
     const id = existing.find((id) => definition(id).kind === "story" || group.kind === "coverage") || group.id;
     if (!prior.has(id) && members.has(id)) continue;
     const former = prior.has(id) ? definition(id) : undefined;
-    const topic = { ...former, id, kind: former?.kind || group.kind, label: group.label, aliases: group.aliases };
+    const topic = { ...former, id, kind: former?.kind || group.kind, label: group.label, aliases: [...(group.aliases || []), ...confirmedLabels] };
     redirects.delete(id);
     for (const old of prior) {
       appendAliases(topic, definition(old));
@@ -245,7 +272,8 @@ function reconcilePublishedStories({ definitions, assignments, sourcePages, deta
     members.set(id, grouped);
     for (const key of grouped) {
       const page = assignments.get(key);
-      page.topicIds = [...page.topicIds.filter((old) => !prior.has(old)), id];
+      for (const old of page.topicIds) if (owners.has(old) && !prior.has(old)) members.get(old).delete(key);
+      page.topicIds = [...page.topicIds.filter((old) => !owners.has(old)), id];
     }
   }
 }

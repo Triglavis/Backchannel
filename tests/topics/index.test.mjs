@@ -67,6 +67,73 @@ test("a refresh reunites split event coverage, preserves old addresses and accep
   }
 });
 
+test("a mixed historical topic cannot veto a confirmed event or redirect its opposing editorial", () => {
+  const titles = [...reinstatement,
+    "Don't bring Jensen back",
+    "WTF? Nvidia Brings Back Jensen Huang After Trump Told Them To",
+    "Nvidia board unanimously reinstates Jensen Huang as CEO",
+  ];
+  const pages = titles.map((title, i) => ({
+    id: String(i), key: "public" + i + ".example.org/report", domain: "public" + i + ".example.org",
+    url: "https://public" + i + ".example.org/report", title, firstPostedAt: START, posts: [{ id: "hn:" + i, postedAt: START, title }],
+  }));
+  const published = [
+    { id: "story:0", label: titles[0], kind: "story" },
+    { id: "story:1", label: titles[1], kind: "story" },
+    { id: "story:8", label: titles[8], kind: "story" },
+    { id: "story:10", label: titles[10], kind: "story" },
+  ];
+  const publish = (members, live, editorial = "available") => {
+    const stored = buildTopicsIndex({ generatedAt: new Date(START).toISOString(), topics: published,
+      pages: members.flatMap((ids, i) => ids.map((id) => ({ ...pages[id], topicIds: [published[i].id] }))) });
+    if (editorial === "reviewed") {
+      const previous = JSON.parse(stored.body);
+      previous.pages.find(({ key }) => key === pages[8].key).reviewed = true;
+      stored.body = JSON.stringify(previous);
+    }
+    const topics = groupPages(live);
+    return JSON.parse(buildTopicsIndex({ generatedAt: new Date(START + DAY).toISOString(), topics,
+      pages: live.map((page) => ({ ...page, topicIds: [topics.find((topic) => topic.pageIds.includes(page.id)).id] })) },
+      { ...stored, sourcePages: pages.filter((page) => editorial !== "absent" || page.id !== "8") }).body);
+  };
+  const original = [[0, 3, 4, 5], [1, 2, 6, 7], [8, 9], []];
+  const fragmented = [[3, 4], [1], [8, 9], [0, 2, 5, 6, 7, 10]];
+  for (const [members, selection] of [[original, [0, 1, 2, 10]], [fragmented, [0, 2, 5, 6, 7, 10]]]) {
+    for (const editorial of ["available", "absent", "reviewed"]) {
+      const result = publish(members, selection.map((i) => pages[i]), editorial);
+      const canonical = resolvePublishedTopic(result, "story:0");
+      assert.equal(canonical.id, "story:0");
+      assert.equal(resolvePublishedTopic(result, "story:1").id, canonical.id);
+      if (members === fragmented) assert.equal(resolvePublishedTopic(result, "story:10").id, canonical.id);
+      const ids = result.pages.filter((p) => p.topicIds.includes(canonical.id)).map((p) => pages.find((record) => record.key === p.key).id);
+      const expected = ["0", "1", "2", "3", "4", "5", "6", "7", "10"];
+      if (editorial === "available") expected.push("9");
+      assert.deepEqual(ids.sort(), expected.sort());
+      assert.deepEqual(result.pages.find((p) => p.key === pages[8].key).topicIds, ["story:8"]);
+      assert.equal(resolvePublishedTopic(result, "story:8").label, titles[8]);
+      assert(!canonical.aliases?.includes(titles[8]));
+    }
+  }
+});
+
+test("archival publisher evidence can restore a singleton address while an unsupported name stays separate", () => {
+  const report = "Harbor Labs reinstates Mira Vale as CEO";
+  const pages = [
+    [report, ""], ["Mira Vale reinstated at Harbor Labs", ""],
+    ["Officials criticize Mira Vale's reinstatement", report], ["Mayor comments on Mira Vale's reinstatement", ""],
+  ].map(([title, description], i) => ({ id: String(i), title, description, key: "press" + i + ".example.org/news",
+    url: "https://press" + i + ".example.org/news", domain: "press" + i + ".example.org", firstPostedAt: START, posts: [] }));
+  const topics = [0, 2, 3].map((i) => ({ id: "story:" + i, label: pages[i].title, kind: "story" }));
+  const previous = buildTopicsIndex({ generatedAt: new Date(START).toISOString(), topics,
+    pages: pages.map((p, i) => ({ ...p, topicIds: ["story:" + (i <= 1 ? 0 : i)] })) });
+  const selected = new Set(retainedEvidenceKeys(JSON.parse(previous.body), JSON.parse(previous.page_timestamps), START + DAY));
+  const actual = JSON.parse(buildTopicsIndex({ generatedAt: new Date(START + DAY).toISOString(), topics: [], pages: [] },
+    { ...previous, sourcePages: pages.filter((p) => selected.has(p.key)) }).body);
+  assert.equal(resolvePublishedTopic(actual, "story:2").id, "story:0");
+  assert.deepEqual(actual.pages.filter((p) => p.topicIds.includes("story:0")).map((p) => p.key).sort(), pages.slice(0, 3).map((p) => p.key));
+  assert.equal(resolvePublishedTopic(actual, "story:3").id, "story:3");
+});
+
 async function service(t, options = {}) {
   const runtime = new Miniflare(convertV4MiniflareOptions({
     modules: true,

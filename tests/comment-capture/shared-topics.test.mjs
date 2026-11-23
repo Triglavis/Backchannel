@@ -2099,7 +2099,7 @@ test("offline Collection regroups stale automatic assignments while preserving r
 		await expectTopicMembers(list, editorial, links.slice(3).map(([title]) => title));
 		assert(app.requests.some(({ url }) => url === catalogURL), "The old cache revision prompts an index refresh");
 	}, { stored: {
-		[catalogKey]: { revision: 9, fetchedAt: Date.now(), data: { ...catalog, topics: [story, coverage, curated], pages } },
+		[catalogKey]: { revision: 11, fetchedAt: Date.now(), data: { ...catalog, topics: [story, coverage, curated], pages } },
 	} });
 });
 
@@ -3087,6 +3087,18 @@ test("Reader reunites local perspectives and split published IDs for one reinsta
 		await withEventFeed([...reports, ...controls], (list, page) =>
 			expectFeedEvent(list, page, reports, index ? '[data-shared-topic="story:published-0"]' : '[data-shared-topic^="reader-story:"]'), index);
 	}
+});
+
+test("Reader matches reinstatement at the named employer and separates speculation and other employers", async () => {
+	const reports = [
+		["Harbor Labs reinstates Mira Vale as CEO", "https://board.example.org/decision"],
+		["Critics respond as Mira Vale reinstated at Harbor Labs", "https://press.example.org/reaction"],
+	];
+	const controls = [
+		["Mira Vale reinstated at Meridian Labs", "https://other.example.org/company"],
+		["Could Mira Vale be reinstated at Harbor Labs?", "https://outlook.example.org/preview"],
+	];
+	await withEventFeed([...controls, ...reports], (list, page) => expectFeedEvent(list, page, reports));
 });
 
 test("new reports join the published summit outcome while a reviewed link stays separate", async () => {
