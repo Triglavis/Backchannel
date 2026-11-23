@@ -54,7 +54,7 @@ function openReader({ catalogPages = [], responses = [{ match: (url) => url === 
 }
 
 for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
-	test(`a topic shows its cited brief, milestones, open discussion list and originals together at ${width}px in ${scheme}`, async () => {
+	test(`a topic shows its brief, milestones, comments and original sources together at ${width}px in ${scheme}`, async () => {
 		let requests = 0;
 		const additionalThreads = [null, 0, 3, 3, 1].map((comments, index) => ({
 			url: "https://news.ycombinator.com/item?id=" + (9450 + index),
@@ -65,7 +65,10 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 			{ ...issue.sources[0], discussions: [...issue.sources[0].discussions, ...additionalThreads] },
 			{ ...issue.sources[1], discussions: [busiest] },
 		], sections: [{ ...issue.sections[0], heading: "agreement terms for the EU and NASA" }] };
-		const app = await openReader({ viewport: { width, height: 740 }, colorScheme: scheme, responses: [
+		const app = await openReader({ viewport: { width, height: 740 }, colorScheme: scheme,
+			extraStories: [{ id: 9460, url: issue.sources[1].url, title: busiest.title, comments: 11 },
+				{ id: 9410, url: issue.sources[0].url, title: issue.sources[0].discussions[0].title, comments: 3 }],
+			responses: [
 			{ match: (url) => url === articleURL && requests++ === 0, status: 202, headers: "Retry-After: 1" },
 			{ match: (url) => url === articleURL, json: edition },
 		] });
@@ -104,19 +107,20 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 			assert.match(await originals.innerText(), /Published Nov 18, 2026.*Shared Nov 19, 2026/);
 			assert.match(await originals.innerText(), /Shared Nov 20, 2026/);
 			const discussion = article.getByRole("complementary", { name: "Discussions", exact: true });
-			const thread = discussion.getByRole("link", { name: /What changes for operators/ });
-			await thread.waitFor();
+			await discussion.getByRole("list", { name: "Comments across discussions" }).getByText(/Comment 1 on Control room handover/).waitFor();
+			assert.equal(await discussion.getByRole("link", { name: busiest.title, exact: true }).count(), 0);
+			assert.equal(await discussion.getByRole("link", { name: /What changes for operators/ }).count(), 0);
+			const source = originals.locator(":scope > li").first();
+			const sourceThreads = source.locator("details");
+			assert.equal(await sourceThreads.getAttribute("open"), null);
+			await sourceThreads.locator("summary").click();
+			const thread = sourceThreads.getByRole("link", { name: "What changes for operators?", exact: true });
 			assert.equal(await thread.getAttribute("href"), issue.sources[0].discussions[0].url);
-			const external = thread.locator("xpath=ancestor::li[1]").locator(".app-topic-thread-original");
+			const external = thread.locator("xpath=..").getByRole("link", { name: /Open original discussion/ });
 			assert.equal(await external.getAttribute("href"), issue.sources[0].discussions[0].url);
 			assert.equal(await external.getAttribute("target"), "_blank");
-			assert.match(await discussion.innerText(), /3 comments/);
-			const rows = await discussion.locator("li > [data-topic-thread]").evaluateAll((links) =>
-				links.map((anchor) => [anchor.href, Number(anchor.nextElementSibling.textContent.match(/(\d+) comments?/)?.[1] ?? -1)]));
-			assert.equal(rows[0][0], busiest.url);
-			assert.deepEqual(rows.map((row) => row[1]), rows.map((row) => row[1]).sort((a, b) => b - a));
-			assert.deepEqual(rows.filter(([url]) => additionalThreads.some((thread) => thread.url === url)).map(([url]) => url),
-				[2, 3, 4, 1, 0].map((index) => additionalThreads[index].url), "every thread appears and ties preserve source order");
+			assert.equal(await sourceThreads.locator("[data-topic-thread]").count(), 6);
+			await sourceThreads.locator("summary").click();
 			assert(await article.evaluate((el, wide) => {
 				const narrative = el.querySelector(".app-topic-narrative").getBoundingClientRect();
 				const discussion = el.querySelector(".app-topic-discussions").getBoundingClientRect();
@@ -162,7 +166,8 @@ test("thin coverage keeps titles in Sources and quotes only complete publisher d
 		assert.equal(await narrative.locator("p").count(), 1);
 		assert.equal(await narrative.locator(".bc-reader-byline, .app-topic-timeline").count(), 0);
 		assert.equal(await article.getByRole("list", { name: "Sources" }).getByRole("link").count(), 2);
-		await article.getByRole("complementary", { name: "Discussions" }).locator("[data-topic-thread]").first().waitFor();
+		await article.getByRole("complementary", { name: "Discussions" }).waitFor();
+		assert.equal(await article.getByRole("complementary", { name: "Discussions" }).getByRole("link", { name: "What changes for operators?" }).count(), 0);
 		for (const publisher of issue.sources.map((s) => s.publisher)) {
 			await article.getByRole("list", { name: "Sources" }).getByRole("button", { name: new RegExp(publisher) }).click();
 			assert.equal(await page.getByRole("dialog").locator(".app-topic-source-excerpt").count(), 0);
@@ -206,6 +211,8 @@ test("two claims citing the same article open their respective supporting passag
 		const dialog = page.getByRole("dialog", { name: issue.sources[0].title });
 		const original = dialog.getByRole("link", { name: /Open original/ });
 		const citation = (text) => article.locator("p").filter({ hasText: text }).getByRole("button", { name: "Source 1, Signal Journal" });
+		const sourceThreads = article.getByRole("list", { name: "Sources" }).locator("details").first();
+		await sourceThreads.locator("summary").click();
 		await citation(first.text).click();
 		await dialog.getByText(first.citations[0].excerpt, { exact: true }).waitFor();
 		assert.equal(await original.getAttribute("href"), issue.sources[0].url);
@@ -216,11 +223,18 @@ test("two claims citing the same article open their respective supporting passag
 		await dialog.getByText(second.citations[0].excerpt, { exact: true }).waitFor();
 		await original.focus();
 		await article.locator(".bc-reader-byline").filter({ hasText: "3 sources" }).waitFor({ state: "attached" });
+		assert.equal(await sourceThreads.getAttribute("open"), "");
 		await dialog.getByText(second.citations[0].excerpt, { exact: true }).waitFor();
 		assert.equal(await dialog.locator("signal").count(), 0);
 		assert(await original.evaluate((el) => el === el.getRootNode().activeElement));
+		const dismissal = await dialog.evaluateHandle((node) => {
+			const root = node.getRootNode();
+			return { passage: new Promise((resolve) => node.addEventListener("close",
+				() => resolve(root.activeElement?.dataset.topicPassage ?? null), { once: true, capture: true })) };
+		});
 		await original.press("Escape");
 		await dialog.waitFor({ state: "hidden" });
+		assert.equal(await dismissal.evaluate((result) => result.passage), second.citations[0].excerpt);
 		assert(await secondButton.evaluate((el) => el === el.getRootNode().activeElement));
 		await citation(event.text).click();
 		await dialog.getByText(event.citations[0].excerpt, { exact: true }).waitFor();
@@ -254,7 +268,7 @@ test("background synthesis keeps keyboard focus on the same source and action", 
 			await source.focus();
 			assert.equal(await article.locator(".app-topic-brief-section").count(), 0, "pending headline-only coverage has no headline narration");
 			assert.equal(await article.getByRole("list", { name: "Timeline" }).count(), 0);
-			assert.equal(await article.getByRole("status").count(), 1);
+			await article.locator(".app-topic-narrative").getByRole("status").filter({ hasText: "Loading the brief…" }).waitFor();
 			const dialog = page.getByRole("dialog", { name: issue.sources[0].title });
 			const original = dialog.getByRole("link", { name: /Open original/ });
 			if (inspecting) {
@@ -292,6 +306,7 @@ test("malformed citations and unsupported origins cannot replace local coverage 
 		parse: typeof parseAppTopicArticle === "function" && parseAppTopicArticle,
 		request: typeof requestAppTopicArticle === "function" && requestAppTopicArticle,
 		local: typeof appTopicSourceArticle === "function" && appTopicSourceArticle,
+		fromRows: appTopicReadingSources,
 	});
 ${seam}`);
 	const coldId = "story:signal-commissioning";
@@ -306,7 +321,7 @@ ${seam}`);
 		await page.locator("#app-list-body").waitFor();
 		assert(await page.evaluate(() => typeof window.__topicContent?.().parse === "function"), "the article parser is available");
 		const results = await page.evaluate((fixture) => {
-			const { parse, local } = window.__topicContent();
+			const { parse, local, fromRows } = window.__topicContent();
 			const altered = (edit) => {
 				const copy = structuredClone(fixture);
 				edit(copy);
@@ -333,12 +348,19 @@ ${seam}`);
 					altered((item) => item.sections[0].paragraphs[0].citations = Array(2).fill({ sourceId: "s1", excerpt: "Duplicated." })),
 				],
 				discussions: withUnsafeThread.sources[0].discussions,
+				savedThreads: fromRows([{ story: { title: "River report", url: "https://city.example/report" }, discussions: [
+					{ source: "hn", id: 115 }, { source: "lemmy", id: 120 }, { source: "lobsters", id: "ow65gf" },
+					{ source: "reddit", id: "r4567" }, { source: "bsky", id: "at://did:plc:abcd/app.bsky.feed.post/3a56" },
+					{ source: "hn", id: "bad-id" }, { source: "bsky", id: "at://did:plc:abcd/app.bsky.feed.like/3a56" },
+				] }], {})[0].discussions.map(({ url }) => url),
 				fallback: sourceOnly, headlineOnly: local("Empty material", "local", fixture.sources.map((s) => ({ ...s, excerpt: "" }))),
 				localCount: local("Railway history", "local", localSources).sources.length,
 			};
 		}, issue);
 		assert.deepEqual(results.rejected, Array(10).fill(null));
 		assert.deepEqual(results.discussions, []);
+		assert.deepEqual(results.savedThreads, ["https://news.ycombinator.com/item?id=115", "https://lemmy.world/post/120",
+			"https://lobste.rs/s/ow65gf", "https://www.reddit.com/comments/r4567/", "https://bsky.app/profile/did:plc:abcd/post/3a56"]);
 		assert.equal(results.fallback.method, "coverage");
 		const paragraphs = results.fallback.sections.flatMap(({ paragraphs }) => paragraphs);
 		assert(!paragraphs.some(({ text }) => text.includes(issue.sources[0].title)));

@@ -62,9 +62,9 @@ In Reader, **By link** lists individual links. **By topic** groups links about
 the same development under a headline drawn from their coverage. Each topic
 shows how many comments, discussions, and links it includes. Open a topic to
 read its brief, followed by a timeline when the reporting dates a development.
-Discussions appear beside the story on wide screens and inline on phones.
-Reader can preview a comment from an active public thread. Select a discussion
-to read replies in place or follow its original link.
+Comments from the topic’s discussions appear beside the story on wide screens
+and inline on phones. Each comment links back to its source. Select **Read thread**
+to see the conversation in place.
 Source links are collected at the end. Select a number beside a passage to
 inspect the supporting text or open the publisher’s page in a new tab.
 Opening a topic marks the topic as read. Each link keeps its own read status.

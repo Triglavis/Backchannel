@@ -39144,7 +39144,7 @@ ${SETTINGS_MODAL_CSS}
 	font:normal .77em/1.45 var(--topic-sans);
 }
 .app-topic-article .bc-reader-byline { margin:.55em 0 0; }
-.app-topic-article :is(button, a):focus-visible { outline:2px solid var(--reader-link); outline-offset:2px; }
+.app-topic-article :is(button, a, summary):focus-visible { outline:2px solid var(--reader-link); outline-offset:2px; }
 .app-topic-request-status { margin:.6em 0 0; }
 .app-topic-request-status button { border:0; background:none; padding:.25em 0; font:inherit; color:var(--reader-link); text-decoration:underline; cursor:pointer; }
 .app-topic-brief-section + .app-topic-brief-section { margin-top:1.5em; }
@@ -39174,7 +39174,7 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-cite:hover { background:var(--reader-link); color:var(--reader-page); }
 .app-topic-timeline { margin-top:1.6em; padding-top:1em; border-top:1px solid var(--reader-rule); }
 .app-topic-article .app-topic-timeline h2 { margin-bottom:.8em; }
-.app-topic-chronology, .app-topic-sources ol, .app-topic-discussion-list { margin:0; padding:0; list-style:none; }
+.app-topic-chronology, .app-topic-sources ol, .app-topic-source-threads ul { margin:0; padding:0; list-style:none; }
 .app-topic-chronology li { display:grid; grid-template-columns:3.05em minmax(0,1fr); column-gap:.9em; }
 .app-topic-chronology time { padding-top:.15em; color:var(--topic-secondary); font:600 .75em/1.25 var(--topic-sans); font-variant-numeric:tabular-nums; }
 .app-topic-chronology time b { display:block; color:var(--reader-ink); font-size:1.85em; }
@@ -39195,26 +39195,37 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-event .app-topic-credit { margin-bottom:.35em; color:var(--reader-link); font-weight:600; }
 .app-topic-sources { margin-top:2em; padding-top:.64em; border-top:2px solid var(--reader-ink); }
 .app-topic-sources > h2, .app-topic-discussions > h2 { margin:0 0 .35em; color:var(--reader-ink); font:650 .95em/1.45 var(--topic-sans); }
-.app-topic-sources li { display:grid; grid-template-columns:1.7em minmax(0,1fr); gap:.5em; padding:.64em 0; border-bottom:1px solid var(--reader-rule); }
+.app-topic-sources > ol > li { display:grid; grid-template-columns:1.7em minmax(0,1fr); gap:.5em; padding:.64em 0; border-bottom:1px solid var(--reader-rule); }
 .app-topic-sources .app-topic-cite { top:0; align-self:start; min-width:24px; min-height:24px; margin:0; }
 .app-topic-source-title { color:var(--reader-ink); text-decoration:none; }
-.app-topic-source-title:hover, .app-topic-discussions a:hover { color:var(--reader-link); text-decoration:underline; }
+.app-topic-source-title:hover, .app-topic-discussions a:hover, .app-topic-source-threads a:hover { color:var(--reader-link); text-decoration:underline; }
 .app-topic-source-title { display:block; font:580 .85em/1.45 var(--topic-sans); }
+.app-topic-source-threads { color:var(--topic-secondary); font:normal .73em/1.5 var(--topic-sans); }
+.app-topic-source-threads summary { width:fit-content; padding:.25em 0; cursor:pointer; }
+.app-topic-source-threads li { padding:.35em 0 .35em .8em; border-inline-start:1px solid var(--reader-rule); }
+.app-topic-thread-title { display:block; color:var(--reader-ink); font-weight:600; text-decoration:none; }
+.app-topic-thread-original { color:var(--reader-link); text-decoration:none; }
 .app-topic-discussions { margin-top:1.6em; padding-top:.8em; border-top:1px solid var(--reader-rule); }
-.app-topic-discussion-list > li { padding:.6em 0; border-bottom:1px solid var(--reader-rule); }
-.app-topic-discussion-list > li:last-child { border-bottom:0; }
 .app-topic-discussions a { color:var(--reader-ink); text-underline-offset:2px; }
-.app-topic-thread-title { display:block; color:var(--reader-ink); font:600 .86em/1.4 var(--topic-sans); text-decoration:none; }
-.app-topic-thread-meta { display:flex; flex-wrap:wrap; gap:.2em .8em; align-items:baseline; margin-top:.22em; color:var(--topic-secondary); font:normal .73em/1.45 var(--topic-sans); }
-.app-topic-discussions .app-topic-thread-original, .app-topic-discussions .app-topic-thread-source { color:var(--reader-link); }
-.app-topic-thread-detail { min-width:0; padding:.45em 0 .8em; border-bottom:1px solid var(--reader-rule); overflow-wrap:anywhere; }
+.app-topic-discussions .app-topic-thread-source, .app-topic-discussions .app-topic-comment-source { color:var(--reader-link); }
+.app-topic-thread-detail { min-width:0; padding:.45em 0 .8em; overflow-wrap:anywhere; }
 .app-topic-thread-detail h3 { margin:0 0 .45em; font:650 .95em/1.4 var(--topic-sans); }
 .app-topic-thread-back, .app-topic-thread-source { font:600 .75em/1.45 var(--topic-sans); }
-.app-topic-thread-back { margin:0 0 .6em; padding:.35em 0; border:0; background:none; color:var(--reader-link); cursor:pointer; }
+.app-topic-thread-back, .app-topic-comment-context { padding:.18em .35em; border:0; border-radius:999px; background:none; color:var(--reader-link); cursor:pointer; }
+.app-topic-thread-back { margin:0 0 .6em; }
+.app-topic-feed-status { margin:.6em 0; color:var(--topic-secondary); font:.82em/1.45 var(--topic-sans); }
+.app-topic-feed-more { padding:.35em .9em; border:1px solid var(--reader-rule); border-radius:999px; background:transparent; color:var(--reader-link); font:600 .75em/1.5 var(--topic-sans); cursor:pointer; }
+.app-topic-feed-more:hover { background:var(--topic-tint); }
 .app-topic-comments { margin:0; padding:0; list-style:none; }
-.app-topic-comments > li { margin:.55em 0; }
+.app-topic-comments > li { padding:.68em 0; }
+.app-topic-feed-comment + .app-topic-feed-comment { border-top:1px solid var(--reader-rule); }
 .app-topic-comments > li[data-depth]:not([data-depth="0"]) { padding-inline-start:.65em; border-inline-start:1px solid var(--reader-rule); }
-.app-topic-comment-author { color:var(--topic-secondary); font:600 .73em/1.45 var(--topic-sans); }
+.app-topic-comment-meta, .app-topic-comment-actions { display:flex; flex-wrap:wrap; align-items:baseline; gap:.2em .6em; color:var(--topic-secondary); font:.73em/1.45 var(--topic-sans); }
+.app-topic-comment-author { color:var(--reader-ink); font-weight:600; }
+.app-topic-comment-actions { margin-top:.3em; }
+.app-topic-comment-source { text-decoration:none; }
+.app-topic-comment-context { font:inherit; }
+.app-topic-comment-context:hover { text-decoration:underline; }
 .app-topic-comment-body { margin:.2em 0 0; color:var(--reader-ink); font:.91em/1.48 var(--reader-face); overflow-wrap:anywhere; }
 .app-topic-comment-body :is(p, blockquote, pre) { margin:.35em 0; }
 .app-topic-comment-body pre { white-space:pre-wrap; }
@@ -49568,7 +49579,15 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const close = appTopicArticleNode("button", "app-topic-dialog-close", "×");
 		close.setAttribute("aria-label", "Close source");
 		close.autofocus = true;
-		close.onclick = () => dialog.close();
+		const dismiss = () => {
+			dialog.close();
+			if (trigger.isConnected) {
+				trigger.focus({ preventScroll: true });
+				trigger.scrollIntoView({ block: "nearest", inline: "nearest" });
+			}
+		};
+		close.onclick = dismiss;
+		dialog.oncancel = (event) => { event.preventDefault(); dismiss(); };
 		top.append(appTopicArticleNode("span", "", "Source " + number + " of " + total), close);
 		const title = appTopicArticleNode("h2", "", source.title);
 		title.id = "app-topic-source-name";
@@ -49585,16 +49604,14 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		open.setAttribute("aria-label", "Open original in a new tab");
 		open.className = "app-topic-open-original";
 		dialog.append(open);
-		dialog.onclose = () => {
-			dialog.remove();
-			if (trigger.isConnected) trigger.focus();
-		};
+		dialog.onclose = () => dialog.remove();
 		dialog.onclick = (event) => {
 			if (event.target !== dialog) return;
 			const rect = dialog.getBoundingClientRect();
-			if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+			if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dismiss();
 		};
 		story.append(dialog);
+		trigger.focus({ preventScroll: true });
 		dialog.showModal();
 		const anchor = trigger.getBoundingClientRect();
 		if (window.innerWidth > 700 && anchor.bottom >= 0 && anchor.top < window.innerHeight) {
@@ -49661,7 +49678,39 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return section;
 	}
 
-	function appTopicArticleSources(references) {
+	function appTopicSourceThreads(source, onOpenDiscussion, expanded) {
+		const details = appTopicArticleNode("details", "app-topic-source-threads");
+		details.dataset.url = source.url;
+		details.open = expanded;
+		const count = pluralize(source.discussions.length, "discussion");
+		const summary = appTopicArticleNode("summary", "", count);
+		summary.setAttribute("aria-label", count + " for " + source.title);
+		const list = appTopicArticleNode("ul");
+		list.setAttribute("role", "list");
+		const threads = [...source.discussions].sort((a, b) => (b.comments ?? -1) - (a.comments ?? -1));
+		for (const thread of threads) {
+			const item = appTopicArticleNode("li");
+			const title = appTopicOriginalLink(thread.url, thread.title);
+			title.className = "app-topic-thread-title";
+			title.dataset.topicThread = thread.url;
+			title.dir = "auto";
+			title.onclick = (event) => {
+				if (!onOpenDiscussion || event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+				if (onOpenDiscussion({ source, thread }, title) !== false) event.preventDefault();
+			};
+			const site = getSource(thread.source)?.label || thread.source || hostLabel(thread.url);
+			const original = appTopicOriginalLink(thread.url, site + " ↗");
+			original.className = "app-topic-thread-original";
+			original.setAttribute("aria-label", "Open original discussion on " + site + " in a new tab");
+			item.append(title, original);
+			if (thread.comments != null) item.append(" · " + pluralize(thread.comments, "comment"));
+			list.append(item);
+		}
+		details.append(summary, list);
+		return details;
+	}
+
+	function appTopicArticleSources(references, onOpenDiscussion, openThreads) {
 		const section = appTopicArticleNode("section", "app-topic-sources");
 		section.append(appTopicArticleNode("h2", "", "Sources"));
 		const list = appTopicArticleNode("ol");
@@ -49676,6 +49725,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			title.className = "app-topic-source-title";
 			title.dir = "auto";
 			text.append(title, appTopicArticleNode("div", "app-topic-credit", credit));
+			if (source.discussions.length) text.append(appTopicSourceThreads(source, onOpenDiscussion, openThreads.has(source.url)));
 			item.append(appTopicCitation(ref), text);
 			list.append(item);
 		}
@@ -49683,49 +49733,12 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return section;
 	}
 
-	function appTopicArticleDiscussions(sources, onOpenDiscussion, previous) {
-		const threads = new Map();
-		for (const source of sources) {
-			for (const thread of source.discussions) {
-				const existing = threads.get(thread.url);
-				if (!existing || (thread.comments ?? -1) > (existing.thread.comments ?? -1)) threads.set(thread.url, { source, thread });
-			}
-		}
-		if (!threads.size) return null;
-		const aside = previous || appTopicArticleNode("aside", "app-topic-discussions");
-		let list = aside.querySelector(".app-topic-discussion-list");
-		if (!list) {
-			const heading = appTopicArticleNode("h2", "", "Discussions");
-			heading.id = "app-topic-discussions-heading";
-			aside.setAttribute("aria-labelledby", heading.id);
-			list = appTopicArticleNode("ul", "app-topic-discussion-list");
-			list.setAttribute("role", "list");
-			aside.append(heading, list);
-		}
-		const rows = [];
-		const ranked = [...threads.values()].sort((a, b) => (b.thread.comments ?? -1) - (a.thread.comments ?? -1));
-		for (const entry of ranked) {
-			const { thread } = entry;
-			const item = appTopicArticleNode("li");
-			const site = getSource(thread.source)?.label || thread.source || hostLabel(thread.url);
-			const meta = appTopicArticleNode("div", "app-topic-thread-meta");
-			const count = thread.comments == null ? "" : pluralize(thread.comments, "comment");
-			const title = appTopicOriginalLink(thread.url, thread.title);
-			title.className = "app-topic-thread-title";
-			title.dataset.topicThread = thread.url;
-			title.dir = "auto";
-			title.onclick = (event) => {
-				if (!onOpenDiscussion || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-				if (onOpenDiscussion(entry, title) !== false) event.preventDefault();
-			};
-			const original = appTopicOriginalLink(thread.url, "Original ↗");
-			original.className = "app-topic-thread-original";
-			original.setAttribute("aria-label", "Open original discussion on " + site + " in a new tab");
-			meta.append(appTopicArticleNode("span", "", [site, count].filter(Boolean).join(" · ")), original);
-			item.append(title, meta);
-			rows.push(item);
-		}
-		list.replaceChildren(...rows);
+	function appTopicArticleDiscussions() {
+		const aside = appTopicArticleNode("aside", "app-topic-discussions");
+		const heading = appTopicArticleNode("h2", "", "Discussions");
+		heading.id = "app-topic-discussions-heading";
+		aside.setAttribute("aria-labelledby", heading.id);
+		aside.append(heading, appTopicArticleNode("div", "app-topic-feed"));
 		return aside;
 	}
 
@@ -49741,6 +49754,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const sameTopic = previous?.dataset.topicId === article.topic.id;
 		const focus = sameTopic && previous.contains(root.activeElement) ? root.activeElement : null;
 		const oldDialog = previous?.querySelector("dialog[open]");
+		const openThreads = new Set(sameTopic ? [...previous.querySelectorAll(".app-topic-source-threads[open]")].map((details) => details.dataset.url) : []);
 		const sourceURL = sameTopic && (oldDialog?.dataset.url || (focus?.matches("[data-topic-citation]") && focus.value));
 		const passage = oldDialog?.querySelector("blockquote")?.textContent || focus?.dataset.topicPassage;
 		const fromList = oldDialog ? oldDialog.hasAttribute("data-source-list") : Boolean(focus?.closest(".app-topic-sources"));
@@ -49787,9 +49801,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 		if (article.timeline.length) narrative.append(appTopicArticleTimeline(article.timeline, references));
 		story.append(narrative);
-		const discussions = appTopicArticleDiscussions(article.sources, onOpenDiscussion, sameTopic && previous.querySelector(".app-topic-discussions"));
-		if (discussions) story.append(discussions);
-		if (references.size) story.append(appTopicArticleSources(references));
+		story.append((sameTopic && previous.querySelector(".app-topic-discussions")) || appTopicArticleDiscussions());
+		if (references.size) story.append(appTopicArticleSources(references, onOpenDiscussion, openThreads));
 		const inspect = (button) => {
 			const ref = references.get(button?.dataset.topicCitation);
 			if (ref) return inspectAppTopicSource(story, ref.source, ref.number, references.size, button);
@@ -49809,6 +49822,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			}
 		} else if (focus?.isConnected) {
 			replacement = focus;
+		} else if (focus?.matches("summary")) {
+			const details = [...story.querySelectorAll(".app-topic-source-threads")].find((node) => node.dataset.url === focus.parentElement?.dataset.url);
+			replacement = details?.querySelector("summary");
 		} else if (focus?.matches("a")) {
 			replacement = [...story.querySelectorAll("a")].find((link) => link.href === focus.href && link.className === focus.className);
 		}
@@ -49971,7 +49987,13 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			}
 			for (const post of [story, ...(row.also || []), ...(row.discussions || [])]) {
 				if (!post.source || !post.id || (post.kind && post.kind !== "discussion")) continue;
-				const address = canonicalSharedTopicURL(post.permalink || (post.source === "hn" && /^\d+$/.test(String(post.id)) ? commentURL(post.id) : ""));
+				let permalink = post.permalink;
+				if (!permalink) {
+					const known = knownDiscussionFromFeed({ ...post, url, permalink: post.source === "reddit" ? "https://www.reddit.com/comments/" + post.id + "/" : "" });
+					permalink = known?.permalink;
+					if (known?.source === "bsky") permalink = commentPermalink({ source: "bsky", id: parseSourceKey(known.rootKeys[0])?.id });
+				}
+				const address = permalink && canonicalSharedTopicURL(permalink);
 				if (!address || topicArticleLinkKey(address.href) === key) continue;
 				const seconds = Number(post.time || post.createdAt);
 				if (seconds > 0 && seconds < 1e11) {
@@ -50067,7 +50089,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const body = appState.ui.shadow.getElementById("app-article-body");
 		const article = visibleAppTopicArticle(reading);
 		const signature = JSON.stringify([article, reading.pending, reading.retry]);
-		if (signature === reading.painted) return;
+		if (signature === reading.painted) {
+			if (reading.discussionPanel) syncAppTopicDiscussions(reading, reading.discussionPanel.scroller, article);
+			return;
+		}
 		reading.painted = signature;
 		const scrollTop = body.querySelector(".app-reader-scroll")?.scrollTop || 0;
 		const scroller = paintAppTopicArticle(body, article, {
@@ -50878,195 +50903,381 @@ ${frontPageChooserHTML()}
 			if (id) return redditDiscussionFromFeed({ id, title: thread.title, url: source.url, descendants: thread.comments,
 				permalink: "https://www.reddit.com" + url.pathname });
 		}
+		if (thread.source === "x" && ["x.com", "twitter.com"].includes(url.hostname)) {
+			id = /^\/[a-z0-9_]{1,15}\/status\/(\d+)\/?$/i.exec(url.pathname)?.[1];
+			if (id) return { source: "x", id, key: sourceKey("x", id), permalink: url.href, articleURL: source.url };
+		}
 		if (thread.source === "bsky" && url.origin === "https://bsky.app") {
 			const post = /^\/profile\/(did:[a-z0-9:.%-]+|[a-z0-9-]+(?:\.[a-z0-9-]+)+)\/post\/([a-z0-9_-]+)\/?$/i.exec(url.pathname);
 			if (!post) return null;
 			const uri = "at://" + post[1] + "/app.bsky.feed.post/" + post[2];
-			return { source: "bsky", key: sourceKey("bsky", uri), id: uri, actor: post[1], rkey: post[2], permalink: url.href, articleURL: source.url,
-				rootKeys: [bskyKeyFromURI(uri)], rootTimes: [], title: thread.title };
+			return { source: "bsky", key: sourceKey("bsky", uri), id: uri, actor: post[1], rkey: post[2],
+				permalink: url.href, articleURL: source.url, title: thread.title };
 		}
 		return id ? knownDiscussionFromFeed({ source: thread.source, id, url: source.url, title: thread.title, descendants: thread.comments }) : null;
 	}
 
-	async function readAppTopicComments(discussion, preview, current, signal) {
-		const limit = preview ? 2 : 12;
-		const live = preview && discussion.source === "hn" ? null : cachedThread(threadCache, discussion.key, Date.now());
-		const cached = live || await sharedThread(discussion);
+	const APP_TOPIC_COMMENT_PAGE = 6;
+	const APP_TOPIC_THREAD_BATCH = 8;
+
+	async function cachedAppTopicReader(discussion, automatic) {
+		const { source } = discussion;
+		const live = !automatic || ["lobsters", "lemmy", "reddit", "x"].includes(source);
+		const snapshot = async (key) => (live && cachedThread(threadCache, key, Date.now()) || await sharedThread({ ...discussion, key }))?.reader;
+		if (source !== "bsky" && source !== "x") return snapshot(discussion.key);
+		const reader = await snapshot(sourceKey(source, normalizeURL(discussion.articleURL)));
+		if (!reader) return null;
+		const keys = source === "x" ? [sourceKey("x", discussion.id)] :
+			reader.rootKeys.filter((key) => key.endsWith("/" + discussion.rkey));
+		for (const key of keys) {
+			const root = await reader.getComment(key);
+			if (!root || source === "bsky" && !(key === sourceKey("bsky", discussion.actor + "/" + discussion.rkey) || root.author === discussion.actor)) continue;
+			return { ...reader, rootKeys: root.replyKeys || [] };
+		}
+		return null;
+	}
+
+	async function readAppTopicComments(panel, discussion, limit, automatic, current) {
+		const source = discussion.source;
+		let reader = await cachedAppTopicReader(discussion, automatic);
 		if (!current()) return null;
-		let reader = cached?.reader;
-		if (!reader?.rootKeys?.length || reader.empty) {
-			const result = await sourceReadJob(discussion.source, "thread", ["topic", discussion.key, limit], async ({ signal }) => {
+		if (!reader || reader.empty) {
+			if (source === "x" || automatic && source === "reddit" && !panel.published.has(discussion.key)) {
+				return { comments: [], restricted: true, localOnly: source === "reddit" };
+			}
+			const result = await sourceReadJob(source, "thread", ["topic", discussion.key, limit, automatic], async ({ signal }) => {
 				if (signal.aborted || !current()) return emptyThreadReader();
-				let request = discussion;
-				if (discussion.source === "hn") {
-					const item = await getItem(discussion.id, { strict: true, anonymous: preview });
-					if (!item || item.deleted || item.dead) return emptyThreadReader();
-					if (!item.kids?.length) return { rootKeys: [], getComment: async () => null };
-					request = { ...discussion, rootKeys: item.kids.slice(0, limit).map((id) => sourceKey("hn", id)) };
-				} else if (discussion.source === "bsky" && !discussion.actor.startsWith("did:")) {
-					const { did } = await checkedSourceJSON(BSKY_APPVIEW + "/com.atproto.identity.resolveHandle?handle=" + encodeURIComponent(discussion.actor),
-						(value) => typeof value?.did === "string" && /^did:[a-z0-9]+:[a-z0-9._:%-]+$/i.test(value.did));
-					request = { ...discussion, rootKeys: [sourceKey("bsky", did + "/" + discussion.rkey)] };
+				if (source === "reddit" && automatic) {
+					const [tier, cooldown] = await Promise.all([redditTier(), load(REDDIT_POLL_KEY, null)]);
+					if (tier === "off" || cooldown?.until > Date.now() || signal.aborted || !current()) return emptyThreadReader();
+					const maximum = limit * 3;
+					const data = await checkedSourceJSON("https://arctic-shift.photon-reddit.com/api/comments/search?limit=" + maximum + "&link_id=" + encodeURIComponent(discussion.id),
+						(value) => Array.isArray(value?.data), undefined, { anonymous: true });
+					const replies = data.data.slice(0, maximum).filter((row) => String(row?.link_id || "").replace(/^t3_/, "") === discussion.id);
+					const index = redditThreadIndexFromFlat(replies, discussion);
+					return { rootKeys: index.rootKeys, more: data.data.length >= maximum, incomplete: !replies.length && discussion.commentCount > 0,
+						getComment: async (key) => index.byKey.get(key) };
 				}
-				if (signal.aborted || !current()) return emptyThreadReader();
-				return getSource(discussion.source).loadThread(request, { anonymous: preview });
+				if (source === "bsky") {
+					let did = discussion.actor;
+					if (!did.startsWith("did:")) {
+						if (!panel.actors.has(did)) panel.actors.set(did, checkedSourceJSON(BSKY_APPVIEW + "/com.atproto.identity.resolveHandle?handle=" + encodeURIComponent(did),
+							(value) => typeof value?.did === "string" && /^did:[a-z0-9]+:[a-z0-9._:%-]+$/i.test(value.did), undefined, { anonymous: true })
+							.catch((error) => { panel.actors.delete(discussion.actor); throw error; }));
+						did = (await panel.actors.get(did)).did;
+					}
+					if (signal.aborted || !current()) return emptyThreadReader();
+					const uri = "at://" + did + "/app.bsky.feed.post/" + discussion.rkey;
+					const data = await checkedSourceJSON(BSKY_APPVIEW + "/app.bsky.feed.getPostThread?uri=" + encodeURIComponent(uri) + "&depth=3&parentHeight=0",
+						(value) => value?.thread?.post?.uri === uri || value?.thread?.notFound || value?.thread?.blocked, undefined, { anonymous: true });
+					const byKey = new Map();
+					indexBskyThread(data.thread, discussion, byKey, null);
+					const root = byKey.get(bskyKeyFromURI(uri));
+					return { rootKeys: root?.replyKeys || [], getComment: async (key) => byKey.get(key) };
+				}
+				if (source === "hn") {
+					const item = await getItem(discussion.id, { strict: true, anonymous: automatic });
+					if (!item) return emptyThreadReader();
+					const ids = !item.dead && !item.deleted && Array.isArray(item.kids) ? item.kids : [];
+					if (!ids.length) return { rootKeys: [], getComment: async () => null };
+					if (signal.aborted || !current()) return emptyThreadReader();
+					const keys = ids.slice(0, limit * 3).map((id) => sourceKey("hn", id));
+					const reader = await getSource("hn").loadThread({ ...discussion, rootKeys: keys.slice(0, limit) }, { anonymous: automatic });
+					return { ...reader, rootKeys: keys, more: ids.length > keys.length };
+				}
+				return getSource(source).loadThread(discussion, { anonymous: automatic });
 			}, { timeout: THREAD_CEILING_MS, operation: {
 				attach(cancel) {
-					signal.addEventListener("abort", cancel, { once: true });
-					return () => signal.removeEventListener("abort", cancel);
+					panel.controller.signal.addEventListener("abort", cancel, { once: true });
+					return () => panel.controller.signal.removeEventListener("abort", cancel);
 				},
 				record() {},
 			} });
 			reader = result.value;
 		}
 		if (!current() || !reader || reader.empty || !Array.isArray(reader.rootKeys)) return null;
-		const pending = reader.rootKeys.slice(0, limit).map((key) => ({ key, depth: 0 }));
+		const pending = reader.rootKeys.slice(0, limit * 3).map((key) => ({ key, depth: 0 }));
 		const seen = new Set(), comments = [];
-		while (pending.length && comments.length < limit && seen.size < limit * 2 && current()) {
+		let missing = false;
+		while (pending.length && comments.length < limit && seen.size < limit * 3 && current()) {
 			const { key, depth } = pending.shift();
 			if (seen.has(key)) continue;
 			seen.add(key);
 			const comment = await reader.getComment(key);
-			if (!comment) continue;
-			if (depth < 2) pending.unshift(...(comment.replyKeys || []).slice(0, limit).map((child) => ({ key: child, depth: depth + 1 })));
-			if (!comment.deleted && comment.bodyHTML) comments.push({ comment, depth });
+			if (!comment) { missing = true; continue; }
+			if (depth < 3) pending.push(...(comment.replyKeys || []).slice(0, limit).map((key) => ({ key, depth: depth + 1 })));
+			if (comment.deleted || comment.local || comment.muted || comment.hidden || typeof comment.bodyHTML !== "string") continue;
+			const plain = textExcerpt(comment.bodyHTML, 80);
+			if (plain && !/^\[(?:removed|deleted)\]$/i.test(plain)) comments.push({ comment, depth });
 		}
-		return !comments.length && (reader.incomplete || reader.rootKeys.length) ? null : comments;
+		if (!comments.length && (missing || reader.incomplete && !reader.rootKeys.length && source !== "x")) return null;
+		return { comments, restricted: !comments.length && seen.size > 0,
+			more: Boolean(pending.length || reader.more || reader.rootMore || reader.rootKeys.length > seen.size) };
 	}
 
-	function paintAppTopicComments(reading) {
+	function appTopicCommentNode(reading, entry, row, inFeed) {
+		const { comment, depth } = row;
+		const item = appTopicArticleNode("li", inFeed ? "app-topic-feed-comment" : "");
+		if (!inFeed && depth) item.dataset.depth = String(depth);
+		const meta = appTopicArticleNode("div", "app-topic-comment-meta");
+		meta.append(appTopicArticleNode("span", "app-topic-comment-author", comment.author || "Anonymous"));
+		const date = new Date(Number(comment.createdAt) * 1000);
+		if (comment.createdAt > 0 && Number.isFinite(date.getTime())) {
+			const time = appTopicArticleNode("time", "app-topic-comment-time", commentAgeLabel(timeAgo(comment.createdAt)));
+			time.dateTime = date.toISOString();
+			time.title = date.toLocaleString();
+			meta.append(time);
+		}
+		const body = appTopicArticleNode("div", "app-topic-comment-body");
+		if (comment.bodyHTML.length > 2600) body.textContent = textExcerpt(comment.bodyHTML, 2600);
+		else body.innerHTML = sanitizeHTML(comment.bodyHTML, { images: false });
+		const site = getSource(entry.thread.source)?.label || entry.thread.source;
+		const original = appTopicOriginalLink(commentPermalink(comment, entry.discussion) || entry.thread.url, site + " ↗");
+		original.className = "app-topic-comment-source";
+		original.setAttribute("aria-label", "Open comment on " + site + " in a new tab");
+		meta.append(original);
+		item.append(meta, body);
+		if (inFeed) {
+			const actions = appTopicArticleNode("div", "app-topic-comment-actions");
+			const context = appTopicArticleNode("button", "app-topic-comment-context", "Read thread");
+			context.type = "button";
+			context.dataset.topicDiscussion = entry.discussion.key;
+			context.setAttribute("aria-label", "Read thread on " + site);
+			context.onclick = () => openAppTopicDiscussion(reading, entry, context);
+			actions.append(context);
+			item.append(actions);
+		}
+		return item;
+	}
+
+	function appTopicFeedRows(panel) {
+		const threads = panel.ranked.map((entry) => ({ entry, rows: panel.results.get(entry.discussion.key)?.data?.comments || [] }));
+		const rows = [], seen = new Set();
+		for (let i = 0; threads.some((thread) => thread.rows.length > i); i++) {
+			for (const { entry, rows: comments } of threads) {
+				const row = comments[i];
+				if (!row || seen.has(row.comment.key)) continue;
+				seen.add(row.comment.key);
+				rows.push({ entry, row });
+			}
+		}
+		return rows;
+	}
+
+	function paintAppTopicFeed(reading, rows) {
 		const panel = reading.discussionPanel;
-		const url = panel.selected || panel.preview;
-		const entry = panel.entries.get(url);
-		const aside = panel.scroller.querySelector(".app-topic-discussions");
-		if (!aside || !entry || !panel.selected && panel.emptyPreview === url) {
-			panel.mount?.remove();
-			panel.mount = null;
-			return;
+		const feed = panel.scroller.querySelector(".app-topic-feed");
+		if (!feed) return;
+		feed.hidden = Boolean(panel.selected);
+		if (!panel.list) {
+			panel.list = appTopicArticleNode("ol", "app-topic-comments");
+			panel.list.setAttribute("role", "list");
+			panel.list.setAttribute("aria-label", "Comments across discussions");
+			panel.status = appTopicArticleNode("p", "app-topic-feed-status");
+			panel.status.setAttribute("role", "status");
+			panel.more = appTopicArticleNode("button", "app-topic-feed-more");
+			panel.more.type = "button";
 		}
-		const preview = !panel.selected;
-		const key = (preview ? "preview:" : "thread:") + url;
-		if (panel.mount?.parentElement === aside && panel.mount.dataset.key === key) return;
-		panel.mount?.remove();
-		const region = appTopicArticleNode("section", "app-topic-thread-detail" + (preview ? " is-preview" : ""));
-		panel.mount = region;
-		region.hidden = preview;
-		region.dataset.key = key;
+		if (panel.list.parentElement !== feed) feed.append(panel.list, panel.status, panel.more);
+		const focus = feed.getRootNode().activeElement;
+		const visible = rows.slice(0, panel.target).map(({ entry, row }) => {
+			const key = entry.thread.url + "\n" + row.comment.key;
+			if (!panel.nodes.has(key)) panel.nodes.set(key, appTopicCommentNode(reading, entry, row, true));
+			return panel.nodes.get(key);
+		});
+		if (visible.length !== panel.list.children.length || visible.some((item, i) => panel.list.children[i] !== item)) {
+			panel.list.replaceChildren(...visible);
+			if (panel.list.contains(focus)) focus.focus({ preventScroll: true });
+		}
+		panel.list.hidden = !visible.length;
+		const waiting = panel.active.size > 0 || reading.pending;
+		const untried = panel.ranked.some(({ discussion }) => !panel.results.has(discussion.key) && !panel.active.has(discussion.key));
+		const expandable = panel.ranked.some(({ discussion }) => {
+			const hit = panel.results.get(discussion.key);
+			return hit?.data?.more && hit.limit < 12;
+		});
+		const failed = panel.ranked.some(({ discussion }) => panel.results.get(discussion.key)?.data === null);
+		const restricted = panel.ranked.some(({ discussion }) => panel.results.get(discussion.key)?.data?.restricted);
+		const retry = !visible.length && !untried && failed;
+		panel.status.textContent = visible.length ? "" : waiting ? "Loading comments…" : failed ? "Comments couldn’t be loaded." :
+			untried ? "No replies found in the discussions checked." : restricted ? "No comments available here." : "No comments yet.";
+		panel.status.hidden = !panel.status.textContent;
+		panel.more.hidden = waiting || !(rows.length > panel.target || untried || expandable || retry);
+		panel.more.textContent = retry ? "Retry comments" : "Show more comments";
+		panel.more.onclick = () => {
+			if (retry) {
+				for (const [key, result] of panel.results) if (!result.data) panel.results.delete(key);
+			} else {
+				panel.target += APP_TOPIC_COMMENT_PAGE;
+				panel.budget += APP_TOPIC_THREAD_BATCH;
+			}
+			updateAppTopicFeed(reading);
+		};
+	}
+
+	function updateAppTopicFeed(reading) {
+		const panel = reading.discussionPanel;
+		if (appState?.topicArticle !== reading || panel.controller.signal.aborted) return;
+		for (const key of panel.published) if (panel.results.get(key)?.data?.localOnly) panel.results.delete(key);
+		const rows = appTopicFeedRows(panel);
+		const limit = panel.target > APP_TOPIC_COMMENT_PAGE ? 12 : 4;
+		const contributors = panel.ranked.filter(({ discussion }) => panel.results.get(discussion.key)?.data?.comments.length).length;
+		if (rows.length < panel.target || contributors < Math.min(3, panel.ranked.length)) {
+			const checked = panel.ranked.filter(({ discussion }) => panel.active.has(discussion.key) || panel.results.has(discussion.key)).length;
+			const available = panel.ranked.filter(({ discussion }) => !panel.active.has(discussion.key));
+			const next = [...available.filter(({ discussion }) => !panel.results.has(discussion.key)).slice(0, Math.max(0, panel.budget - checked)),
+				...available.filter(({ discussion }) => {
+					const hit = panel.results.get(discussion.key);
+					return hit?.limit < limit && hit.data?.more;
+				})];
+			for (const { discussion } of next.slice(0, Math.max(0, 2 - panel.active.size))) {
+				const key = discussion.key;
+				panel.active.add(key);
+				const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted && panel.ranked.some((entry) => entry.discussion.key === key);
+				readAppTopicComments(panel, discussion, limit, true, current).catch(() => null).then((data) => {
+					panel.active.delete(key);
+					const previous = panel.results.get(key);
+					if (current() && (!previous || previous.limit <= limit)) {
+						panel.results.set(key, { data: data?.comments.length || !previous?.data?.comments.length ? data : previous.data, limit });
+					}
+					updateAppTopicFeed(reading);
+				});
+			}
+		}
+		paintAppTopicFeed(reading, rows);
+	}
+
+	function paintAppTopicDetail(reading, entry) {
+		const panel = reading.discussionPanel;
+		panel.detail?.remove();
+		const region = appTopicArticleNode("section", "app-topic-thread-detail");
+		panel.detail = region;
 		region.setAttribute("role", "region");
-		region.setAttribute("aria-label", preview ? "Discussion preview" : "Thread comments");
-		if (!preview) {
-			const back = appTopicArticleNode("button", "app-topic-thread-back", "Back to discussions");
-			back.type = "button";
-			back.onclick = () => closeAppTopicDiscussion(reading);
-			region.onkeydown = (event) => {
-				if (event.key === "Escape" && closeAppTopicDiscussion(reading)) {
-					event.preventDefault();
-					event.stopPropagation();
-				}
-			};
-			region.append(back);
-		}
-		region.append(appTopicArticleNode("h3", "app-topic-thread-heading", entry.thread.title));
-		const body = appTopicArticleNode("div", "app-topic-thread-content");
-		body.setAttribute("aria-busy", "true");
-		body.textContent = "Loading comments…";
-		region.append(body);
-		if (!preview) {
-			const original = appTopicOriginalLink(entry.thread.url, "Open original discussion");
-			original.className = "app-topic-thread-source";
-			region.append(original);
-		}
-		aside.insertBefore(region, aside.querySelector(".app-topic-discussion-list"));
-		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted &&
-			panel.entries.has(url) && reading.settings?.sources?.[entry.thread.source];
-		if (!panel.cache.has(key)) {
-			panel.cache.set(key, readAppTopicComments(entry.discussion, preview, current, panel.controller.signal).catch(() => null));
-		}
-		panel.cache.get(key).then((comments) => {
-			if (!current() || panel.mount !== region || !region.isConnected) return;
-			body.removeAttribute("aria-busy");
-			if (!comments?.length) {
-				if (preview) {
-					panel.emptyPreview = url;
-					region.remove();
-					return;
-				}
-				body.textContent = comments ? "No comments yet." : "Comments couldn’t be loaded.";
-				if (!comments) {
+		region.setAttribute("aria-label", "Thread comments");
+		const back = appTopicArticleNode("button", "app-topic-thread-back", "Back to discussions");
+		back.type = "button";
+		back.onclick = () => closeAppTopicDiscussion(reading);
+		region.onkeydown = (event) => {
+			if (event.key === "Escape" && closeAppTopicDiscussion(reading)) { event.preventDefault(); event.stopPropagation(); }
+		};
+		const content = appTopicArticleNode("div", "app-topic-thread-content", "Loading comments…");
+		content.setAttribute("aria-busy", "true");
+		const original = appTopicOriginalLink(entry.thread.url, "Open original discussion");
+		original.className = "app-topic-thread-source";
+		region.append(back, appTopicArticleNode("h3", "app-topic-thread-heading", entry.thread.title), content, original);
+		const feed = panel.scroller.querySelector(".app-topic-feed");
+		feed.hidden = true;
+		feed.after(region);
+		const key = entry.discussion.key;
+		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted && panel.entries.has(entry.thread.url);
+		const hit = panel.results.get(key)?.data;
+		if (!panel.details.has(key)) panel.details.set(key, hit?.comments.length && !hit.more ? Promise.resolve(hit) :
+			readAppTopicComments(panel, entry.discussion, 16, false, current).catch(() => null));
+		panel.details.get(key).then((data) => {
+			if (!current() || panel.detail !== region || !region.isConnected) return;
+			content.removeAttribute("aria-busy");
+			if (data?.comments.length) {
+				if (!panel.results.get(key)?.data?.comments.length) panel.results.set(key, { data, limit: 16 });
+				const list = appTopicArticleNode("ol", "app-topic-comments");
+				list.append(...data.comments.map((row) => appTopicCommentNode(reading, entry, row, false)));
+				content.replaceChildren(list);
+			} else {
+				content.textContent = data?.restricted ? "No comments available here." : data ? "No comments yet." : "Comments couldn’t be loaded.";
+				if (!data) {
 					const retry = appTopicArticleNode("button", "app-topic-thread-back", "Retry comments");
 					retry.type = "button";
-					retry.onclick = () => {
-						panel.cache.delete(key);
-						region.remove();
-						paintAppTopicComments(reading);
-						panel.mount?.querySelector("button")?.focus({ preventScroll: true });
-					};
-					body.append(" ", retry);
+					retry.onclick = () => { panel.details.delete(key); paintAppTopicDetail(reading, entry).focus({ preventScroll: true }); };
+					content.append(" ", retry);
 				}
-				return;
 			}
-			if (!preview && panel.preview === url) {
-				panel.emptyPreview = null;
-				panel.cache.set("preview:" + url, Promise.resolve(comments));
-			}
-			const list = appTopicArticleNode("ol", "app-topic-comments");
-			for (const { comment, depth } of (preview ? comments.slice(0, 1) : comments)) {
-				const item = appTopicArticleNode("li");
-				if (depth) item.dataset.depth = String(depth);
-				const text = appTopicArticleNode("div", "app-topic-comment-body");
-				if (preview || comment.bodyHTML.length > 2600) text.textContent = textExcerpt(comment.bodyHTML, preview ? 190 : 2600);
-				else text.innerHTML = sanitizeHTML(comment.bodyHTML, { images: false });
-				const byline = [comment.author || "Anonymous", commentAgeLabel(timeAgo(comment.createdAt))].filter(Boolean);
-				item.append(appTopicArticleNode("span", "app-topic-comment-author", byline.join(" · ")), text);
-				list.append(item);
-			}
-			body.replaceChildren(list);
-			region.hidden = false;
 		});
+		return back;
 	}
 
 	function syncAppTopicDiscussions(reading, scroller, article) {
-		const panel = reading.discussionPanel ||= { controller: new AbortController(), cache: new Map() };
+		const panel = reading.discussionPanel ||= { controller: new AbortController(), actors: new Map(), details: new Map(),
+			results: new Map(), active: new Set(), nodes: new Map(), budget: APP_TOPIC_THREAD_BATCH, target: APP_TOPIC_COMMENT_PAGE };
 		panel.scroller = scroller;
 		panel.entries = new Map();
-		for (const source of article.sources) for (const thread of source.discussions) {
-			const discussion = appTopicKnownThread(reading, { source, thread });
-			const existing = panel.entries.get(thread.url);
-			if (discussion && (!existing || (thread.comments ?? -1) > (existing.thread.comments ?? -1))) {
-				panel.entries.set(thread.url, { thread, discussion, source });
+		const published = new Set((reading.remote?.sources || []).flatMap((source) => source.discussions.map((thread) => thread.url)));
+		const publicReddit = new Set();
+		for (const post of frontPageRowStories([...new Set([...appState.frontPageCandidates, ...appState.frontPageRows])])) {
+			if (post?.source === "reddit" && post.id && (!post.kind || post.kind === "discussion")) {
+				publicReddit.add(topicArticleLinkKey(post.url) + "\n" + post.id);
 			}
 		}
-		if (!panel.entries.has(panel.selected)) panel.selected = null;
-		if (!panel.preview && !panel.selected && reading.publicId && !reading.pending) {
-			const published = new Set((reading.remote?.sources || []).flatMap((source) => source.discussions.map((thread) => thread.url)));
-			const index = sharedTopicCache?.index;
-			const eligible = [...panel.entries.values()].filter(({ thread, source }) =>
-				["hn", "lemmy", "lobsters"].includes(thread.source) && thread.comments !== 0 &&
-				(published.has(thread.url) || index?.pages.get(sharedTopicURLKey(source.url))?.includes(reading.publicId)));
-			eligible.sort((left, right) => (right.thread.comments || 0) - (left.thread.comments || 0));
-			panel.preview = eligible[0]?.thread.url;
+		panel.published = new Set();
+		const unique = new Map();
+		for (const source of article.sources) for (const thread of source.discussions) {
+			const discussion = appTopicKnownThread(reading, { source, thread });
+			if (!discussion) continue;
+			if (published.has(thread.url) || thread.source === "reddit" && publicReddit.has(topicArticleLinkKey(source.url) + "\n" + discussion.id)) {
+				panel.published.add(discussion.key);
+			}
+			const entry = { thread, discussion, source };
+			const existing = panel.entries.get(thread.url);
+			if (!existing || (thread.comments ?? -1) > (existing.thread.comments ?? -1)) panel.entries.set(thread.url, entry);
+			const previous = unique.get(discussion.key);
+			if (!previous || (thread.comments ?? -1) > (previous.thread.comments ?? -1)) unique.set(discussion.key, entry);
 		}
-		paintAppTopicComments(reading);
+		const sorted = [...unique.values()].sort((a, b) => (b.thread.comments ?? 1) - (a.thread.comments ?? 1));
+		panel.ranked = [];
+		for (const zero of [false, true]) {
+			const groups = new Map();
+			for (const entry of sorted.filter(({ thread }) => (thread.comments === 0) === zero)) {
+				const source = entry.thread.source;
+				if (!groups.has(source)) groups.set(source, []);
+				groups.get(source).push(entry);
+			}
+			for (let i = 0; [...groups.values()].some((group) => group.length > i); i++) {
+				for (const group of groups.values()) if (group[i]) panel.ranked.push(group[i]);
+			}
+		}
+		if (panel.selected && !panel.entries.has(panel.selected)) {
+			panel.selected = null;
+			panel.detail?.remove();
+			panel.detail = null;
+		}
+		updateAppTopicFeed(reading);
 	}
 
 	function openAppTopicDiscussion(reading, { thread }, anchor) {
 		const panel = reading.discussionPanel;
-		if (appState?.topicArticle !== reading || !panel?.entries.has(thread.url) || !reading.settings?.sources?.[thread.source]) return false;
+		const entry = panel?.entries.get(thread.url);
+		if (!entry || appState.topicArticle !== reading || !reading.settings?.sources?.[thread.source]) return false;
+		if (thread.source === "x" && !panel.results.get(entry.discussion.key)?.data?.comments.length) return false;
 		if (!panel.selected) panel.returnScroll = panel.scroller.scrollTop;
+		panel.returnAnchor = anchor;
 		panel.selected = thread.url;
-		paintAppTopicComments(reading);
-		panel.mount?.querySelector("button")?.focus({ preventScroll: true });
-		if (anchor?.isConnected) panel.mount?.scrollIntoView({ block: "nearest" });
+		const back = paintAppTopicDetail(reading, entry);
+		back.focus({ preventScroll: true });
+		if (anchor?.isConnected) back.scrollIntoView({ block: "nearest" });
 		return true;
 	}
 
 	function closeAppTopicDiscussion(reading) {
 		const panel = reading?.discussionPanel;
-		if (!panel?.selected || appState?.topicArticle !== reading) return false;
-		const link = [...panel.scroller.querySelectorAll("[data-topic-thread]")].find((item) => item.dataset.topicThread === panel.selected);
+		if (!panel?.selected || appState.topicArticle !== reading) return false;
+		const url = panel.selected;
 		panel.selected = null;
-		paintAppTopicComments(reading);
-		link?.focus({ preventScroll: true });
+		panel.detail?.remove();
+		panel.detail = null;
+		updateAppTopicFeed(reading);
+		let anchor = panel.returnAnchor;
+		if (!anchor?.getClientRects().length) {
+			if (anchor?.matches(".app-topic-comment-context")) {
+				const controls = [...panel.list.querySelectorAll(".app-topic-comment-context")];
+				const key = anchor.dataset.topicDiscussion;
+				anchor = controls.find((item) => item.dataset.topicDiscussion === key) || controls[0];
+			} else {
+				anchor = [...panel.scroller.querySelectorAll("[data-topic-thread]")].find((item) => item.dataset.topicThread === url && item.getClientRects().length);
+			}
+		}
+		if (!anchor) {
+			anchor = panel.scroller.querySelector(".app-topic-discussions h2");
+			if (anchor) anchor.tabIndex = -1;
+		}
+		anchor?.focus({ preventScroll: true });
 		panel.scroller.scrollTop = panel.returnScroll;
 		return true;
 	}
