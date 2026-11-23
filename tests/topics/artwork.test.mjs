@@ -25,7 +25,7 @@ async function database(t) {
   const migrations = new URL("../../topics/migrations/", import.meta.url);
   for (const file of (await readdir(migrations)).sort()) {
     const sql = await readFile(new URL(file, migrations), "utf8");
-    await db.batch(sql.split(";").map((part) => part.trim()).filter(Boolean).map((part) => db.prepare(part)));
+    await db.exec(sql.replaceAll("\n", " "));
   }
   return db;
 }

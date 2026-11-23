@@ -21,11 +21,11 @@ async function service(t, options = {}) {
   const db = await runtime.getD1Database("TOPICS_DB");
   for (const file of (await readdir(migrations)).sort()) {
     const sql = await readFile(new URL(file, migrations), "utf8");
-    await db.batch(sql.split(";").map((part) => part.trim()).filter(Boolean).map((part) => db.prepare(part)));
+    await db.exec(sql.replaceAll("\n", " "));
   }
   const accounts = await runtime.getD1Database("ACCOUNTS_DB");
   const env = { TOPICS_DB: db, ACCOUNTS_DB: accounts, REFRESH_TOKEN, ...options };
-  const request = (path = "/api/topics", init) => worker.fetch(new Request("https://topics.test" + path, init), env);
+  const request = (path = "/api/topics", init, context) => worker.fetch(new Request("https://topics.test" + path, init), env, context);
   const refresh = () => request("/internal/refresh", {
     method: "POST",
     headers: { Authorization: "Bearer " + REFRESH_TOKEN },
@@ -981,7 +981,7 @@ test("operator decisions resolve reports and survive a fresh automatic classific
   const astronomy = "Space telescope photographs a new gas cloud";
   const ocean = "Research ship maps a new trench in the Pacific Ocean";
   const sources = [astronomy, astronomy, ocean, ocean, independent].map((title, position) => ({
-    objectID: String(position + 1), title, url: `https://press${position}.example/article`,
+    objectID: String(position + 1), title, url: `https://press${position}.example.org/article`,
     created_at: new Date(START).toISOString(), num_comments: position,
   }));
   mockFeeds(t, () => ({ "hn.algolia.com": { hits: sources } }));
@@ -1001,6 +1001,10 @@ test("operator decisions resolve reports and survive a fresh automatic classific
   const [scopeB] = assignments(first, sources[2].url).topicIds;
   const [scopeC] = assignments(first, sources[4].url).topicIds;
   assert.notEqual(scopeA, scopeB);
+  const article = async (id) => (await request("/api/topics/article?id=" + encodeURIComponent(id))).json();
+  const before = await article(scopeB);
+  assert.deepEqual(new Set(before.sources.map(({ url }) => url)), new Set([sources[2].url, sources[3].url]));
+  assert.equal((await article(scopeC)).topic.id, scopeC);
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pageKey(sources[0].url))));
   const pageId = Buffer.from(hash.subarray(0, 16)).toString("hex");
   await db.prepare("INSERT INTO topic_reports VALUES (?, 'test-reporter', ?, ?, ?, ?)")
@@ -1044,6 +1048,10 @@ test("operator decisions resolve reports and survive a fresh automatic classific
     const detail = await (await request("/api/topics/coverage?id=" + encodeURIComponent(scopeC))).json();
     assert.equal(detail.topic.id, scopeB);
     assert.deepEqual(new Set(detail.links.map(({ url }) => url)), new Set([sources[0].url, sources[2].url, sources[4].url]));
+    const merged = await article(scopeC);
+    assert.equal(merged.topic.id, scopeB);
+    assert.deepEqual(new Set(merged.sources.map(({ url }) => url)), new Set([sources[0].url, sources[2].url, sources[4].url]));
+    assert.deepEqual((await article(splitId)).sources.map(({ url }) => url), [sources[1].url]);
   }
 });
 
@@ -1212,4 +1220,442 @@ test("newly arrived coverage can corroborate a complete retained story on the sa
   }, original).body);
   assert.deepEqual(expanded.topics.map(({ id }) => id), [a.id], "new perspectives keep the already-published address");
   assert.equal(expanded.redirects[c.id], a.id);
+});
+
+const bridgeSources = [
+  {
+    url: "https://chronicle.example.org/river-bridge-repairs",
+    title: "Council approves repairs for the river bridge",
+    description: "City crews will replace the bridge deck. Work is scheduled to begin after the winter ferry season.",
+  },
+  {
+    url: "https://transit.example.net/river-bridge-detour",
+    title: "Transit agency publishes the detour for bridge repairs",
+    description: "Bus service moves to the east road during repairs. The agency will keep both river stops open to passengers.",
+  },
+];
+
+const bridgeReporting = [{ ...bridgeSources[0], description: "City crews will replace the bridge deck. " +
+  "The river bridge repairs will use prefabricated panels so ferries can continue operating during construction." }, bridgeSources[1]];
+
+function bridgeInference() {
+  return { response: { sections: [{ heading: "The bridge repairs", paragraphs: [{ sentences: [
+    { text: "City crews will replace the bridge deck.", evidence: [{ sourceId: "s1", quote: "crews will replace the bridge deck" }] },
+    { text: "Bus service moves to the east road during repairs.", evidence: [{ sourceId: "s2", quote: "Bus service moves to the east road during repairs" }] },
+  ] }] }], events: [] } };
+}
+
+async function articleFixture(t, { run = bridgeInference, sources = bridgeSources, publisherStatus = () => 200 } = {}) {
+  let now = START;
+  t.mock.method(Date, "now", () => now);
+  const fetched = [];
+  t.mock.method(globalThis, "fetch", async (address) => {
+    const url = new URL(address);
+    fetched.push(url.href);
+    const page = sources.find((page) => page.url === url.href);
+    if (!page) return new Response(null, { status: 404 });
+    const status = publisherStatus(page);
+    if (status !== 200) return new Response(null, { status });
+    return new Response('<html><head><title>' + page.title + '</title><meta name="description" content="' +
+      page.description + '"></head><body><article><p>' + page.description + '</p></article></body></html>',
+    { headers: { "Content-Type": "text/html; charset=utf-8" } });
+  });
+  const { db, request } = await service(t, { AI: { run } });
+  const topic = { id: "story:bridge-repairs", label: "River bridge repairs", kind: "story" };
+  const path = "/api/topics/article?id=" + encodeURIComponent(topic.id);
+  const index = { version: 1, generatedAt: new Date(now).toISOString(), topics: [topic],
+    redirects: { "story:old-bridge": topic.id }, pages: [] };
+  for (const [i, { url, title, description }] of sources.entries()) {
+    const key = url.replace(/^https:\/\//, "");
+    const id = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))).toString("hex").slice(0, 32);
+    index.pages.push({ key, topicIds: [topic.id], posts: [["hn:" + (41 + i), 5]] });
+    await db.batch([
+      db.prepare("INSERT INTO pages VALUES (?, ?, ?, ?, ?)").bind(id, url, title, new URL(url).hostname, description),
+      db.prepare("INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments) VALUES (?, ?, 'hn', '', ?, ?, ?, 5)")
+        .bind("hn:" + (41 + i), id, title, "https://news.ycombinator.com/item?id=" + (41 + i), START),
+    ]);
+  }
+  const publish = () => {
+    index.generatedAt = new Date(now).toISOString();
+    return db.prepare("INSERT OR REPLACE INTO topics_index VALUES (1, ?, ?, ?)").bind(now, JSON.stringify(index),
+      JSON.stringify(index.pages.map(() => now))).run();
+  };
+  await publish();
+  return { request, path, db, index, publish, fetched, advance: (ms) => { now += ms; } };
+}
+
+test("topic articles are shared across readers, redirects, republishing and discussion activity", async (t) => {
+  let runs = 0;
+  const { db, request, path, index, publish, advance, fetched } = await articleFixture(t, {
+    run: () => { runs++; return bridgeInference(); },
+  });
+  const original = await request("/api/topics/article?id=story%3Aold-bridge");
+  assert.equal(original.status, 200);
+  assert.equal(original.headers.get("access-control-allow-origin"), "*");
+  const first = await original.json();
+  assert.equal(first.topic.id, "story:bridge-repairs");
+  assert.equal(first.method, "synthesis");
+  assert.equal(runs, 1);
+  assert.deepEqual(new Set(first.sources.map(({ url }) => url)), new Set(bridgeSources.map(({ url }) => url)));
+  const downloads = fetched.length;
+
+  advance(3 * 3_600_000);
+  index.pages.reverse();
+  index.pages.find(({ key }) => key.startsWith("chronicle.")).posts[0][1] = 17;
+  await publish();
+  await db.prepare("UPDATE posts SET comments = 17 WHERE id = 'hn:41'").run();
+  const warm = await request(path);
+  const same = await warm.json();
+  assert.equal(same.generatedAt, first.generatedAt);
+  assert.deepEqual(same.sections, first.sections);
+  assert.equal(same.sources.find(({ url }) => url === bridgeSources[0].url).discussions[0].comments, 17);
+  assert.equal(runs, 1);
+  assert.equal(fetched.length, downloads);
+  const revalidated = await request(path, { headers: { "If-None-Match": warm.headers.get("etag") } });
+  assert.equal(revalidated.status, 304);
+  assert.equal(await revalidated.text(), "");
+
+  await db.prepare("UPDATE pages SET description = description || ' Funding is secured.' WHERE url = ?").bind(bridgeSources[0].url).run();
+  const revised = await (await request(path)).json();
+  assert.equal(runs, 2);
+  assert.notEqual(revised.generatedAt, first.generatedAt);
+});
+
+test("only current published topic IDs can initiate article generation", async (t) => {
+  let runs = 0;
+  const { request, fetched, path, db, index, publish } = await articleFixture(t, {
+    run: () => { runs++; return bridgeInference(); },
+  });
+  for (const id of ["story:unknown", "topic:unknown", "local:bridge", "https://private.example.org/page"]) {
+    assert.equal((await request("/api/topics/article?id=" + encodeURIComponent(id))).status, 404);
+  }
+  assert.equal((await request(path, { method: "POST", body: "arbitrary evidence" })).status, 404);
+  assert.equal((await request(path + "&url=https://other.example.org/")).status, 400);
+  assert.equal((await request(path + "&prompt=write+anything")).status, 400);
+  assert.deepEqual(fetched, []);
+  assert.equal(runs, 0);
+
+  const members = index.pages;
+  index.pages = [{ key: "no-row.example.org/orphan", topicIds: ["story:bridge-repairs"] }];
+  await publish();
+  const missing = await request(path);
+  assert.equal(missing.status, 503);
+  assert(Number(missing.headers.get("retry-after")) > 0);
+  assert.deepEqual(fetched, []);
+  index.pages = members.slice(0, 1);
+  await publish();
+  const repaired = await request(path);
+  assert.equal(repaired.status, 200);
+  assert.deepEqual((await repaired.json()).sources.map(({ url }) => url), [bridgeSources[0].url]);
+  await db.prepare("DELETE FROM topics_index").run();
+  assert.equal((await request(path)).status, 404);
+});
+
+test("simultaneous topic article opens take one D1 lease and return a bounded pending response", { timeout: 15_000 }, async (t) => {
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  let runs = 0;
+  const { request, path } = await articleFixture(t, {
+    run: async () => { runs++; entered.resolve(); await gate.promise; return bridgeInference(); },
+  });
+  t.after(() => gate.resolve());
+  const work = [];
+  const context = { waitUntil: (promise) => work.push(promise) };
+  const first = await request(path, undefined, context);
+  try {
+    assert.equal(first.status, 202);
+    assert(Number(first.headers.get("retry-after")) > 0);
+    await entered.promise;
+    const concurrent = await Promise.all([request(path, undefined, context), request("/api/topics/article?id=story%3Aold-bridge", undefined, context)]);
+    assert.deepEqual(concurrent.map(({ status }) => status), [202, 202]);
+    assert.equal(runs, 1);
+  } finally {
+    gate.resolve();
+    await Promise.all(work);
+  }
+  const warm = await request(path);
+  assert.equal(warm.status, 200);
+  assert.equal((await warm.json()).method, "synthesis");
+  assert.equal(runs, 1);
+});
+
+test("an article finishing after a published split cannot return or overwrite withdrawn evidence", { timeout: 15_000 }, async (t) => {
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  let runs = 0;
+  const { request, path, index, publish, advance } = await articleFixture(t, {
+    run: async () => { if (++runs === 1) { entered.resolve(); await gate.promise; } return bridgeInference(); },
+  });
+  t.after(() => gate.resolve());
+  const pending = request(path);
+  const started = await Promise.race([entered.promise.then(() => true), pending.then(() => false)]);
+  assert.equal(started, true, "the old membership must actually be generating");
+  advance(1_000);
+  index.pages[1].topicIds = [];
+  await publish();
+  const fresh = await request(path);
+  assert.equal(fresh.status, 200);
+  assert.deepEqual((await fresh.json()).sources.map(({ url }) => url), [bridgeSources[0].url]);
+  gate.resolve();
+  const superseded = await pending;
+  assert.equal(superseded.status, 202);
+  const warm = await (await request(path)).json();
+  assert.deepEqual(warm.sources.map(({ url }) => url), [bridgeSources[0].url]);
+});
+
+test("a temporary model outage serves cited public coverage and retries after the backoff", async (t) => {
+  let runs = 0;
+  const { request, path, advance } = await articleFixture(t, {
+    sources: bridgeReporting,
+    run: () => { if (++runs === 1) throw new Error("model temporarily unavailable"); return bridgeInference(); },
+  });
+  const degraded = await request(path);
+  assert.equal(degraded.status, 200);
+  const delay = Number(degraded.headers.get("retry-after"));
+  assert(delay > 0);
+  const fallback = await degraded.json();
+  assert.equal(fallback.method, "coverage");
+  assert(fallback.sections.some(({ paragraphs }) => paragraphs.some(({ sourceIds }) => sourceIds.length)));
+  assert.equal((await (await request(path)).json()).generatedAt, fallback.generatedAt);
+  assert.equal(runs, 1);
+  advance(delay * 1000 + 10);
+  const recovered = await request(path);
+  assert.equal(recovered.status, 200);
+  assert.equal((await recovered.json()).method, "synthesis");
+  assert.equal(recovered.headers.get("retry-after"), null);
+  assert.equal(runs, 2);
+});
+
+test("blocked originals replace the previous headline-only article with a cacheable source dossier", async (t) => {
+  const { request, path, db, fetched, index } = await articleFixture(t, {
+    publisherStatus: () => 403, run: () => assert.fail("Blocked originals cannot support inference"),
+  });
+  const { id, label } = index.topics[0];
+  const sources = bridgeSources.map(({ url, title }, i) => ({ id: "s" + (i + 1), url, title, publisher: new URL(url).hostname,
+    excerpt: "", publishedAt: null, sharedAt: new Date(START).toISOString(), discussions: [] }));
+  const paragraphs = sources.map(({ id, title, publisher }) => ({
+    text: "A public listing shared “" + title + "” from " + publisher + ".", sourceIds: [id],
+  }));
+  const legacy = { version: 1, topic: { id, label }, method: "coverage", generatedAt: new Date(START - DAY).toISOString(),
+    sources, sections: [{ heading: "Shared coverage", paragraphs }],
+    timeline: paragraphs.map((paragraph) => ({ ...paragraph, kind: "shared", date: new Date(START).toISOString() })) };
+  const briefV2Revision = "eb8e635206cb12e277eba96a9d2596e6";
+  await db.prepare("INSERT INTO topic_articles (topic_id, revision, body, expires_at) VALUES (?, ?, ?, ?)")
+    .bind(id, briefV2Revision, JSON.stringify(legacy), START + 30 * DAY).run();
+
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  const dossier = await response.json();
+  assert.equal(dossier.method, "coverage");
+  assert.equal(dossier.version, 1);
+  assert.notEqual(dossier.generatedAt, legacy.generatedAt);
+  assert.deepEqual(dossier.sections, []);
+  assert.deepEqual(dossier.timeline, []);
+  assert.deepEqual(dossier.sources.map(({ url, title }) => ({ url, title })), bridgeSources.map(({ url, title }) => ({ url, title })));
+  assert(dossier.sources.every(({ sharedAt, discussions }) => sharedAt && discussions.length));
+  assert.equal(response.headers.get("retry-after"), null);
+  assert.equal(fetched.length, 2);
+  const warm = await request(path, { headers: { "If-None-Match": response.headers.get("etag") } });
+  assert.equal(warm.status, 304);
+  assert.equal(fetched.length, 2);
+});
+
+test("unavailable publishers leave the source dossier readable until their reporting is accessible", async (t) => {
+  let status = 503;
+  const { request, path, advance, fetched } = await articleFixture(t, { publisherStatus: () => status });
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  const dossier = await response.json();
+  assert.equal(dossier.method, "coverage");
+  assert.deepEqual(dossier.sections, []);
+  assert.deepEqual(dossier.timeline, []);
+  assert.equal(dossier.sources.length, 2);
+  const delay = Number(response.headers.get("retry-after"));
+  assert(delay > 0);
+  assert.equal((await (await request(path)).json()).generatedAt, dossier.generatedAt);
+  assert.equal(fetched.length, 2);
+  advance(delay * 1000 + 10);
+  status = 200;
+  const available = await request(path);
+  assert.equal(available.status, 200);
+  assert.equal(available.headers.get("retry-after"), null);
+  const article = await available.json();
+  assert.equal(article.method, "synthesis");
+  assert(article.sections[0].paragraphs.some(({ text }) => text.includes("will replace the bridge deck")));
+});
+
+test("partial publisher access returns a cited brief and keeps the blocked original in the sources", async (t) => {
+  const { request, path } = await articleFixture(t, {
+    sources: bridgeReporting,
+    publisherStatus: (source) => source.url === bridgeSources[0].url ? 200 : 403,
+    run: () => assert.fail("One short passage does not support a full synthesis"),
+  });
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  const brief = await response.json();
+  const readable = brief.sources.find(({ url }) => url === bridgeSources[0].url);
+  assert(brief.sources.some(({ url }) => url === bridgeSources[1].url));
+  assert.equal(brief.method, "coverage");
+  const paragraphs = brief.sections.flatMap(({ paragraphs }) => paragraphs);
+  assert.equal(paragraphs.length, 1);
+  assert.deepEqual(paragraphs[0].sourceIds, [readable.id]);
+  assert.match(paragraphs[0].text, /prefabricated panels/);
+  assert.deepEqual(brief.timeline, []);
+});
+
+test("the article returns twelve distinct published discussions with their individual counts", async (t) => {
+  const { db, request, path, index, publish } = await articleFixture(t, { sources: bridgeSources.slice(0, 1), publisherStatus: () => 403 });
+  const threads = Array.from({ length: 14 }, (_, i) => {
+    const source = i % 2 ? "hn" : "lobsters";
+    const key = String(200 + i);
+    const url = source === "hn" ? "https://news.ycombinator.com/item?id=" + key : "https://lobste.rs/s/" + key;
+    return { id: source + ":" + key, source, title: "Bridge discussion " + key, url, postedAt: START + i * 1000, comments: 13 - i };
+  });
+  const mirror = { ...threads.at(-1), id: "hn:duplicate", postedAt: START + 15_000 };
+  const published = [...threads, mirror];
+  await db.prepare(`INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments)
+    SELECT j.value->>'id', p.id, j.value->>'source', '', j.value->>'title', j.value->>'url', j.value->>'postedAt', j.value->>'comments'
+    FROM json_each(?) AS j JOIN pages AS p WHERE p.url = ?`)
+    .bind(JSON.stringify(published), bridgeSources[0].url).run();
+  index.pages[0].posts = published.map(({ id, comments }) => [id, comments]);
+  await publish();
+  const article = await (await request(path)).json();
+  const discussions = article.sources[0].discussions.map(({ source, url, comments }) => ({ source, url, comments }));
+  assert.deepEqual(discussions, threads.slice(-12).reverse().map(({ source, url, comments }) => ({ source, url, comments })));
+});
+
+test("publisher sharing variants contribute one indexed article and preserve each public discussion", async (t) => {
+  const base = "https://www.nytimes.com/2026/11/20/world/river-bridge-repairs-begin.html";
+  const sources = ["?smid=first", "", "?unlocked_article_code=public"].map((suffix) => ({ ...bridgeSources[0], url: base + suffix }));
+  const { request, path, db } = await articleFixture(t, { sources });
+  await db.prepare("INSERT INTO posts (id, page_id, source, community, title, url, posted_at, comments) " +
+    "SELECT 'hn:999', id, 'hn', '', 'Not published', 'https://news.ycombinator.com/item?id=999', ?, 1 FROM pages WHERE url = ?")
+    .bind(START + 10_000, base).run();
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  const article = await response.json();
+  assert.deepEqual(article.sources.map(({ url }) => url), [base]);
+  assert.deepEqual(new Set(article.sources[0].discussions.map(({ url }) => url)),
+    new Set([41, 42, 43].map((id) => "https://news.ycombinator.com/item?id=" + id)));
+});
+
+test("an expired article lease can be reclaimed without its late writer replacing the winner", { timeout: 15_000 }, async (t) => {
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  let runs = 0;
+  const { request, path, advance } = await articleFixture(t, {
+    run: async () => { if (++runs === 1) { entered.resolve(); await gate.promise; } return bridgeInference(); },
+  });
+  t.after(() => gate.resolve());
+  const abandoned = request(path);
+  await entered.promise;
+  advance(60_000);
+  const replacement = await (await request(path)).json();
+  gate.resolve();
+  assert.equal((await (await abandoned).json()).generatedAt, replacement.generatedAt);
+  assert.equal((await (await request(path)).json()).generatedAt, replacement.generatedAt);
+  assert.equal(runs, 2);
+});
+
+test("fresh public discussion metadata cannot push an article over its response byte limit", async (t) => {
+  const { request, path, db } = await articleFixture(t);
+  const article = await (await request(path)).json();
+  for (const source of article.sources) source.discussions = [];
+  const limit = 192 * 1024;
+  const paragraph = article.sections[0].paragraphs[0];
+  paragraph.text += "x".repeat(limit - Buffer.byteLength(JSON.stringify(article)) - 10);
+  await db.prepare("UPDATE topic_articles SET body = ?").bind(JSON.stringify(article)).run();
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  const data = await response.arrayBuffer();
+  assert(data.byteLength <= limit);
+  assert.equal(JSON.parse(new TextDecoder().decode(data)).sources.length, 2);
+});
+
+test("article storage outages preserve the published index and return a retryable article status", async (t) => {
+  const { request, path, db } = await articleFixture(t);
+  await db.prepare("DROP TABLE topic_articles").run();
+  assert.equal((await request()).status, 200);
+  const response = await request(path);
+  assert.equal(response.status, 503);
+  assert(Number(response.headers.get("retry-after")) > 0);
+});
+
+test("a public index refresh prunes old article revisions and remains usable during cache maintenance", async (t) => {
+  t.mock.method(Date, "now", () => START);
+  mockFeeds(t, () => publicPosts(START, "fresh"));
+  const { db, refresh, request } = await service(t, { AI: fixtureAI() });
+  await db.prepare("INSERT INTO topic_articles (topic_id, revision, expires_at) VALUES ('story:gone', 'old', ?)").bind(START - 1).run();
+  assert.equal((await refresh()).status, 200);
+  assert.equal(await db.prepare("SELECT COUNT(*) FROM topic_articles").first("COUNT(*)"), 0);
+  await db.prepare("DROP TABLE topic_articles").run();
+  assert.equal((await refresh()).status, 200);
+  assert((await (await request()).json()).topics.length);
+});
+
+test("corroboration joins separately indexed coverage of the same result until a published review excludes it", async (t) => {
+  const sources = [
+    { title: "Chuck Hubbard defeats Rep. Virginia Foxx after a recount in their North Carolina House race",
+      url: "https://apnews.com/article/chuck-hubbard-virginia-foxx-north-carolina-23732afcd78a853e98acd9b72d0cbd14", description: "" },
+    { title: "Republican chair of the House Rules Committee loses reelection, bringing Democrats’ majority to 259 | CNN Politics",
+      url: "https://www.cnn.com/2026/11/22/politics/virginia-foxx-loses-reelection-chuck-hubbard", description: "" },
+  ];
+  const { request, path, index, publish, advance } = await articleFixture(t, { sources });
+  index.topics[0].label = sources[0].title;
+  index.topics.push({ id: "story:cnn", label: sources[1].title, kind: "story" });
+  index.pages[1].topicIds = ["story:cnn"];
+  await publish();
+  const corroborated = await (await request(path)).json();
+  assert.deepEqual(corroborated.sources.map(({ url }) => url), sources.map(({ url }) => url));
+  advance(1000);
+  index.pages[1].topicIds = [index.topics[0].id];
+  await publish();
+  const assigned = await (await request(path)).json();
+  assert.deepEqual(assigned.sources.map(({ url }) => url), corroborated.sources.map(({ url }) => url));
+  assert.notEqual(assigned.generatedAt, corroborated.generatedAt);
+  index.pages[1].topicIds = ["story:cnn"];
+  index.pages[1].reviewed = true;
+  await publish();
+  const reviewed = await (await request(path)).json();
+  assert.deepEqual(reviewed.sources.map(({ url }) => url), [sources[0].url]);
+});
+
+test("warm article requests can use the durable source selection without transferring the entire public index", async (t) => {
+  const { request, db, path } = await articleFixture(t);
+  assert.equal((await request(path)).status, 200);
+  let fullIndexReads = 0;
+  const env = { TOPICS_DB: { prepare(sql) {
+    if (/SELECT (?:generated_at, )?body FROM (?:topics_index|public_index)/i.test(sql)) fullIndexReads++;
+    return db.prepare(sql);
+  } } };
+  const warm = await worker.fetch(new Request("https://topics.test/api/topics/article?id=story%3Aold-bridge"), env);
+  assert.equal(warm.status, 200);
+  assert.equal((await warm.json()).method, "synthesis");
+  assert.equal(fullIndexReads, 0);
+});
+
+test("a publication winning the final cache write cannot leak an article from just before a reviewed split", async (t) => {
+  const { db, index, path, publish, request } = await articleFixture(t);
+  let published = false;
+  const env = { AI: { run: bridgeInference }, TOPICS_DB: { prepare(sql) {
+    const statement = db.prepare(sql);
+    if (!sql.startsWith("UPDATE topic_articles SET body")) return statement;
+    return { bind(...params) {
+      const bound = statement.bind(...params);
+      return { async first() {
+        if (!published) {
+          published = true;
+          index.pages[1].topicIds = [];
+          index.pages[1].reviewed = true;
+          await publish();
+        }
+        return bound.first();
+      } };
+    } };
+  } } };
+  const raced = await worker.fetch(new Request("https://topics.test" + path), env);
+  assert.equal(published, true);
+  assert.equal(raced.status, 202);
+  const fresh = await (await request(path)).json();
+  assert.deepEqual(fresh.sources.map(({ url }) => url), [bridgeSources[0].url]);
 });

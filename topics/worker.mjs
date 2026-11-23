@@ -2,6 +2,8 @@ import { canonicalURL, fetchFeeds, topicPageEvidence, usableTopicTitle } from ".
 import { groupPages } from "./grouping.mjs";
 import { buildTopicsIndex, resolvePublishedTopic, retainedEvidenceKeys, RETENTION_MS } from "./index.mjs";
 import { addTopicArtwork } from "./artwork.mjs";
+import { ARTICLE_PIPELINE_VERSION, MAX_ARTICLE_SOURCES, articleDiscussions, articleSourceKey, buildTopicArticle } from "./article.mjs";
+import { articleMembers } from "./article-membership.mjs";
 import { prepareTopicDecision } from "./decisions.mjs";
 import { serveTopicReviewPage } from "./review-page.mjs";
 
@@ -12,6 +14,15 @@ const GENERAL_WINDOW_LIMIT = WINDOW_LIMIT / 2;
 const INTEREST_WINDOW_PER_FEED = 4;
 const COVERAGE_PAGE_SIZE = 48;
 const COVERAGE_PAGE_BYTES = 4 * 1024 * 1024;
+const ARTICLE_BYTES = 192 * 1024;
+const ARTICLE_SELECTION_VERSION = ARTICLE_PIPELINE_VERSION + "/members-v1";
+const ARTICLE_LEASE_MS = 45_000;
+const ARTICLE_WAIT_MS = 900;
+const ARTICLE_RETRY_MS = 15 * 60_000;
+const ARTICLE_HEADERS = {
+  "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": "ETag, Retry-After",
+  "Content-Type": "application/json; charset=utf-8", "X-Content-Type-Options": "nosniff",
+};
 const MAX_NEW_EMBEDDINGS = 200;
 const EMBEDDING_BATCH_SIZE = 32;
 const DIMENSIONS = 384;
@@ -295,6 +306,14 @@ async function refresh(env) {
       console.warn("Topic artwork unavailable", error.message);
     }
     await publishIndexes(env, snapshot, owner, observations, pages);
+    try {
+      await db.batch([
+        db.prepare("DELETE FROM topic_articles WHERE expires_at <= ?").bind(now),
+        db.prepare("DELETE FROM topic_article_selections WHERE generation <> (SELECT generation FROM topic_article_publication WHERE id = 1)"),
+      ]);
+    } catch (error) {
+      console.warn("Topic article cleanup unavailable", error.message);
+    }
     console.log("Topics refresh", JSON.stringify({ ...snapshot.stats, sources: snapshot.sources }));
     return { generatedAt: snapshot.generatedAt, sources: snapshot.sources, stats: snapshot.stats };
   } finally {
@@ -425,6 +444,258 @@ async function serveTopicCoverage(url, db) {
   return Response.json({ version: 1, topic, links: page, generatedAt: index.generatedAt, nextOffset: position < indexed.length ? position : null }, {
     headers: { ...headers, "Cache-Control": "public, max-age=120, stale-while-revalidate=600" },
   });
+}
+
+const FIRST_ARTICLE_SHARE = `(SELECT MIN(s.posted_at) FROM posts AS s WHERE s.page_id = p.id
+  AND (w.threads IS NULL OR s.id IN (SELECT value FROM json_each(w.threads))))`;
+
+async function firstArticleShares(db, pages) {
+  const ids = await Promise.all(pages.map(({ key }) => fingerprint(key)));
+  const wanted = pages.map(({ posts }, i) => [ids[i], posts?.map(([id]) => id) ?? null]);
+  const { results } = await db.prepare(`
+    WITH wanted AS (SELECT key AS ordinal, value->>0 AS id, value->>1 AS threads FROM json_each(?))
+    SELECT w.ordinal, ${FIRST_ARTICLE_SHARE} AS shared FROM wanted AS w JOIN pages AS p ON p.id = w.id
+  `).bind(JSON.stringify(wanted)).all();
+  return new Map(results.filter(({ shared }) => Number.isFinite(shared)).map(({ ordinal, shared }) => [pages[ordinal].key, shared]));
+}
+
+async function articleCandidates(db, index, topic) {
+  const eligible = await articleMembers(index, topic, (pages) => firstArticleShares(db, pages));
+  const members = eligible.map((page) => ({ ...page, family: articleSourceKey("https://" + page.key) })).filter(({ family }) => family)
+    .sort((a, b) => a.family.localeCompare(b.family) || a.key.length - b.key.length || a.key.localeCompare(b.key));
+  const ids = await Promise.all(members.map(({ key }) => fingerprint(key)));
+  const families = new Map();
+  return members.map(({ key, family, posts, topicIds }, i) => {
+    if (!families.has(family)) families.set(family, families.size);
+    return { key, id: ids[i], family: families.get(family), threads: posts?.map(([id]) => id) ?? null,
+      priority: topicIds.includes(topic.id) ? 0 : 1 };
+  });
+}
+
+async function articleEvidence(db, wanted) {
+  if (!wanted.length) return { pages: [], selected: [] };
+  const parameters = wanted.map(({ id, family, threads, priority }) => [id, family, threads, priority]);
+  const { results } = await db.prepare(`
+    WITH wanted AS (
+      SELECT key AS ordinal, value->>0 AS id, value->>1 AS family, value->>2 AS threads, value->>3 AS priority FROM json_each(?)
+    ), candidates AS MATERIALIZED (
+      SELECT w.ordinal, w.family, w.priority, p.id, p.domain, ${FIRST_ARTICLE_SHARE} AS first_shared
+      FROM wanted AS w JOIN pages AS p ON p.id = w.id
+    ), families AS (
+      SELECT family, MIN(priority) AS priority, MIN(domain) AS domain, MIN(first_shared) AS shared FROM candidates GROUP BY family
+    ), ranked AS (
+      SELECT *, row_number() OVER (PARTITION BY priority, domain ORDER BY shared DESC, family) AS publisher_rank FROM families
+    ), picked AS (
+      SELECT * FROM ranked ORDER BY priority, publisher_rank, shared DESC, family LIMIT ?
+    ), variants AS (
+      SELECT c.ordinal, c.id, p.family, p.shared, p.priority, p.publisher_rank,
+        row_number() OVER (PARTITION BY c.family ORDER BY c.priority, c.ordinal) AS variant
+      FROM picked AS p JOIN candidates AS c ON c.family = p.family
+    )
+    SELECT v.ordinal, v.family, v.shared, p.url, p.domain, p.title, p.description
+    FROM variants AS v JOIN pages AS p ON p.id = v.id WHERE v.variant <= 8
+    ORDER BY v.priority, v.publisher_rank, v.shared DESC, v.family, v.variant
+  `).bind(JSON.stringify(parameters), MAX_ARTICLE_SOURCES).all();
+
+  const pages = new Map();
+  const selected = [];
+  for (const { ordinal, family, shared, url, domain, title, description } of results) {
+    const member = wanted[ordinal];
+    if (canonicalURL(url)?.key !== member.key || !articleSourceKey(url)) continue;
+    let page = pages.get(family);
+    if (!page) {
+      page = { url, domain, title, description, formal: member.priority === 0, firstPostedAt: shared, postedAt: shared, alternateTitles: [], posts: [] };
+      pages.set(family, page);
+    } else {
+      if (member.priority === 0) page.formal = true;
+      page.alternateTitles.push(title);
+      if (!usableTopicTitle(page.description, domain) && usableTopicTitle(description, domain)) page.description = description;
+    }
+    selected.push(wanted[ordinal]);
+  }
+  if (!selected.length) return { pages: [], selected };
+  const threads = await db.prepare(`
+    WITH wanted AS (SELECT value->>'id' AS id, value->>'family' AS family, value->>'threads' AS allowed FROM json_each(?)), copies AS (
+      SELECT w.family, s.*, row_number() OVER (PARTITION BY w.family, s.url ORDER BY s.posted_at DESC, s.changed_at DESC, s.id) AS copy
+      FROM wanted AS w JOIN posts AS s ON s.page_id = w.id
+      WHERE w.allowed IS NULL OR s.id IN (SELECT value FROM json_each(w.allowed))
+    ), ranked AS (
+      SELECT *, row_number() OVER (PARTITION BY family ORDER BY posted_at DESC, id) AS rank FROM copies WHERE copy = 1
+    )
+    SELECT family, id, source, title, url, posted_at AS postedAt, comments FROM ranked WHERE rank <= 12 ORDER BY family, rank
+  `).bind(JSON.stringify(selected)).all();
+  for (const { family, ...post } of threads.results) {
+    const page = pages.get(family);
+    if (!page.posts.length) page.postedAt = post.postedAt;
+    page.posts.push(post);
+  }
+  return { pages: topicPageEvidence([...pages.values()]), selected };
+}
+
+async function readArticleInput(db, id) {
+  const lookup = await db.prepare(`
+    SELECT g.generation, s.topic_id, s.label, s.members, EXISTS(SELECT 1 FROM topics_index WHERE id = 1) AS published
+    FROM topic_article_publication AS g LEFT JOIN topic_article_selections AS r ON r.request_id = ? AND r.generation = g.generation
+    LEFT JOIN topic_article_selections AS s ON s.request_id = r.topic_id AND s.generation = g.generation WHERE g.id = 1
+  `).bind(id).first();
+  const cached = lookup.members && JSON.parse(lookup.members);
+  let topic, pages;
+  if (cached?.version === ARTICLE_SELECTION_VERSION) {
+    topic = { id: lookup.topic_id, label: lookup.label };
+    ({ pages } = await articleEvidence(db, cached.pages));
+  } else {
+    const index = await readPublishedTopics(db);
+    topic = resolvePublishedTopic(index, id);
+    if (!topic) return null;
+    const candidates = await articleCandidates(db, index, topic);
+    const evidence = await articleEvidence(db, candidates);
+    pages = evidence.pages;
+    if (lookup.published && pages.length) {
+      const families = new Set(evidence.selected.map(({ family }) => family));
+      const members = JSON.stringify({ version: ARTICLE_SELECTION_VERSION, pages: candidates.filter(({ family }) => families.has(family)) });
+      if (utf8.encode(members).byteLength <= ARTICLE_BYTES) {
+        const addresses = [topic.id, ...Object.keys(index.redirects || {}).filter((alias) => index.redirects[alias] === topic.id)];
+        await db.prepare(`
+          INSERT INTO topic_article_selections (request_id, generation, topic_id, label, members)
+          SELECT value, g.generation, ?, ?, CASE WHEN value = ? THEN ? ELSE 'null' END
+          FROM json_each(?) JOIN topic_article_publication AS g WHERE g.id = 1 AND g.generation = ?
+          ON CONFLICT(request_id) DO UPDATE SET generation = excluded.generation, topic_id = excluded.topic_id,
+            label = excluded.label, members = excluded.members
+        `).bind(topic.id, topic.label, topic.id, members, JSON.stringify(addresses), lookup.generation).run();
+      }
+    }
+  }
+  const revision = await fingerprint(JSON.stringify([ARTICLE_PIPELINE_VERSION, topic.id, topic.label,
+    pages.map(({ url, title, domain, formal, description, firstPostedAt }) => [url, title, domain, formal, description, firstPostedAt])]));
+  return { topic, pages, revision, generation: lookup.generation };
+}
+
+function articleStatus(status, retryAfter) {
+  const headers = { ...ARTICLE_HEADERS, "Cache-Control": "no-store" };
+  if (retryAfter) headers["Retry-After"] = String(retryAfter);
+  const messages = { 400: "One published topic ID is required", 404: "Topic not found", 503: "Public coverage is temporarily unavailable" };
+  return Response.json(status === 202 ? { status: "generating" } : { error: messages[status] }, { status, headers });
+}
+
+function readArticleRow(db, input) {
+  return db.prepare(`SELECT body, lease_until, retry_at, expires_at FROM topic_articles WHERE topic_id = ? AND revision = ?
+    AND (SELECT generation FROM topic_article_publication WHERE id = 1) = ?`)
+    .bind(input.topic.id, input.revision, input.generation).first();
+}
+
+async function articleResponse(request, input, row) {
+  const now = Date.now();
+  if (!row?.body) {
+    if (row?.retry_at > now) return articleStatus(503, Math.ceil((row.retry_at - now) / 1000));
+    return articleStatus(202, 2);
+  }
+  const article = JSON.parse(row.body);
+  const sources = new Map(input.pages.map((page) => [articleSourceKey(page.url), page]));
+  let remaining = ARTICLE_BYTES - utf8.encode(row.body).byteLength;
+  for (const source of article.sources) {
+    source.discussions = [];
+    for (const discussion of articleDiscussions(sources.get(articleSourceKey(source.url))?.posts || [])) {
+      const bytes = utf8.encode(JSON.stringify(discussion)).byteLength + Number(source.discussions.length > 0);
+      if (bytes > remaining) continue;
+      source.discussions.push(discussion);
+      remaining -= bytes;
+    }
+  }
+  const body = JSON.stringify(article);
+  const etag = '"' + await fingerprint(body) + '"';
+  const headers = { ...ARTICLE_HEADERS, "Cache-Control": "public, no-cache", ETag: etag };
+  if (row.retry_at > now || row.lease_until > now) {
+    headers["Retry-After"] = String(Math.max(2, Math.ceil((row.retry_at - now) / 1000)));
+  }
+  const validators = (request.headers.get("If-None-Match") || "").split(",").map((value) => value.trim().replace(/^W\//, ""));
+  if (validators.includes(etag) || validators.includes("*")) return new Response(null, { status: 304, headers });
+  return new Response(body, { headers });
+}
+
+async function generateArticle(request, env, id, input, owner, claim) {
+  const db = env.TOPICS_DB;
+  let body = claim.body;
+  let retry = true;
+  try {
+    let status;
+    const article = await buildTopicArticle(input.topic, input.pages, {
+      ai: env.AI, fetcher: fetch, now: Date.now(), onStatus: (value) => { status = value; },
+    });
+    for (const source of article.sources) source.discussions = [];
+    const content = JSON.stringify(article);
+    const hasParagraphs = article.sections.some(({ paragraphs }) => paragraphs.length);
+    if (article.sources.length && (hasParagraphs || article.method === "coverage") && utf8.encode(content).byteLength <= ARTICLE_BYTES) {
+      body = content;
+      retry = status === "unavailable" || status === "rejected";
+    }
+  } catch (error) {
+    console.warn("Topic article generation unavailable", error.name);
+  }
+  const current = await readArticleInput(db, id);
+  if (!current || current.topic.id !== input.topic.id || current.revision !== input.revision) {
+    await db.prepare("DELETE FROM topic_articles WHERE topic_id = ? AND revision = ? AND owner = ?")
+      .bind(input.topic.id, input.revision, owner).run();
+    return articleStatus(current ? 202 : 404, current ? 2 : 0);
+  }
+  const now = Date.now();
+  const backoff = ARTICLE_RETRY_MS * 2 ** Math.min(5, claim.failures);
+  const row = await db.prepare(`UPDATE topic_articles SET body = ?, owner = NULL, lease_until = 0,
+    retry_at = ?, failures = ?, expires_at = ? WHERE topic_id = ? AND revision = ? AND owner = ? AND lease_until > ?
+    AND (SELECT generation FROM topic_article_publication WHERE id = 1) = ?
+    RETURNING body, lease_until, retry_at`)
+    .bind(body, retry ? now + backoff : 0, retry ? claim.failures + 1 : 0, now + RETENTION_MS,
+      input.topic.id, input.revision, owner, now, current.generation).first();
+  if (!row) {
+    await db.prepare("UPDATE topic_articles SET owner = NULL, lease_until = 0 WHERE topic_id = ? AND revision = ? AND owner = ?")
+      .bind(input.topic.id, input.revision, owner).run();
+  }
+  return articleResponse(request, current, row || await readArticleRow(db, current));
+}
+
+async function serveTopicArticle(request, url, env, context) {
+  if (url.searchParams.size !== 1 || !url.searchParams.has("id")) return articleStatus(400);
+  const id = url.searchParams.get("id");
+  if (id.length > 272 || !/^(?:topic|story|coverage):[^\s\x00-\x1f]+$/u.test(id)) return articleStatus(404);
+  const db = env.TOPICS_DB;
+  const input = await readArticleInput(db, id);
+  if (!input) return articleStatus(404);
+  if (!input.pages.length) return articleStatus(503, 60);
+  const now = Date.now();
+  const row = await readArticleRow(db, input);
+  if (row && (row.lease_until > now || row.retry_at > now || (row.body && !row.retry_at))) {
+    if (row.expires_at < now + RETENTION_MS / 2) {
+      await db.prepare("UPDATE topic_articles SET expires_at = ? WHERE topic_id = ? AND revision = ?")
+        .bind(now + RETENTION_MS, input.topic.id, input.revision).run();
+    }
+    return articleResponse(request, input, row);
+  }
+
+  const owner = crypto.randomUUID();
+  const claim = await db.prepare(`
+    INSERT INTO topic_articles (topic_id, revision, owner, lease_until, expires_at)
+    SELECT ?, ?, ?, ?, ? FROM topic_article_publication WHERE id = 1 AND generation = ?
+    ON CONFLICT(topic_id, revision) DO UPDATE SET owner = excluded.owner, lease_until = excluded.lease_until, expires_at = excluded.expires_at
+    WHERE topic_articles.lease_until <= ? AND topic_articles.retry_at <= ? AND (topic_articles.body IS NULL OR topic_articles.retry_at > 0)
+    RETURNING body, failures
+  `).bind(input.topic.id, input.revision, owner, now + ARTICLE_LEASE_MS, now + RETENTION_MS, input.generation, now, now).first();
+  if (!claim) return articleResponse(request, input, await readArticleRow(db, input));
+
+  const generation = generateArticle(request, env, id, input, owner, claim).catch(articleStorageError);
+  if (!context?.waitUntil) return generation;
+  context.waitUntil(generation.then(() => {}));
+  let timer;
+  try {
+    return await Promise.race([generation, new Promise((resolve) => {
+      timer = setTimeout(() => resolve(articleStatus(202, 2)), ARTICLE_WAIT_MS);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function articleStorageError(error) {
+  console.warn("Topic article storage unavailable", error.message);
+  return articleStatus(503, 60);
 }
 
 function topicReportStatus(status) {
@@ -559,11 +830,12 @@ async function receiveTopicDecision(request, env, url) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, context) {
     const url = new URL(request.url);
     const { pathname } = url;
     if (pathname === "/internal/review" && request.method === "GET") return serveTopicReviewPage();
     if (pathname === "/api/topics" && ["GET", "HEAD"].includes(request.method)) return serveIndex(request, env.TOPICS_DB);
+    if (pathname === "/api/topics/article" && request.method === "GET") return serveTopicArticle(request, url, env, context).catch(articleStorageError);
     if (pathname === "/api/topics/coverage" && request.method === "GET") return serveTopicCoverage(url, env.TOPICS_DB);
     if (pathname === "/api/topic-reports" && ["OPTIONS", "POST"].includes(request.method)) {
       return receiveTopicReport(request, env);
