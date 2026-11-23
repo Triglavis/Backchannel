@@ -1,4 +1,4 @@
-import { canonicalURL, topicPageEvidence, usableTopicTitle } from "./feeds.mjs";
+import { canonicalURL, publisherArticleKey, topicPageEvidence, usableTopicTitle } from "./feeds.mjs";
 import { coalesceTopics, compatibleStatusTitles, groupPages, informativeTopicAlias, relatedStoryTitles } from "./grouping.mjs";
 import { topicArtworkFitsEdition } from "./artwork.mjs";
 import { applyTopicDecisions } from "./decisions.mjs";
@@ -143,18 +143,50 @@ function comparisonPages(sourcePages, snapshot) {
   return [...pages.values()];
 }
 
-function reconcileRetainedStories({ definitions, assignments, sourcePages, detached, redirects, snapshot, retained }) {
+function articleCopyGroups(definitions, assignments, members) {
+  const articles = new Map();
+  for (const [id, keys] of members) {
+    const topic = definitions.get(id);
+    if (!topic || topic.kind === "topic" || topic.curated) continue;
+    const [first] = keys;
+    const url = "https://" + first;
+    const article = publisherArticleKey(url);
+    if (!article || [...keys].some((key) => {
+      const page = assignments.get(key);
+      return page.reviewed || page.topicIds.some((owner) => definitions.get(owner)?.curated) ||
+        (key !== first && publisherArticleKey("https://" + key) !== article);
+    })) continue;
+    if (!articles.has(article)) articles.set(article, []);
+    articles.get(article).push({ id, url, domain: new URL(url).hostname, title: topic.label });
+  }
+  const groups = [];
+  for (const copies of articles.values()) {
+    for (let start = 0; start + 1 < copies.length; start += MAX_RETAINED_EVIDENCE) {
+      for (const group of groupPages(copies.slice(start, start + MAX_RETAINED_EVIDENCE))) {
+        if (group.pageIds.length < 2) continue;
+        const keys = group.pageIds.flatMap((id) => [...members.get(id)]);
+        const id = group.pageIds.toSorted()[0].replace(/^coverage:/, "story:");
+        groups.push({ ...group, id, keys });
+      }
+    }
+  }
+  return groups;
+}
+
+function reconcilePublishedStories({ definitions, assignments, sourcePages, detached, redirects, snapshot, retained }) {
   const members = topicMembers(assignments);
   const historical = topicMembers(retained);
   const archived = new Set(sourcePages.map(({ id }) => id));
-  const eligible = comparisonPages(sourcePages, snapshot).filter(({ key }) => {
+  const eligible = archived.size ? comparisonPages(sourcePages, snapshot).filter(({ key }) => {
     const page = assignments.get(key);
     return page && !page.reviewed && page.topicIds.every((id) => !definitions.get(id)?.curated);
-  });
+  }) : [];
   const keys = new Map(eligible.map(({ id, key }) => [id, key]));
-  for (const group of groupPages(eligible)) {
-    if (!group.pageIds.some((id) => archived.has(id))) continue;
-    const grouped = new Set(group.pageIds.map((id) => keys.get(id)));
+  const groups = groupPages(eligible).filter(({ pageIds }) => pageIds.some((id) => archived.has(id)))
+    .map((group) => ({ ...group, keys: group.pageIds.map((id) => keys.get(id)) }));
+  groups.push(...articleCopyGroups(definitions, assignments, members));
+  for (const group of groups) {
+    const grouped = new Set(group.keys);
     const prior = new Set();
     for (const key of grouped) for (const id of assignments.get(key).topicIds) {
       const topic = definitions.get(id);
@@ -171,9 +203,13 @@ function reconcileRetainedStories({ definitions, assignments, sourcePages, detac
     const topic = { ...former, id, kind: former?.kind || group.kind, label: group.label, aliases: group.aliases };
     for (const old of prior) {
       appendAliases(topic, definitions.get(old));
-      if (old !== id) redirects.set(old, id);
+      if (old !== id) {
+        redirects.set(old, id);
+        members.delete(old);
+      }
     }
     definitions.set(id, topic);
+    members.set(id, grouped);
     for (const key of grouped) {
       const page = assignments.get(key);
       page.topicIds = [...page.topicIds.filter((old) => !prior.has(old)), id];
@@ -346,9 +382,7 @@ export function buildTopicsIndex(snapshot, previous, decisions = [], threadUpdat
     }
   }
   const manualImages = applyTopicDecisions(definitions, assignments, decisions, redirects);
-  if (previous?.sourcePages?.length) reconcileRetainedStories({
-    definitions, assignments, sourcePages: previous.sourcePages, detached, redirects, snapshot, retained,
-  });
+  reconcilePublishedStories({ definitions, assignments, sourcePages: previous?.sourcePages || [], detached, redirects, snapshot, retained });
   const members = topicMembers(assignments);
   const consolidated = coalesceTopics([...definitions.values()].filter(({ id }) => members.has(id))
     .map((topic) => ({ ...topic, pageIds: [...members.get(topic.id)] })));

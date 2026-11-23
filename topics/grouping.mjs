@@ -1,4 +1,4 @@
-import { topicPageEvidence } from "./feeds.mjs";
+import { publisherArticleKey, topicPageEvidence } from "./feeds.mjs";
 
 const STOP_WORDS = new Set((
   "a an as at by in is it of on or so to up via vs about above after again also among and another are back been before being below both but can could did does doing down each " +
@@ -361,7 +361,8 @@ function eventPage(page) {
   const years = new Set(Array.from(title.matchAll(/\b(?:in|during)\s+(?:\p{L}+\s+)?((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/giu),
     ([, described, dated]) => described || dated));
   return {
-    ...item, eventTerms, actions, details, contextTerms, marketMove, marketNames, versions, heading: item.lower.join(" "),
+    ...item, articleKey: publisherArticleKey(page.url), heading: item.lower.join(" "),
+    eventTerms, actions, details, contextTerms, marketMove, marketNames, versions,
     names: headline.names, incident, stage: offeringStage(title), status, eventAt, years, instructional: INSTRUCTIONAL.test(title),
     headlineTerms, contextEvidence, namedEvidence, qualified: QUALIFIED_CLAIM.test(title),
   };
@@ -405,7 +406,7 @@ function eventScore(left, right) {
   if (elapsed > EVENT_WINDOW &&
     !(left.instructional && right.instructional && shared >= 4 && shared / Math.max(left.eventTerms.size, right.eventTerms.size) >= 0.7)) return 0;
   if (sameHeadline) return 2;
-  if (left.domain === right.domain) return 0;
+  if (left.domain === right.domain && (!left.articleKey || left.articleKey !== right.articleKey)) return 0;
   if (left.stage && right.stage && left.stage !== right.stage) return 0;
 
   const matchesAction = sharedCount(left.actions, right.actions);

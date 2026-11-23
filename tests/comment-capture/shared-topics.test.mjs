@@ -2113,6 +2113,142 @@ test("Unread groups closely matching headlines from different publishers without
 	}
 });
 
+test("All articles and saved lists reserve topic cards for shared coverage and keep incidental phrases as links", async () => {
+	const titles = [
+		"Harbor authority reopens Tidewater Bridge after safety inspection",
+		"Tidewater Bridge reopens after safety inspection by harbor authority",
+		"El observatorio Mirador descubre un anillo alrededor de Neptuno",
+		"Un anillo alrededor de Neptuno descubierto por el observatorio Mirador",
+		"An irrigation district measures the water used by data centers",
+		"An illustrator sketches the façades of abandoned data centers",
+		"Québec revises the timetable for retiring fossil fuels",
+		"A ceramics workshop catalogs pigments derived from fossil fuels",
+		"Las reservas de la costa reciben una nueva especie",
+		"Una biblioteca reconstruye la historia de la cerámica",
+		"Ce lundi les libraires ouvrent une annexe",
+		"Le musée annonce ce lundi sa collection textile",
+		"Um satélite percorre o litoral enquanto isso muda a cartografia",
+		"A orquestra ensaia enquanto isso agrada ao público",
+		"Thieves deploy ransomware against municipal utilities",
+		"A photojournalist examines the human cost of online surveillance",
+		"Building community gardens after the floods in Seville",
+		"Removing community gardens for a new railway in Hamburg",
+	];
+	const rows = titles.map((title, i) => ({ ...guide, id: 10010 + i, title, topic: "technology",
+		url: "https://publisher" + i + ".example/news/" + i, descendants: i + 1 }));
+	const app = await launchTopics({ status: 503, stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: rows },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [] },
+		"HNewhere:collected": rows.map((row) => ({ ...row, key: row.url.slice(8), addedAt: now * 1000 })),
+		"HNewhere:queue": rows.map((row) => ({ ...row, key: row.url.slice(8), addedAt: now * 1000 })),
+	} });
+	try {
+		const { page } = app;
+		await page.goto("https://backchnnl.app/");
+		const list = page.locator("#app-list-body");
+		for (const view of ["all", "source:hn", "queue", "collection"]) {
+			const [previous] = await list.locator(".app-topic-row").elementHandles();
+			await rail(page, view).click();
+			if (previous) await previous.waitForElementState("hidden");
+			await list.locator(".app-topic-row").first().waitFor({ timeout: 5000 });
+			const labels = await list.locator(".app-topic-name").allTextContents();
+			assert.equal(labels.length, 2, view + " " + labels.join(", "));
+			assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(titles.slice(4)), view);
+			for (const members of [titles.slice(0, 2), titles.slice(2, 4)]) {
+				const label = labels.find((label) => members.includes(label.slice(1)));
+				assert(label, view + " " + members.join(", "));
+				await topic(list, label).click();
+				await list.getByRole("link", { name: members[1], exact: true }).waitFor();
+				assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(members), view);
+				await page.getByRole("button", { name: "Back to topics" }).click();
+			}
+		}
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("a published person's name stays available as a filter when the stories describe different events", async () => {
+	const person = { id: "topic:mira-vale", kind: "topic", label: "Mira Vale" };
+	const rows = [
+		{ ...guide, title: "Sculptor Mira Vale donates early prints to a local library", topic: "technology" },
+		{ ...report, title: "A chess coach interviews Mira Vale about her tournament debut", topic: "technology" },
+	];
+	const fixture = { ...catalog, topics: [person], pages: catalog.pages.map((entry) => ({ ...entry, topicIds: [person.id] })) };
+	const app = await launchTopics({ stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: [rows[0]] },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [rows[1]] },
+	}, responses: [{ match: (url) => url === catalogURL, json: fixture }] });
+	try {
+		const { page } = app;
+		await page.goto("https://backchnnl.app/");
+		await rail(page, "all").click();
+		const list = page.locator("#app-list-body");
+		await list.locator(".app-topic-row, .browse-title-link").first().waitFor();
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), []);
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(rows.map((row) => row.title)));
+		assert.equal(await page.getByRole("tab", { name: "Topics", exact: true }).isVisible(), false);
+		const settings = await openTopicFilters(page);
+		await settings.getByRole("searchbox", { name: "Search topics" }).fill(person.label);
+		await settings.getByRole("button", { name: "Hide " + person.label, exact: true }).waitFor();
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("All articles assigns overlapping published coverage to one visible card per link", async () => {
+	const titles = [
+		"City council votes to repair the north bridge",
+		"Town approves funding for north bridge repairs",
+		"Bridge budget clears final council vote",
+		"North bridge traffic is rerouted while repairs proceed",
+		"Transit agency publishes bridge closure detours",
+	];
+	const rows = titles.map((title, i) => ({ ...guide, id: 10110 + i, title, topic: "technology",
+		url: "https://publisher" + i + ".example/dispatch/" + i, descendants: i + 1 }));
+	const definitions = [0, 3].map((i) => ({ id: "story:bridge-" + i, kind: "story", label: titles[i] }));
+	const fixture = { ...catalog, topics: definitions, pages: rows.map(({ url }, i) => ({
+		key: url.slice(8), topicIds: definitions.filter((_, n) => n ? i >= 2 : i <= 2).map(({ id }) => id),
+	})) };
+	const extra = { url: "https://transit.example/closure-map", title: "Map of temporary bridge detours", posts: [] };
+	fixture.pages.push({ key: extra.url.slice(8), topicIds: [definitions[1].id] });
+	const app = await launchTopics({ stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: rows },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [] },
+	}, responses: [{ match: (url) => url === catalogURL, json: fixture }, coverageResponse(definitions[1].id, { json: {
+		version: 1, topic: definitions[1], links: [...rows.slice(2).map(({ title, url }) => ({ title, url, posts: [] })), extra],
+	} })] });
+	try {
+		const { page } = app;
+		await page.goto("https://backchnnl.app/");
+		await rail(page, "all").click();
+		const list = page.locator("#app-list-body");
+		await topic(list, titles[0]).waitFor();
+		assert.equal(await list.locator(".app-topic-row").count(), 2);
+		const shown = await list.locator(".browse-title-link").allTextContents();
+		for (const group of definitions) {
+			await topic(list, group.label).click();
+			await list.getByRole("link", { name: group.label, exact: true }).waitFor();
+			shown.push(...await list.locator(".browse-title-link").allTextContents());
+			if (group === definitions[1]) {
+				await loadHiddenLinks(page).click();
+				await list.getByRole("link", { name: extra.title, exact: true }).waitFor();
+				assert.deepEqual(await list.locator("[data-topic-extra] .browse-title-link").allTextContents(), [extra.title]);
+			}
+			await page.getByRole("button", { name: "Back to topics" }).click();
+		}
+		assert.deepEqual(shown.sort(), [...titles].sort());
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
 test("Topics put separate developments under specific headlines with or without a legacy subject bucket", async () => {
 	const rows = [
 		["Iran war escalates after renewed air strikes", 50],
@@ -2547,4 +2683,179 @@ test("Collection uses meaningful saved discussions and disregards access-page de
 			new URL(url).host + new URL(url).pathname, { description: "Save What Matters", at: now * 1000 },
 		])),
 	} });
+});
+
+async function withEventFeed(articles, check, shared = null) {
+	const stories = articles.map(([title, url, description], i) => ({ ...guide, id: 30100 + i,
+		topic: "technology", title, url, description, time: Date.UTC(2026, 10, 22, 18) / 1000 - 60 * i,
+	}));
+	const app = await launchTopics({ responses: [{ match: (url) => url === catalogURL, status: shared ? 200 : 503, json: shared }], stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [] },
+		...(shared ? { [catalogKey]: { fetchedAt: Date.now(), data: shared } } : {}),
+	} });
+	try {
+		await app.page.goto("https://backchnnl.app/");
+		const list = app.page.locator("#app-list-body");
+		await list.locator(".app-topic-row, .browse-title-link").first().waitFor();
+		await check(list, app.page);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+}
+
+const summitReports = [
+	["Cop31 climate talks break down as key deal rejected", "https://www.theguardian.com/environment/2026/nov/22/cop31-climate-talks-set-to-end-in-deep-division-as-key-deal-rejected"],
+	["Global climate summit collapses as countries fail to agree on moving away from fossil fuels", "https://www.cnn.com/2026/11/22/climate/cop31-summit-collapses-in-fossil-fuel-failure"],
+	["COP31 climate talks fail to reach deal amid fossil fuel and money rows", "https://www.bbc.com/news/articles/cqwy06zrd26lo"],
+	["COP31 climate talks collapse as EU and others reject deal", "https://www.rte.ie/news/world/2026/1122/1600166-cop31-turkey/"],
+	["‘Disappointing’: Delegates react after COP31 climate talks end without deal", "https://www.aljazeera.com/news/2026/11/22/countries-react-after-cop31-climate-talks-end-in-collapse"],
+	["U.N. Climate Talks Collapse in a Bitter Clash Over Fossil Fuels", "https://www.nytimes.com/2026/11/22/climate/cop31-climate-summit-ends-climate.html"],
+	["Cop31 ends with no deal as longest climate summit ever collapses into disarray", "https://www.yahoo.com/news/science/articles/cop31-fails-reach-climate-deal-124907599.html"],
+	["COP31 Declared a Failure as Declaration Text Excludes Mention of Fossil Fuels", "https://truthout.org/video/cop31-declared-a-failure-as-declaration-text-excludes-mention-of-fossil-fuels/"],
+];
+const summitControls = [
+	["Cop31 live: EU and others reject deal as longest climate summit ever faces collapse", "https://www.theguardian.com/environment/live/2026/nov/22/cop31-climate-crisis-talks-turkey-latest-news-updates"],
+	["New COP31 draft deal tabled as countries race to salvage climate talks", "https://www.euronews.com/2026/11/22/new-cop31-draft-deal-tabled-as-countries-scramble-to-salvage-climate-talks"],
+	["International UN talks on controlling use of autonomous weapons collapse", "https://www.theguardian.com/technology/2026/nov/21/international-talks-control-ai-autonomous-weapons-collapse"],
+];
+
+async function expectFeedEvent(list, page, reports, selector = '[data-shared-topic^="reader-story:"]') {
+	const cards = list.locator(selector);
+	assert.equal(await cards.count(), 1, (await cards.allTextContents()).join("\n"));
+	const label = (await cards.locator(".app-topic-name").textContent()).slice(1);
+	assert(reports.some(([title]) => title === label), label);
+	await cards.click();
+	await page.locator("#app-list-topic-title").waitFor();
+	assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(reports.map(([title]) => title)));
+}
+
+test("unindexed reports about a failed summit share a member headline and exclude preliminary negotiations", async () => {
+	await withEventFeed([...summitControls, ...summitReports], (list, page) => expectFeedEvent(list, page, summitReports));
+});
+
+test("new reports join the published summit outcome while a reviewed link stays separate", async () => {
+	const published = { id: "story:summit-result", kind: "story", label: summitReports[5][0] };
+	const anchor = new URL(summitReports[5][1]);
+	const reviewed = new URL(summitReports[4][1]);
+	const data = { ...catalog, topics: [published], pages: [
+		{ key: anchor.hostname + anchor.pathname, topicIds: [published.id] },
+		{ key: "public.example/another-report", topicIds: [published.id] },
+		{ key: reviewed.hostname + reviewed.pathname, reviewed: true, topicIds: [] },
+	] };
+	await withEventFeed([...summitControls, ...summitReports], (list, page) =>
+		expectFeedEvent(list, page, summitReports.filter(([, url]) => url !== reviewed.href), '[data-shared-topic="story:summit-result"]'), data);
+});
+
+test("an overseas policy proposal groups its independently worded reports and excludes other developments in that industry", async () => {
+	const reports = [
+		["Trump wants to ban US companies from building overseas data centers as bans slow development — also considers putting a ‘tremendous tax’ in lieu of prohibition.", "https://www.tomshardware.com/tech-industry/data-centers/trump-wants-to-ban-us-companies-from-building-overseas-data-centers-as-bans-slow-development-also-considers-putting-a-tremendous-tax-in-lieu-of-prohibition"],
+		["Trump threatens ‘tremendous penalties’ on companies that build AI data centers overseas", "https://www.nbcnews.com/business/corporations/trump-data-centers-overseas-penalties-rcna610445"],
+		["Trump vows to stop U.S. companies from building data centers abroad, threatens ‘tremendous tax’", "https://www.cnbc.com/2026/11/20/trump-data-centers-ai-companies-tax.html"],
+		["US tech companies that build AI data centers in other countries will be penalized, Trump says", "https://apnews.com/article/trump-artificial-intelligence-data-centers-f1ac03b73d13445400eeed8631d9d879"],
+	];
+	const controls = [
+		["Meta reconsiders 2030 net-zero goal amid record emissions from AI data centers", "https://arstechnica.com/ai/2026/11/meta-reconsiders-2030-net-zero-goal-amid-record-emissions-from-ai-data-centers/"],
+		["Southeast Asia’s data center boom leaned on Chinese demand. New U.S. rules put that pipeline at risk", "https://www.cnbc.com/2026/11/18/nvidia-us-ai-chip-export-controls-data-centers-.html"],
+	];
+	await withEventFeed([...controls, ...reports], (list, page) => expectFeedEvent(list, page, reports));
+});
+
+test("article milestones, subsidiary election details and shared post headers cannot join distinct feed stories", async () => {
+	const articles = [
+		["Etsy says it will not use sellers' content to train AI after they revolt over policy changes", "https://www.engadget.com/2324090/etsy-not-use-seller-content-train-ai/"],
+		["AI data center power demand will double by 2030 thanks to $4 trillion in spending, adding an entire Great Britain to energy strain — 93 large ‘AI factories’ with projected capacity of around 50 GW.", "https://www.tomshardware.com/tech-industry/data-centers/ai-data-center-power-demand-will-double-by-2030-thanks-to-usd4-trillion-in-spending-adding-an-entire-great-britain-to-energy-strain-93-large-ai-factories-with-projected-capacity-of-around-50-gigawatts"],
+		["Army plans to detonate toxic explosives in Iowa by Tuesday without EPA permit", "https://www.iowapublicradio.org/ipr-news/2026-11-22/army-detonation-toxic-explosives-iowa-tuesday-epa-permit"],
+		["U.S. Army delays planned detonation of unstable explosives in Iowa that could send toxic dust into Illinois", "https://www.cbsnews.com/chicago/news/army-lead-azide-detonation-iowa-toxic-dust-plume/"],
+		["House Democrats to start new Congress with largest majority this century", "https://www.ft.com/content/9d2983a7-196d-4164-a0c1-e262f32fd8c9"],
+		["Republican chair of the House Rules Committee loses reelection in Democrats’ largest majority this century", "https://www.cnn.com/2026/11/22/politics/virginia-foxx-loses-reelection-chuck-hubbard"],
+		["Cross-posted from https://lemmy.world/c/environment | Trees return to the uplands", "https://woods.example/uplands"],
+		["Cross-posted from https://lemmy.world/c/environment | Smog keeps buses indoors", "https://city.example/smog"],
+		["En directo desde la red de noticias de la mañana | Cortes en el metro", "https://local.example/metro"],
+		["En directo desde la red de noticias de la mañana | Abren los colegios", "https://radio.example/colegios"],
+	];
+	await withEventFeed(articles, async (list) => {
+		assert.deepEqual(await list.locator('[data-shared-topic^="reader-story:"] .app-topic-name').allTextContents(), []);
+	});
+});
+
+test("reports of the same death reconcile automatic story IDs and keep another person and another age separate", async () => {
+	const reports = [
+		["Tom Jackson, Broncos star and ESPN ‘Sunday NFL Countdown’ analyst, dead at 75", "https://www.wjtv.com/nfl/tom-jackson-broncos-star-and-espn-sunday-nfl-countdown-analyst-dead-at-75/"],
+		["Tom Jackson, Former NFL Player And Longtime ESPN Analyst, Dead At 75 - TVLine", "https://www.tvline.com/2324393/tom-jackson-dead-espn-denver-broncos-obituary/"],
+		["Tom Jackson, Denver Broncos’ All-Pro Linebacker and ESPN Analyst, Dies at 75", "https://bit.ly/3V6EAXt"],
+		["Former ESPN analyst and NFL linebacker Tom Jackson dies at 75 years old", "https://sports.yahoo.com/nfl/breaking-news/article/former-espn-analyst-and-nfl-linebacker-tom-jackson-dies-at-75-years-old-153737490.html"],
+		["Tom Jackson, former Broncos star and Hall of Fame broadcaster at ESPN, dies at 75 | CNN", "https://www.cnn.com/2026/11/22/sport/tom-jackson-dies-broncos-espn"],
+	];
+	const controls = [
+		["Tom Watson, former NFL player and longtime analyst, dies at 75", "https://sports.example/another-player"],
+		["Tom Jackson, former college analyst, dies at 82", "https://local.example/another-person"],
+		["Tom Jackson, former Broncos star and ESPN analyst, retires at 75", "https://broadcast.example/retirement"],
+		["Tom Jackson, whose former teammate dies at 75, recalls their first game", "https://sports.example/teammate"],
+		["What if Tom Jackson dies at 75?", "https://fiction.example/story"],
+	];
+	const topics = [0, 2].map((n) => ({ id: "story:obituary-" + n, kind: "story", label: reports[n][0] }));
+	const pages = reports.slice(0, 4).map(([, url], n) => {
+		const page = new URL(url);
+		return { key: page.hostname + page.pathname.replace(/\/$/, ""), topicIds: [topics[Math.floor(n / 2)].id] };
+	});
+	await withEventFeed([...reports, ...controls], (list, page) => expectFeedEvent(list, page, reports, ".app-topic-row"), { ...catalog, topics, pages });
+});
+
+test("a shared secondary discussion caption cannot connect articles with unrelated main headlines", async () => {
+	const caption = "Morning dispatch from the Sunday edition of the public radio network";
+	const power = "https://regional.example/hydroelectric-turbine";
+	const birds = "https://journal.example/nesting-grounds";
+	const articles = [["Engineers rebuild the hydroelectric turbine", power], ["Seabirds return to their nesting grounds", birds],
+		[caption, power], [caption, birds]];
+	await withEventFeed(articles, async (list) => {
+		assert.deepEqual(await list.locator('[data-shared-topic^="reader-story:"] .app-topic-name').allTextContents(), []);
+	});
+});
+
+test("a status headline omits a publisher’s follow-up question and keeps the original article title in the group", async () => {
+	const reports = [
+		["The US has officially lost control of measles", "https://www.vox.com/health/510836/us-measles-cases-deaths-elimination-status"],
+		["The U.S. has lost its measles elimination status for the first time in 26 years. Does that mean you’re more at risk?", "https://health.yahoo.com/article/the-us-has-lost-its-measles-elimination-status-for-the-first-time-in-26-years-does-that-mean-youre-more-at-risk-000556981.html"],
+		["The U.S. Just Lost Its Measles Elimination Status. Here’s Why That’s Such A Big Deal.", "https://www.huffpost.com/entry/us-lost-measles-elimination-status-doctors_l_6af23fdde4b0779b5f33a1f4"],
+		["After 26 years, the US has lost its measles elimination status", "https://www.cnn.com/2026/11/13/health/us-measles-elimination-status"],
+		["US has lost measles elimination status, global health authorities say", "https://www.npr.org/2026/11/14/nx-s1-6041119/us-measles-elimination-status-vaccines-cdc-paho"],
+		["The U.S. Has Lost its Measles-Elimination Status. Here's What That Means", "https://time.com/article/2026/11/17/us-loses-measles-elimination-status-what-it-means/"],
+		["The U.S. Has Lost Its Measles-Elimination Status, Data Suggests", "https://www.nytimes.com/2026/11/10/health/measles-united-states-elimination-rfk.html"],
+	];
+	await withEventFeed(reports, async (list) => {
+		const card = list.locator('[data-shared-topic^="reader-story:"]');
+		assert.equal(await card.count(), 1);
+		assert.doesNotMatch(await card.locator(".app-topic-name").textContent(), /\?/);
+		await card.click();
+		await list.getByRole("link", { name: reports[1][0], exact: true }).waitFor();
+	});
+});
+
+test("an intact member headline leads coverage when a second feed cuts off a quotation", async () => {
+	const reports = [
+		["El-Sayed would pass Medicare for All as ‘TrumpCare’: ‘I don’t really care what it’s called", "https://thehill.com/homenews/senate/6235945-abdul-el-sayed-trumpcare-medicare-all/"],
+		["‘Let’s Get to Work,’ Says El-Sayed After President Signals Openness to Trumpcare for All | “I don’t really care what it’s called. I care that the people of this country finally have the unmet promise of guaranteed healthcare,” said the Democratic senator-elect from Michigan.", "https://www.commondreams.org/news/trumpcare"],
+	];
+	await withEventFeed(reports, async (list) => {
+		const card = list.locator('[data-shared-topic^="reader-story:"]');
+		assert.equal(await card.count(), 1);
+		assert.equal(await card.locator(".app-topic-name").textContent(), "#" + reports[1][0].split(" | ")[0]);
+		await card.click();
+		await list.getByRole("link", { name: reports[0][0], exact: true }).waitFor();
+	});
+});
+
+test("an explicitly different agenda or hypothetical outcome stays outside a numbered meeting’s reports", async () => {
+	const reports = [
+		["G20 trade talks break down as fisheries deal rejected", "https://coastal.example/2026/11/22/g20-negotiations"],
+		["Trade summit collapses over fishing subsidies in Brazil", "https://policy.example/2026/11/22/g20-trade-collapse"],
+	];
+	const controls = [
+		["G20 security negotiations collapse after a vote on naval inspections", "https://defense.example/2026/11/22/g20-security-negotiations"],
+		["Could G20 trade talks break down over fisheries?", "https://opinion.example/2026/11/22/g20-possible-scenarios"],
+	];
+	await withEventFeed([...controls, ...reports], (list, page) => expectFeedEvent(list, page, reports));
 });

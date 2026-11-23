@@ -17702,6 +17702,8 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 	const READER_STORY_ACTION_WORDS = new Set(READER_STORY_ACTIONS.map(([word]) => word));
 	const READER_STORY_CONTEXT = /\b(?:attack|blockade|breach|ceasefire|change|closure|decision|election|investigation|launch|negotiations?|protests?|release|revolution|sanctions?|talks|trial|war)\b/i;
 	const READER_MILESTONE_VERBS = [
+		["delay", /\b(?:delays?|delayed|postpones?|postponed|postponing)\b/i],
+		["halt", /\b(?:halts?|halted|pauses?|paused|suspends?|suspended)\b/i],
 		["arrival", /\b(?:arriv(?:es?|ed|ing)|reach(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b/i],
 		["departure", /\b(?:depart(?:s|ed|ing)?|leaves?|leaving|left)\b/i],
 		["opening", /\b(?:opens|opened|opening|begins?|began|beginning|starts?|started|starting)\b/i],
@@ -17811,6 +17813,27 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			!/^(?:reports?|reportedly|coverage|developments?)$/.test(word)).map(readerSubjectTerm));
 	}
 
+	function readerFailedNegotiation(title) {
+		if (!title || /\b(?:what if|could|might|may|risks?|faces?|avert|prevent)\b[^,;:.!?]*\bcollaps/i.test(title)) return false;
+		if (/\b[a-z]{1,12}\d{1,4}\s+(?:(?:ends?|ended) (?:without|with no) (?:an? )?(?:agreement|deal)|(?:(?:is|was|has been) )?declared a failure)\b/i.test(title) &&
+			/\b(?:talks|negotiations?|summit|agreement|declaration)\b/i.test(title)) return true;
+		return /\b(?:talks|negotiations?|summit|agreement)\s+(?:(?:has|have|finally)\s+)*(?:collaps(?:es?|ed)|(?:breaks?|broke|broken) down|(?:falls?|fell|fallen) apart|(?:ends?|ended) (?:without|with no) (?:an? )?(?:agreement|deal)|fail(?:s|ed)? to (?:reach|secure|agree on) (?:an? )?(?:agreement|deal))\b|\bcollapse of (?:[\p{L}\p{N}.-]+ ){0,4}(?:talks|negotiations?|summit)\b/iu.test(title);
+	}
+
+	function readerProposedRestriction(title) {
+		return /\b(?:propos(?:es?|ed)|seeks?|threaten(?:s|ed)?|vows?|wants? to|plans? to|will)\b/i.test(title) &&
+			/\b(?:bans?|curbs?|penalt(?:y|ies)|penali[sz](?:es?|ed)|prohibit(?:ion|s)?|restrictions?|tax(?:es)?)\b/i.test(title);
+	}
+
+	function readerObituary(title) {
+		const death = /\b(?:dead|died|dies)\s+(?:at (?:the age of |age )?|aged?\s+)(\d{1,3})\b/i.exec(title);
+		if (!death) return "";
+		const before = title.slice(0, death.index).trim();
+		const name = before.endsWith(",") && /^([\p{Lu}][\p{Ll}’'-]+(?:\s+[\p{Lu}][\p{Ll}’'-]+){1,3})\s*,/u.exec(before) ||
+			/([\p{Lu}][\p{Ll}’'-]+(?:\s+[\p{Lu}][\p{Ll}’'-]+){1,3})$/u.exec(before);
+		return name ? name[1].toLowerCase() + ":" + death[1] : "";
+	}
+
 	function readerUsableTopicTitle(value) {
 		if (typeof value !== "string") return false;
 		const title = value.trim().split(/\s+[|–—]\s+/)[0].replace(/[.!…]+$/, "");
@@ -17888,7 +17911,19 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		return { names, key: [direction, claim, negated, ...terms].join(":"), stated: claim === "stated" && !negated, year: year && Number(year[1] || year[2]) };
 	}
 
-	function readerLinkSubjectGroups(items, index) {
+	function readerReferenceSubject(text) {
+		const title = text.trim().split(/:\s+/).at(-1);
+		const guide = /^(?:an? |the )?(?:(?:practical|beginner['’]s) )?(?:guide|introduction|tutorial) (?:on|to) (.+)$/i.exec(title) ||
+			/^(.+?)\s+(?:guide|tutorial|for beginners)\b/i.exec(title);
+		const method = /^(?:(?:how to\s+\p{L}+)|(?:\p{L}{3,}ing))\s+(.+)$/iu.exec(title);
+		const history = /^(?:an? |the )?(?:oral |illustrated )?history of /i.test(title);
+		const subject = guide?.[1] || method?.[1] || (history ? title : "");
+		const focus = subject.replace(/^(?:an? |the )?(?:practical )?/i, "").split(/\s+(?:across|after|before|by|during|for|in|on|to|with|without)\s+/i)[0];
+		const words = readerSubjectWords(focus.toLowerCase());
+		return words.length >= 2 && words.length <= 5 ? { key: words.join(" "), explicit: Boolean(guide || history) } : null;
+	}
+
+	function readerLinkSubjectGroups(items, index, saved) {
 		const nameFor = (label) => readerSubjectWords(label).join(" ").toLowerCase();
 		const namedTopics = [...(index?.topics.values() || [])].filter((topic) => topic.kind === "topic");
 		const published = new Map(namedTopics.map((topic) => [nameFor(topic.label), topic]));
@@ -17911,6 +17946,12 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 				hasDevelopment: Boolean(readerTitleMilestone(item.titles[0]) || readerStatusChange(item.titles[0])) }));
 		const phrases = new Map();
 		for (const entry of entries) {
+			entry.references = new Map();
+			for (const text of [...entry.titles, entry.description]) {
+				const subject = readerReferenceSubject(text);
+				if (subject) entry.references.set(subject.key, subject.explicit || text === entry.description || entry.references.get(subject.key) === true);
+			}
+			entry.slug = nameFor(entry.paths.at(-1));
 			for (const text of [...entry.titles, ...entry.paths, entry.description]) {
 				const words = readerSubjectWords(text);
 				const lower = words.map((word) => word.toLowerCase());
@@ -17944,21 +17985,29 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		const memberships = new Set();
 		const covered = new Set(entries.filter(({ url }) =>
 			index?.pages.get(sharedTopicURLKey(url))?.some((id) => index.topics.get(id).kind === "topic")));
-		const add = (topic, members) => {
+		const add = (topic, members, cardMembers, documented = cardMembers.length > 0) => {
 			const name = nameFor(topic.label);
-			if (!groups.has(name)) groups.set(name, { ...(published.get(name) || topic), nameOnly: topic.nameOnly, rows: new Set() });
+			if (!groups.has(name)) groups.set(name, { ...(published.get(name) || topic), nameOnly: topic.nameOnly, rows: new Set(), cardRows: new Set() });
 			const group = groups.get(name);
+			group.documented ||= documented;
 			for (const entry of members) {
 				group.rows.add(entry.row);
 				covered.add(entry);
 			}
+			for (const entry of cardMembers) {
+				group.cardRows.add(entry.row);
+			}
 		};
 		for (const { key, topic, words, entries: matches, nameOnly } of candidates) {
 			const membership = matches.map(({ position }) => position).join(",");
-			if (!topic && memberships.has(membership)) continue;
+			const reference = matches.some((entry) => entry.references.has(key));
+			if (!topic && !reference && memberships.has(membership)) continue;
 			memberships.add(membership);
+			const confirmed = reference && (matches.some((entry) => entry.references.get(key) || entry.slug === key) ||
+				saved && words.filter((word) => readerSubjectWord(word.toLowerCase())).length >= 3);
+			const cardMembers = confirmed ? matches.filter((entry) => entry.references.has(key) || entry.slug === key) : [];
 			add({ ...(topic || { id: "collection-subject:" + key, label: readerSubjectLabel(words), kind: "topic" }),
-				nameOnly: nameOnly || !topic && matches.every((entry) => entry.hasDevelopment) }, matches);
+				nameOnly: nameOnly || !topic && matches.every((entry) => entry.hasDevelopment) }, matches, cardMembers);
 		}
 
 		for (const entry of entries) {
@@ -17970,17 +18019,19 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			const named = readerNamedPageSubject(entry.url);
 			const declared = sectionWords.length <= 5 && sectionWords.some((word) => readerSubjectWord(word.toLowerCase())) ? section : "";
 			if (!entry.titles.length && !entry.description && !named && !declared) continue;
-			const label = named || cue?.[0] || declared || entry.subjects?.[0] || readerPublisherSubject(entry.url);
+			const label = named || declared || cue?.[0] || entry.subjects?.[0] || readerPublisherSubject(entry.url);
 			if (label) {
 				const key = readerSubjectWords(label).join(" ").toLowerCase();
-				add(published.get(key) || { id: "reader-subject:" + key, label, kind: "topic" }, [entry]);
+				add(published.get(key) || { id: "reader-subject:" + key, label, kind: "topic" }, [entry],
+					saved && (named || declared || cue) ? [entry] : [], Boolean(named || declared || cue?.[1].test(entry.description)));
 				continue;
 			}
 			for (const { id, label } of TOPICS) {
-				if (entry.tags?.has(id)) add({ id: "collection-tag:" + id, label, kind: "topic" }, [entry]);
+				if (entry.tags?.has(id)) add({ id: "collection-tag:" + id, label, kind: "topic" }, [entry], []);
 			}
 		}
-		return [...groups.values()].map((group) => ({ ...group, rows: [...group.rows] }));
+		return [...groups.values()].map(({ documented, cardRows, rows, ...topic }) =>
+			({ ...topic, rows: [...rows], cardRows: documented ? [...cardRows] : [] }));
 	}
 
 	function readerCollectionSubjectGroups(documents, tagsByPage, index) {
@@ -17991,7 +18042,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			description: doc.look?.description,
 			section: doc.look?.section,
 			tags: tagsByPage.get(doc.key),
-		})), index);
+		})), index, true);
 	}
 
 	function readerStorySubjectEvidence(stories) {
@@ -18003,13 +18054,13 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		};
 	}
 
-	function readerStorySubjectGroups(rows, storyFor, coverage, index) {
+	function readerStorySubjectGroups(rows, storyFor, coverage, index, saved = false) {
 		return readerLinkSubjectGroups(rows.map((row) => {
 			const stories = storyFor(row);
 			const { url, title } = stories[0];
 			const tags = coverage?.articles.get(normalizeURL(url))?.tags;
 			return { row, url, ...readerStorySubjectEvidence(stories), tags: tags || readerHeadlineTags(title) };
-		}), index);
+		}), index, saved);
 	}
 
 	function readerArticleCoverage(stories, settings, hiddenKeys) {
@@ -18060,16 +18111,48 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		return shared >= 5 && score >= .8 ? score : 0;
 	}
 
+	function readerEventTerms(title) {
+		const text = title.replace(/https?:\/\/\S+/gi, " ").replace(/\b(?:abroad|in (?:other|foreign) countries|outside (?:their|the) (?:home )?country)\b/gi, "overseas")
+			.replace(/\b(?:penali[sz](?:es?|ed|ing)|penalties)\b/gi, "penalty").replace(/\bfirms?\b/gi, "company");
+		return new Set([...readerStoryTerms(text)].map((word) => word.length >= 7 && word.endsWith("ing") ? word.slice(0, -3) : word));
+	}
+
+	function readerEventHeadline(title) {
+		const segments = title.split(/\s+[|｜]\s+/);
+		const terms = readerEventTerms(title);
+		const first = readerEventTerms(title.split(/\s+(?:after|amid|as|despite|during|following|in|while)\s+/i)[0]);
+		return { segments, terms, first: first.size >= 3 ? first : terms, proposedRestriction: readerProposedRestriction(title) };
+	}
+
 	function readerStorySimilarity(headline, other) {
 		if (headline.numbers && other.numbers && headline.numbers !== other.numbers) return 0;
-		const left = headline.topicTerms ??= readerStoryTerms(headline.story.title);
-		const right = other.topicTerms ??= readerStoryTerms(other.story.title);
+		let a = headline.event ??= readerEventHeadline(headline.story.title);
+		let b = other.event ??= readerEventHeadline(other.story.title);
+		if (a.segments.length > 1 && b.segments.length > 1 && headline.story.title !== other.story.title) {
+			const sameStart = a.segments[0] === b.segments[0];
+			const sameEnd = a.segments.at(-1) === b.segments.at(-1);
+			if (sameStart || sameEnd) {
+				a = readerEventHeadline(a.segments.slice(sameStart ? 1 : 0, sameEnd ? -1 : undefined).join(" "));
+				b = readerEventHeadline(b.segments.slice(sameStart ? 1 : 0, sameEnd ? -1 : undefined).join(" "));
+			}
+		}
+		const left = a.terms;
+		const right = b.terms;
+		if (a.proposedRestriction !== b.proposedRestriction) return 0;
 		const terms = [...left].filter((word) => right.has(word));
 		const shared = terms.length;
 		if (shared < 3) return 0;
 		const overlap = shared / (left.size + right.size - shared);
 		const contained = shared / Math.min(left.size, right.size);
-		if (overlap >= .62 || shared >= 4 && overlap >= .37 && contained >= .67) return overlap + .5;
+		if (overlap >= .62) return overlap + .5;
+		if (terms.filter((term) => a.first.has(term)).length < 2 || terms.filter((term) => b.first.has(term)).length < 2) return 0;
+		if (shared >= 4 && overlap >= .37 && contained >= .67) return overlap + .5;
+		if (a.proposedRestriction && shared >= 6) {
+			for (const [lead, full] of [[a.first, right], [b.first, left]]) {
+				const common = terms.filter((term) => lead.has(term)).length;
+				if (common >= 6 && common / (lead.size + full.size - common) >= .44 && common / Math.min(lead.size, full.size) >= 2 / 3) return overlap;
+			}
+		}
 		return terms.some((word) => READER_STORY_ACTION_WORDS.has(word)) && overlap >= .32 && contained >= .6 ? overlap : 0;
 	}
 
@@ -18701,7 +18784,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		const reader = appState?.ui === ui;
 		const coverage = appState && entries.length ? await loadReaderArticleCoverage(entries) : null;
 		const projection = reader ? await appSavedTopicProjection(entries, (entry) => entry.url,
-			(index) => readerStorySubjectGroups(entries, (entry) => [entry], coverage, index), coverage) : null;
+			(index) => readerStorySubjectGroups(entries, (entry) => [entry], coverage, index, true), coverage) : null;
 
 		if (!isCurrent()) {
 			return;
@@ -47497,7 +47580,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 		if (queue.length) {
 			const coverage = readerArticleCoverage([...stories, ...queue], settings, hiddenKeys);
-			const local = readerStorySubjectGroups(queue, (entry) => [entry], coverage, index);
+			const local = readerStorySubjectGroups(queue, (entry) => [entry], coverage, index, true);
 			const groups = readerTopicGroups(queue, (entry) => entry.url, local, index, coverage);
 			scopes.push(["queue", "Queue", queue, groups]);
 		}
@@ -47981,7 +48064,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const known = new Set([...group.rows, ...group.extraRows].map((row) => sharedTopicURLKey(appTopicRowURL(row))));
 		const ids = [];
 		for (const id of new Set([group.id, ...(group.equivalentIds || [])])) {
-			const extra = [...(index?.topicPages.get(id) || [])].filter((key) => !known.has(key) && allowed(key));
+			const extra = [...(index?.topicPages.get(id) || [])].filter((key) => !known.has(key) && !group.assignedElsewhere?.has(key) && allowed(key));
 			if (!extra.length) continue;
 			ids.push(id);
 			for (const key of extra) known.add(key);
@@ -48035,7 +48118,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		};
 		const allowed = (key) => !hidden.has(normalizeURL("https://" + key)) && !index?.pages.get(key)?.some(mutedTopic);
 		const matchesMuted = readerHiddenTopicMatcher(settings.hiddenTopics, muted);
-		const canShow = (entry) => !isStoryHidden(entry.story, hidden) && allowed(sharedTopicURLKey(entry.story.url)) && !matchesMuted(entry);
+		const canShow = (entry) => {
+			const key = sharedTopicURLKey(entry.story.url);
+			return !group.assignedElsewhere?.has(key) && !isStoryHidden(entry.story, hidden) && allowed(key) && !matchesMuted(entry);
+		};
 		const local = group.extraRows.map((row) => row.story ? row : { story: row.discussions ? documentStory(row) : row, also: row.discussions || [] });
 		const extra = state.topicExtra;
 		const ids = appTopicExtraIndexIds(group, index, allowed);
@@ -48123,6 +48209,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	].map(topicFilterKey));
 
 	function readerTopicIsSpecific(group) {
+		if (group.filterOnly) return false;
 		if (group.curated) return true;
 		const key = topicFilterKey(group.label);
 		if (READER_BROAD_TOPIC_LABELS.has(key) || group.nameOnly || !readerHasTopicContent(group.label)) return false;
@@ -48189,7 +48276,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 					!published && termsFor(group.label).size > termsFor(other.label).size) ? group : other;
 				const aliases = normalizeTopicLabels([...readerTopicLabels(other), ...readerTopicLabels(group)])
 					.filter((label) => topicFilterKey(label) !== topicFilterKey(primary.label));
-				const equivalentIds = [...new Set([other.id, group.id, ...(other.equivalentIds || [])])];
+				const equivalentIds = [...new Set([other.id, group.id, ...(other.equivalentIds || []), ...(group.equivalentIds || [])])];
 				merged[slot] = { ...primary, image: primary.image || other.image || group.image, aliases, equivalentIds,
 					rows: [...new Set([...other.rows, ...group.rows])].sort((a, b) => order.get(a) - order.get(b)) };
 			}
@@ -48220,12 +48307,15 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 		const order = new Map(rows.map((row, position) => [row, position]));
 		const existing = new Map(groups.map((group) => [group.id, group]));
+		const filterGroups = [];
 		for (const group of localGroups) {
 			if (index?.topics.get(group.id)?.curated) continue;
 			const shared = index?.topics.has(group.id);
 			const match = existing.get(group.id);
 			if (match && group.nameOnly) match.nameOnly = true;
-			const visible = group.rows.filter((row) => order.has(row) && (!shared || !assigned.has(row)));
+			if (coverage && group.cardRows.length !== group.rows.length) filterGroups.push({ ...group, filterOnly: true });
+			const members = coverage ? group.cardRows : group.rows;
+			const visible = members.filter((row) => order.has(row) && (!shared || !assigned.has(row)));
 			if (!visible.length) continue;
 			if (match) {
 				match.rows = [...new Set([...match.rows, ...visible])].sort((a, b) => order.get(a) - order.get(b));
@@ -48237,7 +48327,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			}
 		}
 		if (coverage) groups.push(...readerUnindexedStoryGroups(rows, urlFor, coverage, index, localGroups));
-		return mergeReaderTopicGroups(groups, order, index);
+		return mergeReaderTopicGroups(groups, order, index).concat(filterGroups);
 	}
 
 	function readerMemberEvidence(row, url, article) {
@@ -48247,8 +48337,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				if (readerUsableTopicTitle(story.title)) titles.push(story.title.trim());
 			}
 		}
+		const path = readerSubjectPaths(url).at(-1) || "";
 		const context = new Set();
-		for (const text of [readerSubjectPaths(url).at(-1), row.look?.description, (row.story || row).description]) {
+		for (const text of [path, row.look?.description, (row.story || row).description]) {
 			if (text && readerUsableTopicTitle(text)) for (const term of readerStoryTerms(text)) context.add(term);
 		}
 		const support = new Set(context);
@@ -48261,6 +48352,15 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 		const title = titles[0];
 		const statusChange = readerStatusChange(title);
+		const question = /^(?:what if\b|(?:could|would|might|may|can|will|should|has|have|does|did|is|are)\b.*\?)/i.test(title || "");
+		const obituary = !question && readerObituary(title);
+		if (obituary) return { titles, support, dated, obituary };
+		if (!question && readerFailedNegotiation(title)) {
+			const series = new Set((title + " " + path).toLowerCase().match(/\b[a-z]{1,12}\d{1,4}\b/g) || []);
+			const modifier = /\b(\p{L}+)\s+(?:talks|negotiations?|summit|agreement)\b/iu.exec(title)?.[1];
+			const agenda = modifier && modifier !== modifier.toUpperCase() ? [...readerStoryTerms(modifier)][0] : "";
+			return { titles, support, dated, failedNegotiation: true, series, agenda };
+		}
 		const milestone = readerTitleMilestone(title);
 		if (!milestone || statusChange) return { titles, support, dated, statusChange };
 		const before = title.slice(0, milestone.start);
@@ -48276,8 +48376,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	}
 
 	function readerSameActor(left, right) {
-		return left.actors.some((terms) => terms.every((term) => right.actorContext.has(term))) ||
-			right.actors.some((terms) => terms.every((term) => left.actorContext.has(term)));
+		const appearsIn = (terms, member) => member.actors.length
+			? member.actors.some((name) => terms.every((term) => name.includes(term)))
+			: terms.every((term) => member.actorContext.has(term));
+		return left.actors.some((terms) => appearsIn(terms, right)) || right.actors.some((terms) => appearsIn(terms, left));
 	}
 
 	function readerCompatibleMembers(left, right) {
@@ -48291,7 +48393,14 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			}
 			return [...left.statusChange.names].some((name) => right.statusChange.names.has(name));
 		}
-		if (Math.abs(left.dated - right.dated) > READER_COVERAGE_WINDOW) return false;
+		if (Math.abs(Math.floor(left.dated / 86400) - Math.floor(right.dated / 86400)) * 86400 > READER_COVERAGE_WINDOW) return false;
+		if (left.obituary || right.obituary) return left.obituary === right.obituary;
+		if (left.failedNegotiation || right.failedNegotiation) {
+			return left.failedNegotiation && right.failedNegotiation && (!left.agenda || !right.agenda || left.agenda === right.agenda) &&
+				(!left.series.size || !right.series.size || [...left.series].some((name) => right.series.has(name)));
+		}
+		if ((left.milestone === "delay" || right.milestone === "delay") &&
+			left.milestone !== right.milestone) return false;
 		if (!left.milestone || !right.milestone) return true;
 		return left.milestone === right.milestone && !(left.numbers && right.numbers && left.numbers !== right.numbers) &&
 			(!left.targets.size || !right.targets.size || [...left.targets].some((term) => right.targets.has(term))) &&
@@ -48301,23 +48410,27 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	function readerStoryLead(members) {
 		const frequency = new Map();
 		for (const { support } of members) for (const term of support) frequency.set(term, (frequency.get(term) || 0) + 1);
-		const candidates = members.flatMap((member) => member.titles.map((sourceTitle) => {
-			let title = sourceTitle;
+		const candidates = members.map((member) => {
+			let title = member.titles[0];
+			const excerpt = /\s+\|\s+["“‘].{60,}$/u.exec(title);
+			if (excerpt && readerStoryTerms(title.slice(0, excerpt.index)).size >= 3) title = title.slice(0, excerpt.index);
 			if (member.statusChange) {
-				const concise = title.replace(/(?:[.!?:]\s+|\s+[–—]\s+)(?:here['’]s (?:what|how|why)|what (?:now|it means|that means|happens next))\b.*$/i, "");
+				const concise = title.replace(/(?:[.!?:]\s+|\s+[–—]\s+)(?:(?:here['’]s (?:what|how|why)|what (?:now|it means|that means|happens next))\b.*|does (?:this|that) mean\b[^?]*\?)$/i, "");
 				if (concise !== title && readerStatusChange(concise)) title = concise;
 			}
 			const shared = [...readerStoryTerms(title)].filter((term) => frequency.get(term) > 1);
 			const score = shared.reduce((sum, term) => sum + frequency.get(term) - 1, 0);
 			const qualified = shared.length >= 2 && /\b(?:alleged(?:ly)?|apparent(?:ly)?|reportedly|suspected|may have|investigat(?:es?|ing|ion))\b/i.test(title);
-			return { title, qualified, score: score - (/(?:\.{3}|…)$/.test(title) ? members.length : 0) };
-		}));
-		return candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || b.score - a.score ||
+			const unfinished = /(?:\.{3}|…)$|“[^”]*$|‘[^’]*$/.test(title.replace(/(?<=\p{L})’(?=\p{L})/gu, ""));
+			return { title, qualified, score, unfinished };
+		});
+		return candidates.sort((a, b) => Number(b.qualified) - Number(a.qualified) || Number(a.unfinished) - Number(b.unfinished) || b.score - a.score ||
 			a.title.length - b.title.length || a.title.localeCompare(b.title))[0].title;
 	}
 
 	function readerUnindexedStoryGroups(rows, urlFor, coverage, index, subjects) {
 		const available = new Map();
+		const remaining = new Map();
 		const evidence = new Map();
 		const byTarget = new Map();
 		const published = new Map();
@@ -48329,15 +48442,17 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (!key || index?.reviewedPages.has(sharedKey) || ids.some((id) => index.topics.get(id).curated)) continue;
 			const storyId = ids.find((id) => index.topics.get(id).kind === "story" && index.topicPages.get(id)?.size > 1);
 			const member = readerMemberEvidence(row, url, coverage.articles.get(key));
+			if (!member.titles.length) continue;
+			member.headline = { story: { title: member.titles[0] }, numbers: (member.titles[0].match(/\p{N}+(?:[.,]\p{N}+)*/gu) || []).join(" ") };
 			const signatures = member.statusChange ? [...member.statusChange.names].map((name) => member.statusChange.key + ":" + name) :
+				member.obituary ? ["obituary:" + member.obituary] :
+				member.failedNegotiation ? [...member.series].map((name) => "failed negotiation:" + name) :
 				[...(member.targets || [])].map((target) => member.milestone + ":" + target);
 			member.signatures = signatures;
 			if (storyId) {
 				if (!published.has(storyId)) published.set(storyId, []);
-				published.get(storyId).push({ row, member });
-				continue;
-			}
-			if (!member.titles.length) continue;
+				published.get(storyId).push(key);
+			} else remaining.set(key, row);
 			available.set(key, row);
 			evidence.set(key, member);
 			for (const signature of signatures) {
@@ -48345,16 +48460,15 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				byTarget.get(signature).push(key);
 			}
 		}
-		const remaining = new Map(available);
 		const links = new Map();
 		const neighbors = (key) => {
 			if (!links.has(key)) {
 				const member = evidence.get(key);
 				const matches = new Set(relatedReaderArticles(coverage, urlFor(available.get(key)), available.size, readerStorySimilarity)
-					.map(({ story }) => normalizeURL(story.url)).filter((url) => available.has(url)));
+					.map(({ story }) => normalizeURL(story.url)).filter((url) => available.has(url) && readerStorySimilarity(member.headline, evidence.get(url).headline)));
 				for (const signature of member.signatures) {
 					for (const other of byTarget.get(signature)) {
-						if (key !== other && (member.statusChange || readerSameActor(member, evidence.get(other)))) matches.add(other);
+						if (key !== other && (member.statusChange || member.obituary || member.failedNegotiation || readerSameActor(member, evidence.get(other)))) matches.add(other);
 					}
 				}
 				links.set(key, new Set([...matches].filter((url) => readerCompatibleMembers(member, evidence.get(url)))));
@@ -48362,19 +48476,27 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			return links.get(key);
 		};
 		const groups = [];
-		for (const [id, anchors] of published) {
-			const members = anchors.map(({ member }) => member);
-			if (!members.every((member) => member.statusChange)) continue;
-			const candidates = new Set(members[0].signatures.flatMap((key) => byTarget.get(key) || []));
-			const extensions = [];
-			for (const key of candidates) {
-				const member = evidence.get(key);
-				if (!remaining.has(key) || !members.every((other) => readerCompatibleMembers(member, other))) continue;
-				extensions.push(remaining.get(key));
-				members.push(member);
-				remaining.delete(key);
+		const publishedGroups = [];
+		for (const [id, keys] of published) {
+			const first = evidence.get(keys[0]);
+			const same = first.obituary && publishedGroups.find(({ anchors }) =>
+				keys.every((key) => anchors.every((other) => readerCompatibleMembers(evidence.get(key), evidence.get(other)))));
+			if (same) {
+				same.anchors.push(...keys);
+				same.ids.push(id);
+			} else publishedGroups.push({ ids: [id], anchors: keys });
+		}
+		for (const { ids, anchors } of publishedGroups) {
+			const members = [...anchors];
+			for (const other of neighbors(anchors[0])) {
+				if (!remaining.has(other) || !members.every((key) => neighbors(key).has(other))) continue;
+				members.push(other);
+				remaining.delete(other);
 			}
-			if (extensions.length) groups.push({ ...index.topics.get(id), rows: [...anchors.map(({ row }) => row), ...extensions] });
+			if (members.length > anchors.length || ids.length > 1) {
+				const primary = ids.toSorted((a, b) => index.topicPages.get(b).size - index.topicPages.get(a).size || a.localeCompare(b))[0];
+				groups.push({ ...index.topics.get(primary), equivalentIds: ids, rows: members.map((key) => available.get(key)) });
+			}
 		}
 		for (const key of remaining.keys()) {
 			const members = [key];
@@ -48540,23 +48662,28 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		if (!topicGroups) return { rows };
 		const order = new Map(rows.map((row, position) => [row, position]));
 		const available = new Set(availableRows);
-		const ranked = [];
-		const assignments = new Map();
-		for (const group of topicGroups) {
-			if (!readerTopicIsSpecific(group)) continue;
-			const priority = group.rows.length < 2 ? 0 : group.curated ? 4 : group.kind === "story" ? 3 :
-				index?.topics.has(group.id) ? (group.kind === "coverage" ? 1 : 2) : 0;
-			ranked.push({ group, priority });
-			if (priority) for (const row of group.rows) assignments.set(row, Math.max(priority, assignments.get(row) || 0));
-		}
+		const ranked = topicGroups.filter(readerTopicIsSpecific).map((group) => {
+			const members = group.rows.filter((row) => available.has(row));
+			const visible = members.reduce((total, row) => total + Number(order.has(row)), 0);
+			const published = Number(Boolean(index?.topics.has(group.id)));
+			const priority = members.length < 2 ? 0 : group.curated ? 5 : group.kind === "story" ? 4 :
+				published ? (group.kind === "coverage" ? 2 : 3) : 1;
+			return { group, members, visible, published, priority };
+		}).sort((a, b) => b.priority - a.priority || Number(b.visible >= 2) - Number(a.visible >= 2) ||
+			b.published - a.published || b.members.length - a.members.length || a.group.id.localeCompare(b.group.id));
+		const claimed = new Set();
 		const groups = [];
 		const matches = (group, id) => group.id === id || group.equivalentIds?.includes(id);
-		for (const { group, priority } of ranked) {
-			const members = group.rows.filter((row) => priority >= (assignments.get(row) || 0));
-			if (members.length === 1 && group.rows.length > 1) continue;
+		for (const { group, members: candidates } of ranked) {
+			const members = candidates.filter((row) => !claimed.has(row));
+			if (members.length < 2 && members.length !== candidates.length) continue;
 			const visible = members.filter((row) => order.has(row));
-			const extraRows = members.filter((row) => available.has(row) && !order.has(row));
-			if (visible.length || matches(group, topicId) && extraRows.length) groups.push({ ...group, rows: visible, extraRows });
+			const extraRows = members.filter((row) => !order.has(row));
+			if (!visible.length && !(matches(group, topicId) && extraRows.length)) continue;
+			const assignedElsewhere = members.length === candidates.length ? null :
+				new Set(candidates.filter((row) => claimed.has(row)).map((row) => sharedTopicURLKey(appTopicRowURL(row))));
+			groups.push({ ...group, rows: visible, extraRows, assignedElsewhere });
+			if (members.length >= 2) for (const row of members) claimed.add(row);
 		}
 		groups.sort((a, b) => Number(b.rows.length > 1) - Number(a.rows.length > 1) ||
 			(order.get(a.rows[0]) ?? rows.length) - (order.get(b.rows[0]) ?? rows.length));

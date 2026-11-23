@@ -485,6 +485,58 @@ test("a public story keeps its ID as links arrive and leave the live window", ()
   }
 });
 
+test("publisher sharing links keep one story address across headline changes and partial refreshes", () => {
+  const paper = "www.nytimes.com/2026/11/22/climate/cop31-climate-summit-ends-climate.html";
+  const guardian = "www.theguardian.com/news/2026/nov/22/bank-of-england-directors-cuba";
+  const original = "U.N. Climate Talks Collapse in a Bitter Clash Over Fossil Fuels";
+  const updated = "COP31 Talks Collapse in Turkey in a Clash Over Fossil Fuels";
+  const bank = "Bank of England directors illegally profited from post-abolition enslavement in Cuba";
+  const records = [
+    [paper, "story:original", original],
+    [paper + "?smid=ios-share", "story:original", original],
+    [paper + "?smid=android-share", "story:replacement", updated],
+    [paper + "?unlocked_article_code=gift", "story:gift", updated + " (Gift Article)"],
+    [paper + "?edition=commentary&smid=ios-share", "story:edition", updated],
+    [paper + "?smid=browser-share", "story:reviewed", updated],
+    [guardian + "?CMP=Share_iOSApp_Other", "story:bank", bank],
+    [guardian + "?CMP=Share_AndroidApp_Other", "story:other-bank", "Highly lucrative: " + bank],
+    ["news.ycombinator.com/item?id=1", "story:one", original],
+    ["news.ycombinator.com/item?id=2", "story:two", updated],
+    ["shop.example/sale?smid=alpha", "story:seller-a", original],
+    ["shop.example/sale?smid=beta", "story:seller-b", updated],
+    [paper + "?smid=mail-share", "story:unrelated", "New survey counts migratory cranes in Iceland"],
+    [paper + "?smid=operator-share", "story:curated", updated],
+  ];
+  const topics = [...new Map(records.map(([, id, label]) => [id, {
+    id, kind: "story", label, ...(id === "story:curated" ? { curated: true } : {}),
+  }])).values()];
+  const pages = records.map(([key, id], position) => ({
+    key, topicIds: [id], posts: [["hn:" + position, position]], ...(id === "story:reviewed" ? { reviewed: true } : {}),
+  }));
+  const previous = { body: JSON.stringify({ topics, pages }), page_timestamps: JSON.stringify(pages.map(() => START)) };
+  const empty = { generatedAt: new Date(START + DAY).toISOString(), topics: [], pages: [] };
+  const repaired = buildTopicsIndex(empty, previous);
+  const published = JSON.parse(repaired.body);
+  const ids = new Map(published.pages.map(({ key, topicIds }) => [key, topicIds]));
+  assert.deepEqual(records.slice(0, 4).map(([key]) => ids.get(key)), Array(4).fill(["story:original"]));
+  assert([original, updated].includes(published.topics.find(({ id }) => id === "story:original").label));
+  assert.deepEqual([published.redirects["story:replacement"], published.redirects["story:gift"]], ["story:original", "story:original"]);
+  assert.deepEqual(ids.get(records[6][0]), ids.get(records[7][0]));
+  for (const [key, id] of [...records.slice(4, 6), ...records.slice(8)]) assert.deepEqual(ids.get(key), [id]);
+  assert.deepEqual(new Map(published.pages.map(({ key, posts }) => [key, posts])), new Map(pages.map(({ key, posts }) => [key, posts])));
+  assert(published.pages.find(({ key }) => key === records[5][0]).reviewed);
+  assert(JSON.parse(repaired.page_timestamps).every((time) => time === START));
+
+  const newcomer = { id: "story:aaa", kind: "story", label: updated };
+  const next = JSON.parse(buildTopicsIndex({
+    generatedAt: new Date(START + 2 * DAY).toISOString(), topics: [newcomer],
+    pages: [{ url: "https://" + paper + "?unlocked_article_code=later", topicIds: [newcomer.id] }],
+  }, repaired).body);
+  assert.deepEqual(next.pages.find(({ key }) => key.endsWith("=later")).topicIds, ["story:original"]);
+  assert.equal(next.redirects[newcomer.id], "story:original");
+  assert.equal(next.redirects["story:gift"], "story:original");
+});
+
 test("a reviewed one-link topic keeps its address and title when it gains a second perspective", () => {
   for (const kind of ["story", "coverage"]) {
     const prior = { id: `${kind}:first`, kind, label: "A telescope finds a new cloud" };

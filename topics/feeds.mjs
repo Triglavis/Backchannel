@@ -161,6 +161,20 @@ function articleSlugWords(url) {
   }
 }
 
+export function publisherArticleKey(value) {
+  const url = webURL(value);
+  if (!url) return "";
+  const host = url.hostname.replace(/^www\./, "");
+  if ((host !== "nytimes.com" && host !== "theguardian.com") || articleSlugWords(url.href).size < 3) return "";
+  for (const key of new Set(url.searchParams.keys())) {
+    if ((host === "nytimes.com" && /^(?:smid|unlocked_article_code)$/i.test(key)) ||
+      (host === "theguardian.com" && key.toLowerCase() === "cmp" &&
+        url.searchParams.getAll(key).every((value) => /^share[_-]/i.test(value)))) url.searchParams.delete(key);
+  }
+  url.searchParams.sort();
+  return url.host + url.pathname.replace(/\/$/, "") + url.search;
+}
+
 export function topicPageEvidence(pages) {
   const repeated = new Set();
   const paths = new Map();
