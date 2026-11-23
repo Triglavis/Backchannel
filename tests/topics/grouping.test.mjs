@@ -106,9 +106,11 @@ test("a change in a park's designation keeps the place and qualification", () =>
     page("copy", "Redwood Park has lost its dark-sky designation"),
     page("other", "Juniper Park loses its dark-sky designation"),
     page("future", "Redwood Park is at risk of losing its dark-sky designation"),
+    page("refuge", "Redwood Park loses its status as a bird refuge"),
+    page("preserve", "Redwood Park loses its status as a nature preserve"),
   ]);
   assert.deepEqual(groups.map(({ pageIds }) => [...pageIds].sort().join(" ")).sort(),
-    ["copy park", "future", "other"]);
+    ["copy park", "future", "other", "preserve", "refuge"]);
 });
 
 test("early and syndicated reports of one confirmed designation change share a concise source heading", () => {
@@ -124,6 +126,7 @@ test("early and syndicated reports of one confirmed designation change share a c
     page("followup", "US loses its measles-free status. Here's how the Trump administration has responded to outbreaks", { domain: "ap.example" }),
     page("wunc", early, { url: "https://radio.example/2026-11-14/authorities-report-the-loss", firstPostedAt: announced }),
     page("reaction", "‘I’m heartbroken’: experts dismayed as US loses long-held measles elimination status"),
+    page("abc", "US officially loses measles elimination status as vaccination rates drop"),
     page("control", "US has officially lost control of measles"),
   ].map((item) => ({ ...item, postedAt: announced }));
   const other = [

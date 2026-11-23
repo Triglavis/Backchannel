@@ -2466,6 +2466,8 @@ test("private bookmarks group the same accreditation change and keep other decis
 		["Northbridge Academy loses engineering accreditation", "https://education.example/32"],
 		["Westhaven Academy loses engineering accreditation", "https://press.example/33"],
 		["Northbridge Academy retains engineering accreditation", "https://archive.example/34"],
+		["Northbridge Academy loses its status as a teaching hospital", "https://observer.example/35"],
+		["Northbridge Academy loses its status as a music conservatory", "https://arts.example/36"],
 	];
 	await withBookmarkTopics(links, async (list) => {
 		const headings = await list.locator(".app-topic-name").allTextContents();

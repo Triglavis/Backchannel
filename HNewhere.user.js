@@ -17715,6 +17715,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 	];
 	const READER_STATUS_NOUN = /\b(?:status|designation|certification|accreditation|membership|licen[cs]e|eligibility|control of|no longer)\b/i;
 	const READER_STATUS_VERB = /\b(?:lose|loses|lost|losing|forfeits?|forfeited|regains?|regained|gains?|gained|earns?|earned|retains?|retained|keeps?|kept)\b/i;
+	const READER_STATUS_NOISE = /^(?:official|status|designation)$/;
 
 	function readerHeadlineTags(title, tags = new Set()) {
 		for (const { id } of TOPICS) {
@@ -17859,11 +17860,19 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			const control = /^\s+(?:\w+\s+)?control of (.+?)(?:\s+(?:after|amid|because|while)\b|$)/i.exec(after);
 			if (!standing && !control) return null;
 			object = standing?.[1] || control[1] + " free";
+			if (standing) {
+				const complement = /^\s+(of|for|as)\s+([^,;:.!?]+)/i.exec(after.slice(standing[0].length));
+				if (complement) {
+					const namesRole = complement[1].toLowerCase() !== "as" || /^(?:an?|the)\s/i.test(complement[2]) ||
+						![...readerStoryTerms(object)].some((word) => !READER_STATUS_NOISE.test(word));
+					if (namesRole) object += " " + complement[2];
+				}
+			}
 			direction = /^(?:los|forfeit)/i.test(action[0]) ? "loss" : /^(?:retain|keep|kept)/i.test(action[0]) ? "retention" : "gain";
 		}
 		const attribute = object.replace(/\b(?:long[ ‐‑–-]?(?:held|standing)|(?:decades?|years?|centur(?:y|ies))[ ‐‑–-]old)\b/gi, "");
 		const terms = [...readerStoryTerms(attribute.replace(/\beliminat(?:ed|ion)\b/gi, "free"))]
-			.filter((word) => !/^(?:official|status|designation)$/.test(word)).sort();
+			.filter((word) => !READER_STATUS_NOISE.test(word)).sort();
 		if (!terms.some((term) => term !== "free")) return null;
 		const names = new Set();
 		for (const part of holders.split(/\s+(?:and|&)\s+|,\s*/i)) {

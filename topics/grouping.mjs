@@ -278,8 +278,12 @@ function statusChange(title) {
   } else {
     const end = noun.index + noun[0].length;
     detail = title.slice(change.index + change[0].length, end);
-    const complement = /^\s+(?:of|for|as)\s+([^,;:]+)/i.exec(title.slice(end));
-    if (complement && !trailingHolders.size) detail += " " + complement[1];
+    const complement = /^\s+(of|for|as)\s+([^,;:.!?]+)/i.exec(title.slice(end));
+    if (complement && !trailingHolders.size) {
+      const namesRole = complement[1].toLowerCase() !== "as" || /^(?:an?|the)\s/i.test(complement[2]) ||
+        !eventWords(titleWords(detail)).some((word) => !STATUS_NOISE.has(word));
+      if (namesRole) detail += " " + complement[2];
+    }
   }
   detail = detail.replace(/\b(?:long[ ‐‑–-]?(?:held|standing)|(?:decades?|years?|centur(?:y|ies))[ ‐‑–-]old)\b/gi, "");
   const attribute = new Set(eventWords(titleWords(detail.replace(/[-‐‑–]free\b/gi, " elimination"))).filter((word) => !STATUS_NOISE.has(word))
