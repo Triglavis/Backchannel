@@ -261,6 +261,45 @@ test("a subject alias cannot join a retained bucket to a specific current story"
   assert.deepEqual(index.pages.find(({ key }) => key === "history.example/insurance").topicIds, [subject.id]);
 });
 
+test("refresh removes empty search phrases from retained automatic stories and respects reviewed titles", () => {
+  const automatic = {
+    id: "story:habitat", kind: "story", label: "Study finds warblers change course in fog",
+    aliases: ["Warbler Migration", "Study Finds", "Has Been", "Researchers Reveal"],
+  };
+  const reviewed = { id: "story:review-title", kind: "story", label: "Has Been", curated: true, aliases: ["Study Finds"] };
+  const topics = [automatic, reviewed];
+  const pages = topics.map(({ id, curated }, index) => ({
+    key: "archive.example/" + index, topicIds: [id], ...(curated ? { reviewed: true } : {}),
+  }));
+  const previous = {
+    body: JSON.stringify({ version: 1, generatedAt: new Date(START - DAY).toISOString(), topics, pages }),
+    page_timestamps: JSON.stringify(pages.map(() => START - DAY)),
+  };
+  const result = JSON.parse(buildTopicsIndex({ generatedAt: new Date(START).toISOString(), topics: [], pages: [] }, previous).body);
+  assert.deepEqual(result.topics, [{ ...automatic, aliases: ["Warbler Migration"] }, reviewed]);
+  assert.deepEqual(result.pages, pages);
+});
+
+test("corrected status stories cannot inherit a different country's earlier headline as a search alias", () => {
+  const pages = [
+    { id: "canada", title: "Canada has lost its measles elimination status" },
+    { id: "us", title: "The U.S. has lost its measles elimination status" },
+  ].map((page) => ({ ...page, domain: page.id + ".example", url: "https://" + page.id + ".example/story", postedAt: START }));
+  const previous = buildTopicsIndex({
+    generatedAt: new Date(START - DAY).toISOString(),
+    topics: [{ id: "story:canada", kind: "story", label: pages[1].title }],
+    pages: pages.map((page) => ({ ...page, topicIds: ["story:canada"] })),
+  });
+  const topics = groupPages(pages);
+  const current = buildTopicsIndex({
+    generatedAt: new Date(START).toISOString(), topics,
+    pages: pages.map((page) => ({ ...page, topicIds: topics.filter(({ pageIds }) => pageIds.includes(page.id)).map(({ id }) => id) })),
+  }, previous);
+  const published = JSON.parse(current.body);
+  assert.deepEqual(published.topics.map(({ label, aliases = [] }) => [label, aliases]), pages.map(({ title }) => [title, []]));
+  assert.deepEqual(published.pages.map(({ topicIds }) => topicIds), pages.map(({ id }) => ["story:" + id]));
+});
+
 test("the cold public API returns the versioned empty snapshot and a bodyless HEAD", async (t) => {
   const { request } = await service(t);
   const response = await request();

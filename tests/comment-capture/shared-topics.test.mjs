@@ -2177,6 +2177,45 @@ test("a local story headline retains reported uncertainty when another member st
 	}
 });
 
+test("Topics gives a shared change of status one headline across differently worded reports", async () => {
+	const titles = [
+		"The U.S. has officially lost its measles elimination status",
+		"US loses measles elimination status: what it means for the world",
+		"The United States lost its measles elimination status",
+		"Measles is no longer considered eliminated in the US and Mexico",
+		"Canada has lost its measles elimination status",
+		"The US could lose its measles elimination status",
+		"The US regains its measles elimination status",
+		"The US loses its rubella elimination status",
+		"The U.S. hasn't lost its measles elimination status",
+		"Has the U.S. lost its measles elimination status?",
+	];
+	const rows = titles.map((title, i) => ({
+		...guide, title, id: 9950 + i, url: "https://publisher" + i + ".example/story", topic: "technology", descendants: i + 1,
+	}));
+	const app = await launchTopics({ status: 503, stored: {
+		"HNewhere:app_browse_topics": true,
+		"HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now * 1000, stories: rows },
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [] },
+	} });
+	try {
+		await app.page.goto("https://backchnnl.app/");
+		const list = app.page.locator("#app-list-body");
+		await list.locator(".app-topic-row, .browse-title-link").first().waitFor();
+		const headings = await list.locator(".app-topic-name").allTextContents();
+		assert.equal(headings.length, 1, headings.join(", "));
+		assert(titles.slice(0, 3).some((title) => "#" + title === headings[0]), headings[0]);
+		await list.getByText("10 comments across 4 discussions in 4 links", { exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(titles.slice(4)));
+		await list.locator(".app-topic-row").click();
+		await list.getByRole("link", { name: titles[3], exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(titles.slice(0, 4)));
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
 test("Unread keeps standalone links in their original rows with an empty shared index", async () => {
 	const stories = [
 		{ ...guide, title: "Language models can revise their own weights" },
@@ -2397,6 +2436,87 @@ test("Collection can group a shared technique that contains an ordinary action w
 	];
 	await withBookmarkTopics(links, async (list) => {
 		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#Open Source Licenses"]);
+	});
+});
+
+test("attribution and auxiliary phrases do not make Topics from unrelated saved links", async () => {
+	const links = [
+		["Wildflowers flourish on fallow farmland, study finds", "https://botany.example/81"],
+		["Short naps boost recall, study finds", "https://sleep.example/82"],
+		["The turbine has been rebuilt after flooding", "https://engineering.example/83"],
+		["An heirloom has been returned to its owner", "https://museum.example/84"],
+		["Coastal wetlands are shrinking, according to researchers", "https://coast.example/85"],
+		["Heat pumps outlast oil boilers, according to researchers", "https://energy.example/86"],
+		["A painter lost her favorite brush at a fair", "https://studio.example/87"],
+		["A dog lost her favorite ball on the beach", "https://pets.example/88"],
+	];
+	await withBookmarkTopics(links, async (list, app) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), []);
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.map(([title]) => title)));
+		assert.equal(await app.page.getByRole("tab", { name: "Topics", exact: true }).isVisible(), false);
+	}, { stored: { [catalogKey]: { fetchedAt: Date.now(), data: {
+		...catalog, topics: [{ id: "topic:boilerplate", kind: "topic", label: "Study Finds" }],
+		pages: links.slice(0, 2).map(([, url]) => ({ key: new URL(url).host + new URL(url).pathname, topicIds: ["topic:boilerplate"] })),
+	} } } });
+});
+
+test("private bookmarks group the same accreditation change and keep other decisions separate", async () => {
+	const links = [
+		["Northbridge Academy has lost its engineering accreditation", "https://college.example/31"],
+		["Northbridge Academy loses engineering accreditation", "https://education.example/32"],
+		["Westhaven Academy loses engineering accreditation", "https://press.example/33"],
+		["Northbridge Academy retains engineering accreditation", "https://archive.example/34"],
+	];
+	await withBookmarkTopics(links, async (list) => {
+		const headings = await list.locator(".app-topic-name").allTextContents();
+		assert.equal(headings.length, 1, headings.join(", "));
+		assert(links.slice(0, 2).some(([title]) => "#" + title === headings[0]), headings[0]);
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(2).map(([title]) => title)));
+		await list.locator(".app-topic-row").click();
+		await list.getByRole("link", { name: links[0][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 2).map(([title]) => title)));
+	});
+});
+
+test("a published status change and newly imported coverage open as one topic with its existing ID", async () => {
+	const links = [
+		["US loses its measles elimination status", "https://science.example/41"],
+		["The United States lost measles elimination status", "https://medicine.example/42"],
+		["The U.S. has officially lost control of measles", "https://press.example/43"],
+		["Measles is no longer considered eliminated in the US and Mexico", "https://news.example/44"],
+		["The US has lost its measles-free status", "https://reviewed.example/45"],
+	];
+	const story = { id: "story:public-announcement", kind: "story", label: links[0][0] };
+	const pages = links.map(([, url], i) => ({ key: new URL(url).host + new URL(url).pathname,
+		topicIds: i < 2 ? [story.id] : [], reviewed: i === 4 }));
+	await withBookmarkTopics(links, async (list) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#" + story.label]);
+		const card = list.locator('[data-shared-topic="story:public-announcement"]');
+		await card.getByText(/in 4 links$/).waitFor();
+		await list.getByRole("link", { name: links[4][0], exact: true }).waitFor();
+		await card.click();
+		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 4).map(([title]) => title)));
+	}, { stored: { [catalogKey]: { fetchedAt: Date.now(), data: { ...catalog, topics: [story], pages } } } });
+});
+
+test("a status headline covers early reporting and keeps its explanatory follow-up on the original link", async () => {
+	const links = [
+		["US loses measles elimination status: what it means for the world", "https://science.example/2026/11/17/report"],
+		["The U.S. has lost measles elimination status. Here's what that means and who is most at risk.", "https://news.example/2026/11/17/bulletin"],
+		["The U.S. just lost its measles elimination status. What now?", "https://health.example/2026/11/17/coverage"],
+		["US has lost measles elimination status, global health authorities say", "https://radio.example/2026/11/14/report"],
+		["The U.S. lost its measles elimination status in 1991", "https://archive.example/2026/11/15/retrospective"],
+	];
+	await withBookmarkTopics(links, async (list) => {
+		const headings = await list.locator(".app-topic-name").allTextContents();
+		assert.equal(headings.length, 1, headings.join(", "));
+		assert.match(headings[0], /^#(?:The U\.S\. (?:has |just )?lost|US loses) (?:its )?measles elimination status$/);
+		await list.getByText(/in 4 links$/).waitFor();
+		await list.getByRole("link", { name: links[4][0], exact: true }).waitFor();
+		await list.locator(".app-topic-row").click();
+		await list.getByRole("link", { name: links[3][0], exact: true }).waitFor();
+		assert.deepEqual(new Set(await list.locator(".browse-title-link").allTextContents()), new Set(links.slice(0, 4).map(([title]) => title)));
 	});
 });
 

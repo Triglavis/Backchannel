@@ -9,10 +9,14 @@ const STOP_WORDS = new Set((
   "you your today tomorrow yesterday developer developers tech update updates released release better now introducing guide"
 ).split(/\s+/));
 const EVENT_WINDOW = 3 * 86_400_000;
+const CONFIRMED_STATUS_WINDOW = 14 * 86_400_000;
 const GENERIC_SUBJECT_WORDS = new Set((
   "announces announcement arrives build building companies company faces finally firm firms group hastily launches launching " +
   "look offers plan plans shows stock shares staffers starts threatens unveiled unveils workers works"
 ).split(/\s+/));
+const FUNCTION_WORDS = new Set("a an and are as at be been being by can could did do does for from had has have having in is it its may might of on or that the their this to was were will with would".split(" "));
+const REPORTING_SOURCE = /^(?:analys[ie]s|data|evidence|experts?|findings?|officials?|papers?|polls?|reports?|research(?:ers?)?|results?|scientists?|stud(?:y|ies)|surveys?)$/;
+const REPORTING_VERB = /^(?:claim(?:s|ed)?|conclud(?:es?|ed)|confirm(?:s|ed)?|finds?|found|indicat(?:es?|ed)|report(?:s|ed)?|reveal(?:s|ed)?|said|says?|show(?:s|ed|n)?|suggest(?:s|ed)?|warn(?:s|ed)?)$/;
 const SUBJECT_QUALIFIERS = new Set(["extended", "generalized", "modified", "strong", "weak"]);
 const MARKET_WORDS = new Set(["dow", "ipo", "market", "nasdaq", "share", "stock", "wall", "street"]);
 const PRICE_DECLINES = new Set(["bust", "decline", "dip", "dive", "drop", "fall", "fell", "plunge", "selloff", "sink", "slide", "slump", "tank", "tumble", "wipeout"]);
@@ -35,6 +39,14 @@ const QUALIFIED_CLAIM = /\b(?:alleg(?:e[ds]?|edly)|apparent(?:ly)?|possibly|poss
 const CLAIM_WORDS = new Set(["apparent", "alleg", "allege", "reportedly", "possible", "possibly", "suspect", "unconfirm"]);
 const EMPHATIC_DETAILS = new Set(["confirm", "definitive", "entire", "historic", "huge", "largest", "massive", "prove", "record", "unprecedented"]);
 const INSTRUCTIONAL = /\b(?:how to|(?:tutorial|guide) (?:on|to)|walkthrough)\b|^\p{L}+ing\b.*\b(?:using|with|in)\b/iu;
+const STATUS_NOUN = /\b(?:status|designation|classification|accreditation|certification|eligibility|membership|licen[cs]e)\b/i;
+const STATUS_CHANGE = /\b(?:(?<loss>no longer|los(?:es?|ing|s)|lost|revok(?:es?|ed))|(?<restoration>regain(?:s|ed|ing)?|restor(?:es?|ed|ing))|(?<retention>retain(?:s|ed|ing)?|keep(?:s|ing)?|kept|maintain(?:s|ed|ing)?|still)|(?<gain>gain(?:s|ed|ing)?|earn(?:s|ed|ing)?|achiev(?:es?|ed|ing)))\b/i;
+const CLASSIFIED = /\b(?:considered|deemed|classified|declared|designated|recognised|recognized|certified)\b/i;
+const STATUS_FORECAST = /\b(?:could|may|might|will|would|if|unless|risks?|risking|expected|expects?|likely|potential(?:ly)?|poised|set to|about to|on the (?:brink|verge) of)\b/i;
+const STATUS_UNCONFIRMED = /\b(?:allegedly|reportedly|possibl[ey]|suspected|believed|(?:may|might|could|appears? to) have)\b/i;
+const STATUS_NOISE = new Set("status designation classification official officially formally consider deem classifi declar designat recognize recognise certifi".split(" "));
+const EDITORIAL_FOLLOWUP = /[.!?:]\s+(?:(?:here['’]s|here (?:is|are))\s+(?:how|what|why|who)\b|what (?:now|next|it means|that means|happens next)\b)/i;
+const MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split(" ");
 
 function titleWords(title) {
   return title.match(/[\p{L}\p{N}]+/gu) || [];
@@ -67,6 +79,15 @@ function phraseLabel(words) {
   return words.map((word) => word[0].toUpperCase() + word.slice(1)).join(" ");
 }
 
+export function informativeTopicAlias(label, storyLabel) {
+  const words = titleWords(label.toLowerCase());
+  if (words.length < 2) return words.length > 0;
+  const content = words.filter((word) => !FUNCTION_WORDS.has(word));
+  if (!content.length || /^(?:loses|regains|retains|confirms|suggests|reveals)$/.test(words.at(-1))) return false;
+  if (content.some((word) => REPORTING_VERB.test(word)) && content.every((word) => REPORTING_SOURCE.test(word) || REPORTING_VERB.test(word))) return false;
+  return !storyLabel || !statusChange(eventSpelling(label)) || compatibleStatusTitles(storyLabel, label);
+}
+
 const TOPIC_ORDER = { story: 0, topic: 1, coverage: 2 };
 
 function labelKey(label) {
@@ -75,6 +96,7 @@ function labelKey(label) {
 
 function relatedTopics(left, right, shared) {
   if (left.curated || right.curated) return false;
+  if (left.kind !== "topic" && right.kind !== "topic" && !compatibleStatusTitles(left.label, right.label)) return false;
   const sameKind = left.kind === right.kind;
   const exact = left.phrase === right.phrase;
   if (left.kind === "coverage" || right.kind === "coverage") {
@@ -98,7 +120,7 @@ function relatedHeadlines(left, right) {
 }
 
 export function relatedStoryTitles(left, right) {
-  return relatedHeadlines(facts({ title: left.normalize("NFKC") }), facts({ title: right.normalize("NFKC") }));
+  return compatibleStatusTitles(left, right) && relatedHeadlines(facts({ title: left.normalize("NFKC") }), facts({ title: right.normalize("NFKC") }));
 }
 
 export function coalesceTopics(topics) {
@@ -107,7 +129,7 @@ export function coalesceTopics(topics) {
     const { lower, terms, numbers } = facts({ title: topic.label.normalize("NFKC") });
     const entry = {
       ...topic, lower, terms, numbers, phrase: lower.join(" "), labelKey: labelKey(topic.label),
-      aliasKeys: new Set((topic.aliases || []).map(labelKey)),
+      aliasKeys: new Set((topic.aliases || []).filter((alias) => topic.curated || informativeTopicAlias(alias)).map(labelKey)),
     };
     for (const id of entry.pageIds) {
       if (!byPage.has(id)) byPage.set(id, []);
@@ -212,11 +234,89 @@ function offeringStage(title) {
   return stage ? stage[1].toLowerCase() + "ing" : "";
 }
 
+function eventSpelling(title) {
+  return title.replace(/\bUnited States(?: of America)?\b|\bU\.S(?:\.A)?\b\.?|\bUSA\b/gi, "US")
+    .replace(/\bsell[ -]off\b/gi, "selloff");
+}
+
+function statusHolders(text, beforeChange) {
+  const words = text.match(/[\p{L}\p{N}]+|[,&:;.!?]/gu) || [];
+  if (beforeChange) {
+    while (words.length && (FUNCTION_WORDS.has(words.at(-1).toLowerCase()) || STATUS_FORECAST.test(words.at(-1)) ||
+      STATUS_UNCONFIRMED.test(words.at(-1)) || /^(?:not|never|officially|already|just|finally|formally|yet|close|verge|brink)$/i.test(words.at(-1)))) words.pop();
+    words.reverse();
+  }
+  const name = [];
+  for (const word of words) {
+    if (!/^\p{Lu}/u.test(word) && !/^(?:and|of|the|[,&])$/i.test(word)) break;
+    name.push(/[,&]/.test(word) ? "and" : word.toLowerCase());
+  }
+  if (beforeChange) name.reverse();
+  return new Set(name.join(" ").split(/\s*\band\b\s*/).map((part) => part.replace(/^the(?:\s+|$)/, "")).filter(Boolean));
+}
+
+function statusChange(title) {
+  const change = STATUS_CHANGE.exec(title);
+  if (!change) return null;
+  const before = title.slice(0, change.index).replace(/n[’']t\b/gi, " not");
+  const after = title.slice(change.index + change[0].length);
+  const implicit = /^(?:no longer|still)$/i.test(change[0]) && CLASSIFIED.test(after);
+  const noun = STATUS_NOUN.exec(title);
+  const control = change.groups.loss && /\bofficially\b/i.test(before) && /^\s+control of\s+([^,;:.!?]+)/i.exec(after);
+  if (!implicit && !noun && !control) return null;
+  const place = /\b(?:in|across|for)\s+(?:the\s+)?(?=\p{Lu})/u.exec(after);
+  const trailingHolders = place ? statusHolders(after.slice(place.index + place[0].length), false) : new Set();
+  const subject = statusHolders(before, true);
+  const holders = (implicit && trailingHolders.size) || !subject.size ? trailingHolders : subject;
+  let detail;
+  if (control) {
+    detail = control[1] + " elimination";
+  } else if (implicit) {
+    detail = (trailingHolders.size ? before + " " : "") + after.slice(0, place?.index);
+  } else if (noun.index < change.index) {
+    detail = title.slice(0, change.index);
+  } else {
+    const end = noun.index + noun[0].length;
+    detail = title.slice(change.index + change[0].length, end);
+    const complement = /^\s+(?:of|for|as)\s+([^,;:]+)/i.exec(title.slice(end));
+    if (complement && !trailingHolders.size) detail += " " + complement[1];
+  }
+  const attribute = new Set(eventWords(titleWords(detail.replace(/[-‐‑–]free\b/gi, " elimination"))).filter((word) => !STATUS_NOISE.has(word))
+    .map((word) => word.replace(/ation$/, "at")));
+  const kind = Object.keys(change.groups).find((key) => change.groups[key]);
+  const forecast = STATUS_FORECAST.test(before) || /\b(?:if|unless|pending|subject to)\b/i.test(after.split(/[.;:!?]/, 1)[0]) ||
+    /^\s*(?:is|are|has|have|does|do|can)\b.*\?\s*$/i.test(title);
+  const certainty = STATUS_UNCONFIRMED.test(before) ? "unconfirmed" : forecast ? "prospective" : "stated";
+  return { kind, holders, attribute, certainty, formal: !control, negated: /\b(?:not|never)\b/i.test(before) };
+}
+
+function sameStatusChange(left, right) {
+  return Boolean(left && right && left.kind === right.kind && left.certainty === right.certainty && left.negated === right.negated &&
+    sharedCount(left.holders, right.holders) && left.attribute.size && left.attribute.size === right.attribute.size &&
+    sharedCount(left.attribute, right.attribute) === left.attribute.size);
+}
+
+export function compatibleStatusTitles(left, right) {
+  if (left === right) return true;
+  const a = statusChange(eventSpelling(left));
+  const b = statusChange(eventSpelling(right));
+  return (!a && !b) || sameStatusChange(a, b);
+}
+
+function datedArticlePath(url) {
+  const match = /\/((?:19|20)\d{2})[/-](\d{2}|[a-z]{3})[/-](\d{2})(?:[/-]|$)/i.exec((url || "").split(/[?#]/, 1)[0]);
+  if (!match) return null;
+  const month = /^\d+$/.test(match[2]) ? Number(match[2]) : MONTHS.indexOf(match[2].toLowerCase()) + 1;
+  const day = Number(match[3]);
+  const date = Date.UTC(Number(match[1]), month - 1, day);
+  return month >= 1 && month <= 12 && new Date(date).getUTCDate() === day ? date : null;
+}
+
 function eventPage(page) {
   const title = page.title.replace(/^(?:Ask|Show|Tell|Launch) HN:\s*/i, "").replace(/\s+\(gift (?:article|link)\)\s*$/i, "").trim() || page.title;
   const posts = page.posts || [];
   const item = facts({ ...page, title, posts });
-  const normalized = title.replace(/\bU\.S\./gi, "US").replace(/\bsell[ -]off\b/gi, "selloff");
+  const normalized = eventSpelling(title);
   const words = titleWords(normalized);
   const terms = eventWords(words);
   const marketMove = terms.some((term) => MARKET_WORDS.has(term)) && terms.some((term) => PRICE_DECLINES.has(term));
@@ -250,13 +350,14 @@ function eventPage(page) {
   const namedEvidence = new Set([...headline.names, ...eventWords(otherWords.filter((word) => /^\p{Lu}/u.test(word)))]);
   for (const number of item.lower.filter((word) => /^\d+$/.test(word))) headlineTerms.add(number);
   for (const number of otherWords.filter((word) => /^\d+$/.test(word))) contextEvidence.add(number);
-  const eventAt = [page.publishedAt, page.firstPostedAt, page.postedAt]
+  const status = statusChange(normalized);
+  const eventAt = [page.publishedAt, status && datedArticlePath(page.url), page.firstPostedAt, page.postedAt]
     .map((value) => typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN).find(Number.isFinite);
   const years = new Set(Array.from(title.matchAll(/\b(?:in|during)\s+(?:\p{L}+\s+)?((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/giu),
     ([, described, dated]) => described || dated));
   return {
     ...item, eventTerms, actions, details, contextTerms, marketMove, marketNames, versions, heading: item.lower.join(" "),
-    names: headline.names, incident, stage: offeringStage(title), eventAt, years, instructional: INSTRUCTIONAL.test(title),
+    names: headline.names, incident, stage: offeringStage(title), status, eventAt, years, instructional: INSTRUCTIONAL.test(title),
     headlineTerms, contextEvidence, namedEvidence, qualified: QUALIFIED_CLAIM.test(title),
   };
 }
@@ -284,9 +385,21 @@ function eventScore(left, right) {
   if (left.versions.length && right.versions.length && !left.versions.some((version) => right.versions.includes(version))) return 0;
   if (left.years.size && right.years.size && !sharedCount(left.years, right.years)) return 0;
   const shared = sharedCount(left.eventTerms, right.eventTerms);
-  if (Math.abs(left.eventAt - right.eventAt) > EVENT_WINDOW &&
+  const matchingStatus = sameStatusChange(left.status, right.status);
+  const elapsed = Math.abs(left.eventAt - right.eventAt);
+  const sameHeadline = left.heading === right.heading && left.eventTerms.size >= 2;
+  if (left.status || right.status) {
+    const [dated, other] = left.years.size ? [left, right] : [right, left];
+    if (dated.years.size && !other.years.size && !dated.years.has(String(new Date(other.eventAt).getUTCFullYear()))) return 0;
+    const confirmed = matchingStatus && (left.status.formal || right.status.formal) && left.status.certainty === "stated" && !left.status.negated;
+    const window = confirmed ? CONFIRMED_STATUS_WINDOW : EVENT_WINDOW;
+    if (elapsed > window) return 0;
+    if (matchingStatus) return 1 + (Number.isFinite(elapsed) ? 1 - elapsed / window : 0);
+    return sameHeadline ? 2 : 0;
+  }
+  if (elapsed > EVENT_WINDOW &&
     !(left.instructional && right.instructional && shared >= 4 && shared / Math.max(left.eventTerms.size, right.eventTerms.size) >= 0.7)) return 0;
-  if (left.heading === right.heading && left.eventTerms.size >= 2) return 2;
+  if (sameHeadline) return 2;
   if (left.domain === right.domain) return 0;
   if (left.stage && right.stage && left.stage !== right.stage) return 0;
 
@@ -352,7 +465,8 @@ function namedSubjects(items) {
       phrases.set(key, phrase);
     }
   }
-  return [...phrases.values()].filter(({ named, pages }) => named && new Set([...pages.values()].map(({ heading }) => heading)).size >= 2)
+  return [...phrases.values()].filter(({ named, key, pages }) =>
+    named && informativeTopicAlias(key) && new Set([...pages.values()].map(({ heading }) => heading)).size >= 2)
     .sort((left, right) => right.pages.size - left.pages.size || right.key.length - left.key.length || left.key.localeCompare(right.key));
 }
 
@@ -384,7 +498,20 @@ function leadPages(pages) {
 
 function storyGroup(cluster, subjects) {
   const pages = leadPages(cluster);
-  const lead = pages[0];
+  let lead = pages[0];
+  let label = lead.title;
+  if (pages.length > 1 && lead.status) {
+    const candidates = pages.filter(({ status }) => status?.formal && status.holders.size &&
+      [...status.holders].every((holder) => pages.every((page) => page.status?.holders.has(holder))));
+    if (candidates.length) {
+      const headings = candidates.map((page) => ({ page, text: page.title.split(EDITORIAL_FOLLOWUP, 1)[0].trim() }));
+      headings.sort((a, b) => titleWords(a.text).length - titleWords(b.text).length);
+      lead = headings[0].page;
+      label = headings[0].text;
+      pages.splice(pages.indexOf(lead), 1);
+      pages.unshift(lead);
+    }
+  }
   const pageIds = pages.map(({ id }) => id);
   const kind = pages.length === 1 && lead.posts.length > 1 ? "coverage" : "story";
   const subjectTitles = subjects.filter(({ pages: matches }) => pageIds.filter((id) => matches.has(id)).length >= 2)
@@ -395,13 +522,14 @@ function storyGroup(cluster, subjects) {
     const words = lead.words.slice(0, size);
     if (words.length !== size || !words.every((word) => /^\p{Lu}/u.test(word) && useful(word.toLowerCase()))) continue;
     const lower = lead.lower.slice(0, size).join(" ");
-    if (pages.every((page) => page.words.length > size && page.lower.slice(0, size).join(" ") === lower)) {
+    if (informativeTopicAlias(lower) && pages.every((page) => page.words.length > size && page.lower.slice(0, size).join(" ") === lower)) {
       aliases.add(phraseLabel(words));
       break;
     }
   }
+  if (label !== lead.title) aliases.add(lead.title);
   return {
-    id: kind + ":" + [...pageIds].sort()[0], label: lead.title, kind,
+    id: kind + ":" + [...pageIds].sort()[0], label, kind,
     ...(aliases.size ? { aliases: [...aliases] } : {}), ...(subjectTitles.length ? { subjectTitles } : {}), pageIds,
   };
 }

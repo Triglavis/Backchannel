@@ -120,6 +120,46 @@ test('wide Reader keeps its real article actions together in the chin',{timeout:
   }finally{await app.browser.close()}
 });
 
+for (const [width, hasTouch] of [[1600, false], [320, true]]) {
+  test(`${width}px Topics back button matches the Sources byline close button`, {timeout: 20000}, async () => {
+    const topic = {id: 'story:runtime-costs', kind: 'story', label: 'Runtime costs'};
+    const pages = STORIES.slice(0, 2).map(({url}) => ({key: url.slice('https://'.length), topicIds: [topic.id]}));
+    const app = await launchApp({
+      sharedStore: true, viewport: {width, height: 850}, hasTouch, resubmissions: 1,
+      settings: {sources: {hn: true}, frontPageMode: 'sources', updateCheck: false},
+      responses: [{match: url => url === 'https://topics.backchnnl.app/api/topics', json: {
+        version: 1, generatedAt: new Date().toISOString(), topics: [topic], pages,
+      }}],
+    });
+    try {
+      const {page} = app;
+      const size = button => button.evaluate(node => [node, node.querySelector('svg')].map(part => {
+        const {width, height} = part.getBoundingClientRect();
+        return [width, height];
+      }));
+      await page.goto('https://backchnnl.app/');
+      await page.getByRole('tab', {name: 'Topics', exact: true}).click();
+      await page.locator('.app-topic-row').filter({hasText: topic.label}).click();
+      const backSize = await size(page.getByRole('button', {name: 'Back to topics', exact: true}));
+      await page.locator('#app-list-body').getByRole('link', {name: STORIES[0].title, exact: true}).click();
+      if (hasTouch) {
+        await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
+        await page.locator('#app-bar-discussion').click();
+        await page.locator('#app[data-stage="discussion"]:not([data-moving])').waitFor();
+      }
+      const sources = page.locator('#app-discussion-meta');
+      await sources.getByRole('button', {name: /across 2 discussions/}).click();
+      await sources.locator('[data-discussion-key] input').first().uncheck();
+      const closeSize = await size(page.getByRole('button', {name: 'Show all discussions', exact: true}));
+      assert.deepEqual(closeSize, [[15, 15], [12, 12]]);
+      assert.deepEqual(backSize, closeSize);
+      assert.deepEqual(app.errors, []);
+    } finally {
+      await app.browser.close();
+    }
+  });
+}
+
 for(const width of [390])test(`${width}px Reader retains its bottom-right mobile-style action column`,{timeout:20000},async()=>{
   const story = STORIES[1];
   const app=await launchApp({sharedStore:true,viewport:{width,height:900},votable:{[story.id]:true},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});

@@ -75,6 +75,87 @@ test("a recurring named subject remains searchable without replacing independent
   assert.equal(groups.find(({ pageIds }) => pageIds.includes("cooking")).label, "A field guide to low-maintenance solar cooking");
 });
 
+test("reports of a status change agree on the holder, the status and what happened", () => {
+  const reports = [
+    page("wire", "The U.S. has officially lost its measles elimination status"),
+    page("paper", "The United States loses measles elimination status"),
+    page("radio", "US has lost its measles elimination status"),
+    page("bulletin", "USA loses official measles elimination status"),
+    page("regional", "Measles is no longer considered eliminated in the US and Mexico"),
+  ];
+  const others = [
+    page("canada", "Canada has officially lost its measles elimination status"),
+    page("rubella", "The United States loses rubella elimination status"),
+    page("regained", "The United States regains measles elimination status"),
+    page("risk", "The United States could lose its measles elimination status"),
+    page("negated", "The U.S. has not lost its measles elimination status"),
+    page("background", "What measles elimination status means for the United States"),
+    page("earlier", "US lost its measles elimination status in 1995"),
+  ];
+  const groups = groupPages([...reports, ...others].map((item) => ({ ...item, vector: [1] })));
+  assert.deepEqual(groups.map(({ pageIds }) => [...pageIds].sort().join(" ")).sort(),
+    ["canada", "bulletin paper radio regional wire", "rubella", "regained", "risk", "negated", "background", "earlier"].sort());
+  const story = groups.find(({ pageIds }) => pageIds.includes("wire"));
+  assert(reports.slice(0, -1).some(({ title }) => title === story.label), story.label);
+  assert.deepEqual(groups.flatMap(({ aliases = [] }) => aliases).filter((label) => /\bloses$/i.test(label)), []);
+});
+
+test("a change in a park's designation keeps the place and qualification", () => {
+  const groups = groupPages([
+    page("park", "Redwood Park loses its dark-sky designation"),
+    page("copy", "Redwood Park has lost its dark-sky designation"),
+    page("other", "Juniper Park loses its dark-sky designation"),
+    page("future", "Redwood Park is at risk of losing its dark-sky designation"),
+  ]);
+  assert.deepEqual(groups.map(({ pageIds }) => [...pageIds].sort().join(" ")).sort(),
+    ["copy park", "future", "other"]);
+});
+
+test("early and syndicated reports of one confirmed designation change share a concise source heading", () => {
+  const first = Date.parse("2026-11-14T03:00:00Z");
+  const announced = Date.parse("2026-11-17T19:00:00Z");
+  const day = 86_400_000;
+  const early = "US has lost measles elimination status, global health authorities say";
+  const pages = [
+    page("nature", "US loses measles elimination status: what it means for the world"),
+    page("cbs", "The U.S. has lost measles elimination status. Here's what that means and who is most at risk."),
+    page("science", "The U.S. just lost its measles elimination status. What now?"),
+    page("regional", "Measles is no longer considered eliminated in the US and Mexico", { domain: "ap.example" }),
+    page("followup", "US loses its measles-free status. Here's how the Trump administration has responded to outbreaks", { domain: "ap.example" }),
+    page("wunc", early, { url: "https://radio.example/2026-11-14/authorities-report-the-loss", firstPostedAt: announced }),
+    page("control", "US has officially lost control of measles"),
+  ].map((item) => ({ ...item, postedAt: announced }));
+  const other = [
+    page("old", early, { publishedAt: announced - 15 * day }),
+    page("reposted", early, { url: "https://archive.example/2019/nov/17/an-earlier-story", firstPostedAt: announced }),
+    page("uncertain", "US could lose measles elimination status", { publishedAt: first }),
+    page("investment", "US loses control of measles research funding", { publishedAt: announced }),
+  ];
+  const groups = groupPages([...pages, ...other]);
+  const story = groups.find(({ pageIds }) => pageIds.includes("wunc"));
+  assert.deepEqual([...story.pageIds].sort(), pages.map(({ id }) => id).sort());
+  assert.equal(groups.length, 1 + other.length);
+  assert.match(story.label, /(?:U\.S\.|US).*measles(?:-free| elimination) status/i);
+  assert.doesNotMatch(story.label, /what (?:now|it means)|here['’]s/i);
+  assert(pages.some(({ title }) => title === story.label || title.startsWith(story.label + ".") || title.startsWith(story.label + ":")));
+});
+
+test("automatic search aliases omit reporting formulas and keep the full source headlines", () => {
+  const pages = [
+    page("birds", "Study finds warblers change course in fog"),
+    page("heat", "Study finds insulation reduces heating costs"),
+    page("water", "Researchers reveal a hidden aquifer"),
+    page("space", "Researchers reveal signals from a pulsar"),
+    page("named", "The Riemann hypothesis influences modern number theory"),
+    page("proofs", "A guide to checking proofs of the Riemann hypothesis"),
+  ];
+  const groups = groupPages(pages);
+  assert.deepEqual(groups.map(({ label }) => label).sort(), pages.map(({ title }) => title).sort());
+  const searchable = groups.flatMap(({ aliases = [] }) => aliases);
+  assert(searchable.includes("Riemann Hypothesis"));
+  assert.deepEqual(searchable.filter((name) => /^(?:study finds|researchers reveal)$/i.test(name)), []);
+});
+
 test("coverage of a war and a related blockade stays with its own developments", () => {
   const groups = groupPages([
     page("talks", "Iran war enters third week after failed ceasefire talks"),

@@ -1,5 +1,5 @@
 import { canonicalURL, topicPageEvidence, usableTopicTitle } from "./feeds.mjs";
-import { coalesceTopics, groupPages, relatedStoryTitles } from "./grouping.mjs";
+import { coalesceTopics, compatibleStatusTitles, groupPages, informativeTopicAlias, relatedStoryTitles } from "./grouping.mjs";
 import { topicArtworkFitsEdition } from "./artwork.mjs";
 import { applyTopicDecisions } from "./decisions.mjs";
 
@@ -50,6 +50,8 @@ function aliasKey(label) {
 }
 
 function appendAliases(topic, previous) {
+  if (!topic.curated && !previous.curated && topic.kind !== "topic" && previous.kind !== "topic" &&
+    !compatibleStatusTitles(topic.label, previous.label)) return;
   topic.aliases = [...(topic.aliases || []), previous.label, ...(previous.aliases || [])];
 }
 
@@ -194,6 +196,7 @@ function retainStoryIds(definitions, retained, live) {
       const topic = definitions.get(candidate);
       const size = current.get(candidate).size;
       if (!topic || topic.kind === "topic") continue;
+      if (!former.curated && !topic.curated && !compatibleStatusTitles(former.label, topic.label)) continue;
       const exact = [former.label, ...(former.aliases || [])].some((label) => aliasKey(label) === aliasKey(topic.label));
       const contained = shared >= 2 && shared === Math.min(members.size, size);
       const corroborated = shared >= 2 && shared * 2 > Math.max(members.size, size) &&
@@ -262,10 +265,10 @@ function migrateRetainedTopics(definitions, retained, live) {
   return replacements;
 }
 
-function compactAliases(label, aliases) {
-  const seen = new Set([aliasKey(label)]);
+function compactAliases(topic, aliases) {
+  const seen = new Set([aliasKey(topic.label)]);
   return aliases.filter((alias) => {
-    if (typeof alias !== "string" || alias.length > 512) return false;
+    if (typeof alias !== "string" || alias.length > 512 || (!topic.curated && !informativeTopicAlias(alias, topic.kind !== "topic" && topic.label))) return false;
     const key = aliasKey(alias);
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -351,7 +354,7 @@ export function buildTopicsIndex(snapshot, previous, decisions = [], threadUpdat
     .map((topic) => ({ ...topic, pageIds: [...members.get(topic.id)] })));
   const topics = new Map(consolidated.topics.map(({ id, label, kind, aliases = [] }) => {
     const definition = definitions.get(id);
-    const compacted = compactAliases(label, [...(definition.aliases || []), ...aliases]);
+    const compacted = compactAliases(definition, [...(definition.aliases || []), ...aliases]);
     const approved = manualImages.get(id);
     const automatic = definition.image && !definition.imageCurated && topicArtworkFitsEdition(label, definition.image);
     const image = approved || (automatic ? definition.image : null);
