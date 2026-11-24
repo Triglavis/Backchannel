@@ -3089,6 +3089,131 @@ test("Reader reunites local perspectives and split published IDs for one reinsta
 	}
 });
 
+const originalDecision = { id: "story:1959193c8e642359f6a4d9ff1bf8a9e0", kind: "story", label: "Nvidia reinstates Jensen Huang as CEO" };
+const decisionReports = [
+	["Vance personally pushed for Huang’s reinstatement", "https://thehill.com/homenews/administration/6237807-trump-vance-reinstate-nvidia-ceo/"],
+	[originalDecision.label, "https://www.nbcnews.com/tech/tech-news/nvidia-reinstates-jensen-huang-rcna610864"],
+	["Nvidia CEO's reinstatement criticized as governance failure", "https://en.killbait.com/nvidia-ceo-s-reinstatement-criticized-as-governance-failure.html"],
+	["Jensen Huang reinstated as Nvidia CEO", "https://www.theguardian.com/technology/2026/nov/23/jensen-huang-reinstated-as-nvidia-chief-executive"],
+	["Stocks Surge After Jensen Huang Is Reinstated as Nvidia CEO", "https://www.nytimes.com/2026/11/22/business/nvidia-stock-huang-ai-sp500-markets.html"],
+];
+const decisionControls = [
+	["Nvidia reinstates Jensen Huang as CFO", "https://finance.example/2026/11/23/decision"],
+	["Jensen Huang reinstated as Nvidia CFO", "https://other.example/2026/11/23/decision"],
+	["Jensen Huang reinstated as Nvidia CEO in 2012", "https://archive.example/2012/11/23/leadership"],
+];
+function decisionPage([, url], id) {
+	const { host, pathname, search } = new URL(url);
+	return { key: host + pathname.replace(/\/$/, "") + search, topicIds: [id] };
+}
+
+test("a published decision with market and political coverage includes newly seen reports of that decision", async () => {
+	const pages = decisionReports.slice(0, 3).map((report) => decisionPage(report, originalDecision.id));
+	await withEventFeed([...decisionReports, ...decisionControls], async (list, page) => {
+		page.setDefaultTimeout(5000);
+		const labels = await list.locator(".app-topic-name").allTextContents();
+		assert.deepEqual(labels.filter((label) => /CEO/.test(label)), ["#" + originalDecision.label], labels.join("\n"));
+		const current = list.locator('[data-shared-topic="' + originalDecision.id + '"]');
+		await expectTopicMembers(list, current, decisionReports.map(([title]) => title));
+		assert.equal(new URL(page.url()).searchParams.get("topic"), originalDecision.id);
+		await expectTopicMembers(list, topic(list, "CFO"), decisionControls.slice(0, 2).map(([title]) => title));
+	}, { ...catalog, topics: [originalDecision], pages });
+});
+
+test("Queue and Collection reunite a cached split edition and keep its read state, discussion counts, and link order", async (t) => {
+	const former = { id: "story:1099e68c5cf78837dce755e5836e8dc4", label: decisionReports[3][0], kind: "story" };
+	const pages = decisionReports.map((report, i) => ({
+		...decisionPage(report, i < 3 ? originalDecision.id : former.id), posts: [["hn:" + (30300 + i), i + 1]],
+	}));
+	const saved = [...decisionReports, ...decisionControls].map(([title, url], i) => ({
+		...guide, id: 30300 + i, key: new URL(url).host + new URL(url).pathname, url, title,
+		addedAt: now * 1000 - i * 1000, time: Date.UTC(2026, 10, 23) / 1000 - i, descendants: i + 1,
+	}));
+	const app = await launchTopics({ status: 503, stored: {
+		[catalogKey]: { revision: 12, fetchedAt: Date.now(), data: { ...catalog, topics: [former, originalDecision], pages } },
+		"HNewhere:topic_visits": { [former.id]: true }, "HNewhere:collected": saved, "HNewhere:queue": saved,
+	} });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	const list = page.locator("#app-list-body");
+	page.setDefaultTimeout(5000);
+	await page.goto("https://backchnnl.app/");
+	for (const view of ["queue", "collection"]) {
+		await rail(page, view).click();
+		const links = list.locator(view === "collection" ? ".reader-collection-row .browse-title-link" : ".browse-title-link");
+		await links.nth(saved.length - 1).waitFor();
+		const order = await links.allTextContents();
+		await page.getByRole("tab", { name: "By topic", exact: true }).click();
+		const current = list.locator('[data-shared-topic="' + originalDecision.id + '"]');
+		await current.waitFor();
+		const labels = await list.locator(".app-topic-name").allTextContents();
+		assert.deepEqual(labels.filter((label) => /CEO/.test(label)), ["#" + originalDecision.label], view + " " + labels.join("\n"));
+		await current.getByText("15 comments across 5 discussions in 5 links", { exact: true }).waitFor();
+		await expectTopicStatus(current, "Read");
+		await expectTopicMembers(list, current, decisionReports.map(([title]) => title));
+		assert.equal(new URL(page.url()).searchParams.get("topic"), originalDecision.id);
+		await page.getByRole("tab", { name: "By link", exact: true }).click();
+		await links.nth(saved.length - 1).waitFor();
+		assert.deepEqual(await links.allTextContents(), order, view);
+	}
+	assert.equal(app.store.get("HNewhere:topic_visits")[originalDecision.id], true);
+	assert.deepEqual(app.errors, []);
+});
+
+test("a locally visited event stays read after its members become part of wider public coverage", async (t) => {
+	const stories = decisionReports.map(([title, url], i) => ({ ...guide, id: 30600 + i, title, url, topic: "technology", time: now - i }));
+	const pages = decisionReports.map((report) => decisionPage(report, originalDecision.id));
+	let online = false;
+	const feed = (stories) => ({ timestamp: now * 1000, stories });
+	const key = "HNewhere:frontpage_feed:technology/hn/front/";
+	const app = await launchTopics({ stored: {
+		"HNewhere:app_browse_topics": true, [key]: feed(stories.slice(3)),
+		"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": feed([]),
+	}, responses: [
+		{ match: (url) => url === catalogURL && !online, status: 503 },
+		{ match: (url) => url === catalogURL, json: { ...catalog, topics: [originalDecision], pages } },
+	] });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	page.setDefaultTimeout(5000);
+	const card = page.locator("#app-list-body .app-topic-row");
+	await page.goto("https://backchnnl.app/");
+	await card.waitFor();
+	const localId = await card.getAttribute("data-shared-topic");
+	assert.match(localId, /^reader-story:/);
+	await card.click();
+	await expectSourceTitles(page, decisionReports.slice(3).map(([title]) => title));
+	assert(await waitFor(() => app.store.get("HNewhere:topic_visits")?.[localId]));
+	online = true;
+	app.store.set(key, feed(stories));
+	await page.goto("https://backchnnl.app/");
+	await card.waitFor();
+	assert.equal(await card.getAttribute("data-shared-topic"), originalDecision.id);
+	assert.equal(await card.getAttribute("aria-description"), "Read");
+	assert.equal(app.store.get("HNewhere:topic_visits")[originalDecision.id], true);
+	assert.deepEqual(app.errors, []);
+});
+
+test("new accreditation reports join published reaction coverage while a reversal and a different college stay separate", async () => {
+	const decision = { id: "story:engineering-accreditation", kind: "story", label: "Northbridge Academy loses engineering accreditation" };
+	const reports = [
+		["Students discuss the consequences for their engineering degrees", "https://campus.example/2026/11/23/degrees"],
+		["Engineering faculty criticizes the board’s decision", "https://journal.example/2026/11/23/faculty"],
+		["Northbridge Academy has lost its engineering accreditation", "https://college.example/2026/11/23/accreditation"],
+		["Northbridge Academy loses its engineering accreditation", "https://education.example/2026/11/23/decision"],
+	];
+	const controls = [
+		["Northbridge Academy regains engineering accreditation", "https://board.example/2026/11/23/other"],
+		["Westhaven Academy loses engineering accreditation", "https://other.example/2026/11/23/college"],
+		["Northbridge Academy lost engineering accreditation in 2012", "https://archive.example/2012/11/23/college"],
+	];
+	const pages = reports.slice(0, 2).map((report) => decisionPage(report, decision.id));
+	await withBookmarkTopics([...reports, ...controls], async (list) => {
+		assert.deepEqual(await list.locator(".app-topic-name").allTextContents(), ["#" + decision.label]);
+		await expectTopicMembers(list, list.locator('[data-shared-topic="' + decision.id + '"]'), reports.map(([title]) => title));
+	}, { stored: { [catalogKey]: { fetchedAt: Date.now(), data: { ...catalog, topics: [decision], pages } } } });
+});
+
 test("Reader matches reinstatement at the named employer and separates speculation and other employers", async () => {
 	const reports = [
 		["Harbor Labs reinstates Mira Vale as CEO", "https://board.example.org/decision"],

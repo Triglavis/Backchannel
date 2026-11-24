@@ -466,6 +466,79 @@ test("Back from a differently ordered full Reddit thread restores the original a
 const asideSort = (aside) => aside.getByRole("button", { name: /^Sort (Best|Oldest|Newest)$/ });
 const asideSources = (aside) => aside.getByRole("button", { name: /discussion sources/i });
 
+test("the topic header matches the regular discussion header's controls and alignment", async (t) => {
+	const { aside } = await openTopic(t);
+	const measure = (button) => {
+		const bar = button.closest("aside, header");
+		const sort = bar.querySelector(".settings-select-toggle");
+		const left = sort.getBoundingClientRect(), right = button.getBoundingClientRect();
+		const heading = bar.querySelector("h2")?.getBoundingClientRect();
+		const size = (node, box) => [box.width, box.height, getComputedStyle(node).borderTopLeftRadius, getComputedStyle(node).borderTopWidth];
+		return { buttons: [size(sort, left), size(button, right)], gap: right.left - left.right,
+			titleAligned: heading && heading.right <= left.left && Math.abs((heading.top + heading.bottom - right.top - right.bottom) / 2) <= 2 };
+	};
+	const sources = asideSources(aside);
+	const topic = await sources.evaluate(measure);
+	const regular = await launchApp({ sharedStore: true, settings: { sources: { hn: true }, frontPageMode: "sources", updateCheck: false } });
+	t.after(() => regular.browser.close());
+	await regular.page.goto("https://backchnnl.app/");
+	await regular.page.locator("#app-list-body .browse-title-link").first().click();
+	await regular.page.locator("#comments-content .comment[data-comment-id]").first().waitFor();
+	await regular.page.locator(".discussion-progress-strip:not([aria-hidden=true])").waitFor({ state: "hidden" });
+	const sidebar = await regular.page.locator("#app-discussion-meta .page-header-disclosure:visible").evaluate(measure);
+	assert.deepEqual(topic.buttons, sidebar.buttons);
+	assert(Math.abs(topic.gap - sidebar.gap) <= 1, `topic gap ${topic.gap}, sidebar gap ${sidebar.gap}`);
+	assert(topic.titleAligned);
+	assert(await sources.evaluate((button) => button.textContent.trim() === "" && Boolean(button.title)));
+});
+
+for (const width of [1280, 320]) {
+	test(`the topic Sources menu fits at ${width}px and its last discussion is reachable`, async (t) => {
+		const threads = Array.from({ length: 16 }, (_, i) => ({ source: "hn", url: threadURL(92000 + i),
+			title: "Harbor inspection report from the coast guard, field office " + (i + 1), comments: 1 }));
+		const { page, aside } = await openTopic(t, { phone: width === 320, threads });
+		await page.setViewportSize({ width, height: width === 320 ? 450 : 600 });
+		await feedList(aside).getByText(/Comment 1 on Inspectors/).waitFor();
+		const sources = asideSources(aside);
+		if (width === 320) await sources.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 48));
+		await sources.click();
+		const menu = aside.getByRole("group", { name: "Filter discussions by source" });
+		const last = menu.getByRole("checkbox").last();
+		await menu.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+		const geometry = await menu.evaluate((el) => {
+			const pane = el.closest(".app-reader-scroll").getBoundingClientRect();
+			const box = el.getBoundingClientRect(), last = [...el.querySelectorAll("input")].at(-1).getBoundingClientRect();
+			const hit = el.getRootNode().elementFromPoint(last.x + last.width / 2, last.y + last.height / 2);
+			let edgesReachable = true;
+			for (let y = box.top + 14; y < box.bottom - 6; y += 12) {
+				for (const x of [box.left + 16, box.right - 16]) edgesReachable &&= el.contains(el.getRootNode().elementFromPoint(x, y));
+			}
+			return { width: Math.round(box.width), within: box.left >= Math.max(0, pane.left) && box.right <= Math.min(innerWidth, pane.right) + 1 &&
+				box.top >= Math.max(0, pane.top) && box.bottom <= Math.min(innerHeight, pane.bottom) + 1,
+				usable: edgesReachable && el.contains(hit) && el.scrollWidth <= el.clientWidth + 1 };
+		});
+		assert.deepEqual(geometry, { width: 300, within: true, usable: true });
+		await last.uncheck();
+		assert.equal(await last.isChecked(), false);
+		await last.press("Escape");
+		assert(await menu.isHidden());
+		assert(await sources.evaluate((el) => el.matches(":focus")));
+	});
+}
+
+test("scrolling a phone topic toolbar out of view dismisses its Sources menu", async (t) => {
+	const { page, aside } = await openTopic(t, { phone: true });
+	const toggle = asideSources(aside);
+	await feedList(aside).getByText(/Comment 1 on Inspectors/).waitFor();
+	await toggle.click();
+	const menu = aside.getByRole("group", { name: "Filter discussions by source" });
+	await menu.waitFor();
+	await toggle.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().bottom + 100));
+	assert(await waitFor(() => toggle.evaluate((el) => el.getBoundingClientRect().bottom <= 0)));
+	await menu.waitFor({ state: "hidden" });
+	assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+});
+
 test("topic sorting uses comment dates and the saved per-discussion unread timestamps", async (t) => {
 	const ids = [981011, 981012, 981021, 981022];
 	const dates = [now - 100, now - 500, now - 300, now - 200];

@@ -219,6 +219,7 @@
 		zoomBySite: "HNewhere:zoom_by_site",
 		appListWidth: "HNewhere:app_list_width",
 		appSplit: "HNewhere:app_split",
+		appTopicSplit: "HNewhere:app_topic_split",
 		appPanes: "HNewhere:app_panes",
 		appRailOrder: "HNewhere:app_rail_order",
 		appZoom: "HNewhere:app_zoom",
@@ -21824,12 +21825,13 @@ header button svg {
 .source-menu-anchor {
 	position:relative;
 	display:inline-flex;
+	--source-menu-gap:3px;
 }
 
 .source-menu {
 	position:absolute;
 	left:0;
-	top:calc(100% + 3px);
+	top:calc(100% + var(--source-menu-gap, 3px));
 	z-index:4;
 	width:300px;
 	max-width:calc(100vw - 24px);
@@ -21847,6 +21849,11 @@ header button svg {
 
 .source-menu.hidden {
 	display:none;
+}
+
+.source-menu.opens-up {
+	top:auto;
+	bottom:calc(100% + var(--source-menu-gap, 3px));
 }
 
 .choice-group + .choice-group {
@@ -27670,22 +27677,37 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			?.setAttribute("aria-expanded", "false");
 	}
 
-	function fitSourceMenuToRoom(menu) {
+	function fitSourceMenuToRoom(menu, room = menu.closest("#panel"), dismiss) {
 		requestAnimationFrame(() => {
-			if (!menu.isConnected || menu.classList.contains("hidden")) {
+			if (!room || !menu.isConnected || menu.classList.contains("hidden")) return;
+			const panel = room.getBoundingClientRect();
+			const anchor = menu.parentElement.getBoundingClientRect();
+			const gap = parseFloat(getComputedStyle(menu).getPropertyValue("--source-menu-gap")) || 3;
+			const left = Math.max(0, panel.left) + 8;
+			const right = Math.min(innerWidth, panel.right) - 8;
+			const top = Math.max(0, panel.top);
+			const bottom = Math.min(innerHeight, panel.bottom);
+			if (dismiss && (anchor.bottom <= top || anchor.top >= bottom || anchor.right <= left - 8 || anchor.left >= right + 8)) {
+				dismiss();
 				return;
 			}
-
-			const panel = menu.closest("#panel")?.getBoundingClientRect();
-			if (!panel) return;
+			const above = anchor.top - top - gap - 8;
+			const below = bottom - anchor.bottom - gap - 8;
+			menu.style.maxWidth = Math.max(0, Math.floor(right - left)) + "px";
 			menu.style.transform = "";
-			menu.style.maxWidth = `${Math.max(0, Math.floor(panel.width - 16))}px`;
 			const box = menu.getBoundingClientRect();
-			const left = Math.max(panel.left + 8, Math.min(box.left, panel.right - box.width - 8));
-			menu.style.transform = `translateX(${left - box.left}px)`;
-			const room = panel.bottom - box.top - 12;
-
-			menu.style.maxHeight = `${Math.max(160, Math.floor(room))}px`;
+			const up = menu.scrollHeight + 2 > below && above > below;
+			menu.classList.toggle("opens-up", up);
+			menu.style.maxHeight = Math.max(0, Math.floor(up ? above : below)) + "px";
+			const floating = menu.hasAttribute("popover");
+			const preferred = floating ? anchor.right - box.width : box.left;
+			const x = Math.max(left, Math.min(preferred, right - box.width));
+			if (floating) {
+				menu.style.left = x + "px";
+				menu.style.top = (up ? anchor.top - gap - menu.offsetHeight : anchor.bottom + gap) + "px";
+			} else {
+				menu.style.transform = `translateX(${x - box.left}px)`;
+			}
 		});
 	}
 
@@ -30291,6 +30313,14 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		return wrapper;
 	}
 
+	function appDiscussionSourcesHead(onSync) {
+		const title = document.createElement("div");
+		title.className = "app-sources-head";
+		title.innerHTML = `<span class="app-sources-title">Sources</span><button type="button" class="app-head-icon app-sources-sync" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>`;
+		title.querySelector("button").onclick = onSync;
+		return title;
+	}
+
 	function paintAppDiscussionMeta(wrapper, stories, total) {
 		const shadow = appState?.ui.shadow;
 		const slot = shadow?.querySelector("#app-discussion-meta");
@@ -30326,12 +30356,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		disclosure.classList.add("app-head-icon");
 		disclosure.setAttribute("aria-label", summary);
 		disclosure.title = summary;
-		const title = document.createElement("div");
-
-		title.className = "app-sources-head";
-		title.innerHTML = `<span class="app-sources-title">Sources</span><button type="button" class="app-head-icon app-sources-sync" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>`;
-		title.querySelector(".app-sources-sync").onclick = () => shadow.querySelector("#app-list-sync")?.click();
-		menu.prepend(title);
+		menu.prepend(appDiscussionSourcesHead(() => shadow.querySelector("#app-list-sync")?.click()));
 		hint.className = "settings-option-hint app-discussion-summary";
 		hint.textContent = summary;
 
@@ -30372,7 +30397,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		const shadow = appState?.ui.shadow;
 		if (!shadow) return;
 		const busy = [...syncOperations.values()].some((operation) => operation.kind === "sync" || operation.target === openPageKey());
-		for (const button of shadow.querySelectorAll(".app-sources-sync, #app-discussion-sync-empty")) {
+		for (const button of shadow.querySelectorAll("#app-discussion-meta .app-sources-sync, #app-discussion-sync-empty")) {
 			button.classList.toggle("is-syncing", busy);
 			button.disabled = busy;
 			if (busy) button.setAttribute("aria-busy", "true");
@@ -39231,7 +39256,7 @@ ${SETTINGS_MODAL_CSS}
 	cursor:pointer;
 }
 
-.app-topic-article-scroll { container:topic-article / inline-size; }
+.app-topic-article-scroll { container:topic-article / inline-size; font-size:calc(16px * var(--app-text-zoom, 1)); }
 .app-topic-article.bc-reader {
 	--topic-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 	--topic-secondary:color-mix(in srgb, var(--reader-meta) 78%, var(--reader-ink));
@@ -39247,6 +39272,7 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-article .bc-reader-title:focus-visible { position:relative; outline:none; }
 .app-topic-article .bc-reader-title:focus-visible::before { content:""; position:absolute; inset-block:.12em; inset-inline-start:-.32em; border-inline-start:3px solid var(--reader-link); }
 .app-topic-narrative, .app-topic-discussions, .app-topic-sources { min-width:0; }
+.app-topic-divider { display:none; }
 .app-topic-article .bc-reader-byline, .app-topic-credit, .app-topic-request-status {
 	color:var(--topic-secondary);
 	font:normal .77em/1.45 var(--topic-sans);
@@ -39307,7 +39333,7 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-chronology li:last-child .app-topic-event { border-color:transparent; padding-bottom:0; }
 .app-topic-event .app-topic-credit { margin-bottom:.35em; color:var(--reader-link); font-weight:600; }
 .app-topic-sources { margin-top:1.65em; padding-top:.8em; border-top:1px solid var(--reader-rule); }
-.app-topic-sources > h2, .app-topic-discussions > h2 { margin:0 0 .35em; color:var(--reader-ink); font:650 .95em/1.45 var(--topic-sans); }
+.app-topic-sources > h2, .app-topic-discussion-head h2 { margin:0 0 .35em; color:var(--reader-ink); font:650 .95em/1.45 var(--topic-sans); }
 .app-topic-sources > ol > li { padding:.52em 0; border-bottom:1px solid var(--reader-rule); }
 .app-topic-sources > ol > li:last-child { border-bottom:0; }
 .app-topic-sources .app-topic-cite { top:auto; margin:0 .12em; padding:.2em; background:transparent; color:inherit; font:normal .82em/1 var(--topic-sans); font-variant-numeric:tabular-nums; }
@@ -39322,24 +39348,16 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-thread-title { display:block; color:var(--reader-ink); font-weight:600; text-decoration:none; }
 .app-topic-thread-original { color:var(--reader-link); text-decoration:none; }
 .app-topic-discussions { margin-top:1.6em; padding-top:.8em; border-top:1px solid var(--reader-rule); }
-.app-topic-controls {
-	position:relative; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 10px;
-	margin:0 0 .45em; padding:0 0 .4em; border-bottom:1px solid var(--reader-rule);
-	font:500 .77em/1.45 var(--topic-sans); color:var(--topic-secondary);
-	--surface:var(--reader-page); --surface-text:var(--reader-ink); --surface-border:var(--reader-rule);
-	--surface-divider:var(--reader-rule); --accent:var(--reader-link); --muted:var(--topic-secondary);
+.app-topic-discussion-head {
+	position:relative; z-index:2; display:flex; align-items:center; flex-wrap:wrap; gap:2px 8px;
+	min-height:36px; margin-bottom:.45em; border-bottom:1px solid var(--reader-rule);
 }
-.app-topic-controls .page-sort { padding:0; font:inherit; color:inherit; }
-.app-topic-controls .settings-select-toggle, .app-topic-control { min-height:32px; padding:2px 8px; border:1px solid var(--reader-rule); border-radius:6px; color:var(--reader-ink); background:var(--reader-page); font:inherit; cursor:pointer; }
-.app-topic-controls .settings-select-menu { left:0; right:auto; min-width:max-content; }
-.app-topic-controls .source-menu { inset:auto 0 auto auto; top:100%; max-width:100%; max-height:min(320px, 48dvh); font:inherit; }
-.app-topic-controls .source-menu.opens-up { top:auto; bottom:100%; }
+.app-topic-discussion-head h2 { margin:0; }
+.app-topic-controls { display:flex; align-items:center; gap:2px; margin-inline-start:auto; font:12px/1.4 var(--topic-sans); }
+.app-topic-controls .app-sources-head { align-items:center; justify-content:space-between; }
 .app-topic-controls .choice-label { white-space:normal; }
-.app-topic-controls .app-sources-head { display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:5px; }
-.app-topic-controls .app-topic-control[aria-expanded="true"], .app-topic-controls .app-topic-control.is-filtered { color:var(--reader-link); border-color:currentColor; }
-.app-topic-controls .source-menu-option { min-height:29px; font:inherit; }
-.app-topic-controls .source-menu-hint { color:var(--topic-secondary); }
-.app-topic-controls .app-topic-control:disabled { opacity:.55; cursor:default; }
+.app-topic-controls .source-menu:popover-open { position:fixed; inset:auto; margin:0; }
+#app-article:has(.app-topic-controls .source-menu:not([popover], .hidden)) :is(#app-bar-back, #app-bar) { visibility:hidden; }
 .app-topic-discussions a { color:var(--reader-ink); text-underline-offset:2px; }
 .app-topic-discussions .app-topic-thread-source, .app-topic-discussions .app-topic-comment-source { color:var(--reader-link); }
 .app-topic-thread-detail { min-width:0; padding:.45em 0 .8em; overflow-wrap:anywhere; }
@@ -39382,21 +39400,31 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-thread-detail .composer-status { color:var(--topic-secondary); }
 .app-topic-discussions [hidden] { display:none !important; }
 @media (pointer:coarse) {
-	.app-topic-controls :is(.settings-select-toggle,.app-topic-control,.source-menu-option,.dropdown-item), .app-topic-discussions :is(.app-topic-comment-action,.app-topic-comment-context,.app-topic-thread-back,.item-action-link) { min-height:40px; }
+	.app-topic-controls :is(.source-menu-option,.dropdown-item), .app-topic-discussions :is(.app-topic-comment-action,.app-topic-comment-context,.app-topic-thread-back,.item-action-link) { min-height:40px; }
 	.app-topic-thread-detail .composer-text { font-size:16px; }
 }
-@container topic-article (min-width:720px) {
+@container topic-article (min-width:720px) and (min-width:45em) {
 	.app-topic-article.bc-reader:has(> .app-topic-discussions) {
+		--topic-brief-min:20em;
+		--topic-discussion-min:16em;
+		--topic-gutter:24px;
 		display:grid;
-		grid-template-columns:minmax(0, 2.25fr) minmax(190px, 1fr);
+		grid-template-columns:minmax(0, 1fr) calc(var(--topic-discussion-min) + (100% - var(--topic-brief-min) - var(--topic-discussion-min) - var(--topic-gutter)) * var(--topic-discussion-share));
 		grid-template-rows:auto 1fr;
-		column-gap:clamp(24px, 4%, 48px);
+		column-gap:var(--topic-gutter);
 		align-items:start;
-		max-width:58em;
+		max-width:76em;
 	}
-	.app-topic-narrative { grid-column:1; grid-row:1; }
+	.app-topic-narrative { grid-column:1; grid-row:1; min-width:var(--topic-brief-min); }
+	.app-topic-narrative > *, .app-topic-sources { max-width:42em; }
 	.app-topic-sources { grid-column:1; grid-row:2; }
-	.app-topic-discussions { grid-column:2; grid-row:1 / span 2; margin:0; padding:.18em 0 0 1.1em; border-top:0; border-inline-start:1px solid var(--reader-rule); }
+	.app-topic-discussions { grid-column:2; grid-row:1 / span 2; position:relative; align-self:stretch; min-width:var(--topic-discussion-min); margin:0; padding:.18em 0 0; border:0; }
+	.app-topic-divider { display:block; position:absolute; inset-block:0; inset-inline-end:100%; width:var(--topic-gutter); cursor:col-resize; touch-action:none; user-select:none; }
+	.app-topic-divider::before, .app-topic-divider::after { content:""; position:absolute; inset-inline-start:50%; transform:translateX(-50%); background:var(--reader-rule); }
+	.app-topic-divider::before { inset-block:0; width:1px; }
+	.app-topic-divider::after { top:.45em; width:3px; height:24px; border-radius:2px; background:var(--topic-secondary); }
+	.app-topic-divider:is(:hover, :focus-visible, :active)::after { background:var(--reader-link); }
+	.app-topic-divider:focus-visible { outline:2px solid var(--reader-link); outline-offset:-3px; }
 }
 .app-topic-source-dialog {
 	position:fixed;
@@ -40072,17 +40100,17 @@ ${READER_LIST_CSS}
 	display:none;
 }
 
-#panel.app-docked .app-discussion-sort .page-sort {
+.app-discussion-sort .page-sort {
 	gap:5px;
 	padding:0;
 	font-size:10px;
 }
 
-#panel.app-docked .app-discussion-sort .settings-select {
+.app-discussion-sort .settings-select {
 	min-width:67px;
 }
 
-#panel.app-docked .app-discussion-sort .settings-select-toggle {
+.app-discussion-sort .settings-select-toggle {
 	border-radius:999px;
 }
 
@@ -40097,8 +40125,8 @@ ${READER_LIST_CSS}
 	font-weight:normal;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu-anchor {
-	position:relative;
+.app-discussion-meta .source-menu-anchor {
+	--source-menu-gap:8px;
 }
 
 #panel.app-docked .app-discussion-meta .page-header-disclosure {
@@ -40177,16 +40205,18 @@ ${READER_LIST_CSS}
 	z-index:31;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu {
-	top:calc(100% + 8px);
-}
-
-#panel.app-docked .app-discussion-meta .app-drop-arrow {
+.app-discussion-meta .app-drop-arrow {
 	top:calc(100% + 3px);
 	left:calc(50% - 5px);
 }
 
-#panel.app-docked .app-discussion-meta .source-menu.hidden + .app-drop-arrow {
+.app-discussion-meta .source-menu.opens-up + .app-drop-arrow {
+	top:auto;
+	bottom:calc(100% + 3px);
+	transform:rotate(225deg);
+}
+
+.app-discussion-meta .source-menu.hidden + .app-drop-arrow {
 	display:none;
 }
 
@@ -40195,7 +40225,7 @@ ${READER_LIST_CSS}
 }
 
 
-#panel.app-docked .app-discussion-meta .source-menu {
+.app-discussion-meta .source-menu {
 	left:auto;
 	right:0;
 	width:300px;
@@ -40210,40 +40240,40 @@ ${READER_LIST_CSS}
 	text-align:left;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu-entry {
+.app-discussion-meta .source-menu-entry {
 	padding:0;
 	border-radius:0;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu-option {
+.app-discussion-meta .source-menu-option {
 	gap:8px;
 	font-size:12px;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu-entry + .source-menu-entry {
+.app-discussion-meta .source-menu-entry + .source-menu-entry {
 	margin-top:8px;
 }
 
 @media (hover: hover) {
-	#panel.app-docked .app-discussion-meta .source-menu-entry:hover {
+	.app-discussion-meta .source-menu-entry:hover {
 		background:none;
 	}
 }
 
-#panel.app-docked .app-discussion-meta .choice-label {
+.app-discussion-meta .choice-label {
 	flex:1 1 auto;
 	min-width:0;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu-hint {
+.app-discussion-meta .source-menu-hint {
 	margin:1.5px 0 0 23px;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu-hint + .source-menu-option {
+.app-discussion-meta .source-menu-hint + .source-menu-option {
 	margin-top:8px;
 }
 
-#panel.app-docked .app-discussion-meta .choice-group + .choice-group {
+.app-discussion-meta .choice-group + .choice-group {
 	margin-top:10px;
 	padding-top:10px;
 }
@@ -40288,8 +40318,8 @@ ${READER_LIST_CSS}
 	border-top:0;
 }
 
-#panel.app-docked .app-discussion-meta .choice-head,
-#panel.app-docked .app-discussion-meta .choice-sub-head {
+.app-discussion-meta .choice-head,
+.app-discussion-meta .choice-sub-head {
 	margin:0 0 4px;
 	color:var(--muted);
 	font-size:11px;
@@ -40318,7 +40348,7 @@ ${READER_LIST_CSS}
 		align-items:center;
 	}
 
-	#panel.app-docked .app-discussion-meta .source-menu .app-sources-sync {
+	:is(#panel.app-docked, .app-topic-controls) .app-discussion-meta .source-menu .app-sources-sync {
 		display:inline-flex;
 		width:36px;
 		height:36px;
@@ -48116,7 +48146,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	const SHARED_TOPIC_COVERAGE_URL = SHARED_TOPIC_INDEX_URL + "/coverage";
 	const SHARED_TOPIC_REPORT_URL = "https://topics.backchnnl.app/api/topic-reports";
 	const SHARED_TOPIC_FALLBACK_URL = "https://backchannel-topics.triglavis-llc.workers.dev/api/topics";
-	const SHARED_TOPIC_CACHE_REVISION = 12;
+	const SHARED_TOPIC_CACHE_REVISION = 13;
 	const SHARED_TOPIC_CACHE_MS = 3 * 60 * 60 * 1000;
 	const SHARED_TOPIC_MAX_LINKS = 4000;
 	const WIKI_TOPIC_PHOTOS_KEY = "HNewhere:wikipedia_topic_images";
@@ -48710,17 +48740,16 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				if (topic.kind !== "coverage" && !READER_BROAD_TOPIC_LABELS.has(topicFilterKey(topic.label))) assigned.add(row);
 			}
 		}
-		const groups = [];
+		const groups = new Map();
 		for (const topic of index?.topics.values() || []) {
-			if (buckets.has(topic.id)) groups.push({ ...topic, rows: buckets.get(topic.id) });
+			if (buckets.has(topic.id)) groups.set(topic.id, { ...topic, rows: buckets.get(topic.id) });
 		}
 		const order = new Map(rows.map((row, position) => [row, position]));
-		const existing = new Map(groups.map((group) => [group.id, group]));
 		const filterGroups = [];
 		for (const group of localGroups) {
 			if (index?.topics.get(group.id)?.curated) continue;
 			const shared = index?.topics.has(group.id);
-			const match = existing.get(group.id);
+			const match = groups.get(group.id);
 			if (match && group.nameOnly) match.nameOnly = true;
 			if (coverage && group.cardRows.length !== group.rows.length) filterGroups.push({ ...group, filterOnly: true });
 			const members = coverage ? group.cardRows : group.rows;
@@ -48729,14 +48758,23 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (match) {
 				match.rows = [...new Set([...match.rows, ...visible])].sort((a, b) => order.get(a) - order.get(b));
 			}
-			else {
-				const local = { ...group, rows: visible };
-				groups.push(local);
-				existing.set(local.id, local);
-			}
+			else groups.set(group.id, { ...group, rows: visible });
 		}
-		if (coverage) groups.push(...readerUnindexedStoryGroups(rows, urlFor, coverage, index, localGroups));
-		return mergeReaderTopicGroups(groups, order, index).concat(filterGroups);
+		if (coverage) for (const story of readerUnindexedStoryGroups(rows, urlFor, coverage, index, localGroups)) {
+			if (story.equivalentIds) {
+				const members = new Set(story.rows);
+				for (const id of story.equivalentIds) {
+					const previous = groups.get(id);
+					if (!previous) continue;
+					for (const row of previous.rows) members.add(row);
+					story.image ||= previous.image;
+					if (id !== story.id) groups.delete(id);
+				}
+				story.rows = [...members].sort((a, b) => order.get(a) - order.get(b));
+			}
+			groups.set(story.id, story);
+		}
+		return mergeReaderTopicGroups(groups.values(), order, index).concat(filterGroups);
 	}
 
 	function readerMemberEvidence(row, url, article) {
@@ -48791,6 +48829,11 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			? member.actors.some((name) => terms.every((term) => name.includes(term)))
 			: terms.every((term) => member.actorContext.has(term));
 		return left.actors.some((terms) => appearsIn(terms, right)) || right.actors.some((terms) => appearsIn(terms, left));
+	}
+
+	function readerPublishedEvent(label) {
+		const event = readerMemberEvidence({ title: label }, "");
+		return event.leadership?.stated || event.obituary || event.statusChange?.stated && event.statusChange.names.size === 1 ? event : null;
 	}
 
 	function readerCompatibleMembers(left, right) {
@@ -48858,6 +48901,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const evidence = new Map();
 		const byTarget = new Map();
 		const published = new Map();
+		const events = new Map();
 		for (const row of rows) {
 			const url = urlFor(row);
 			const key = normalizeURL(url);
@@ -48865,7 +48909,16 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const ids = index?.pages.get(sharedKey) || [];
 			if (!key || index?.reviewedPages.has(sharedKey) || ids.some((id) => index.topics.get(id).curated)) continue;
 			const storyId = ids.find((id) => index.topics.get(id).kind === "story" && index.topicPages.get(id)?.size > 1);
-			const member = readerMemberEvidence(row, url, coverage.articles.get(key));
+			let member = readerMemberEvidence(row, url, coverage.articles.get(key));
+			if (storyId) {
+				if (!events.has(storyId)) events.set(storyId, readerPublishedEvent(index.topics.get(storyId).label));
+				const event = events.get(storyId);
+				if (event) {
+					const assignment = { ...event, dated: member.dated };
+					if ((member.leadership || member.statusChange || member.obituary) && !readerCompatibleMembers(assignment, member)) continue;
+					member = assignment;
+				}
+			}
 			if (!member.titles.length) continue;
 			member.headline = { story: { title: member.titles[0] }, numbers: (member.titles[0].match(/\p{N}+(?:[.,]\p{N}+)*/gu) || []).join(" ") };
 			const signatures = member.leadership ? ["leadership:" + member.leadership.organization + ":" + member.leadership.person.split(" ").at(-1)] :
@@ -48904,13 +48957,13 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const publishedGroups = [];
 		for (const [id, keys] of published) {
 			const first = evidence.get(keys[0]);
-			const publishedReturn = first.leadership && leadershipReturn(index.topics.get(id).label);
-			const same = (first.obituary || sameLeadershipReturn(first.leadership, publishedReturn)) && publishedGroups.find(({ anchors }) =>
-				keys.every((key) => anchors.every((other) => readerCompatibleMembers(evidence.get(key), evidence.get(other)))));
+			const reviewed = [...index.topicPages.get(id)].some((key) => index.reviewedPages.has(key));
+			const same = !reviewed && (first.obituary || events.get(id)) && publishedGroups.find((group) =>
+				!group.reviewed && keys.every((key) => group.anchors.every((other) => readerCompatibleMembers(evidence.get(key), evidence.get(other)))));
 			if (same) {
 				same.anchors.push(...keys);
 				same.ids.push(id);
-			} else publishedGroups.push({ ids: [id], anchors: keys });
+			} else publishedGroups.push({ ids: [id], anchors: keys, reviewed });
 		}
 		for (const { ids, anchors } of publishedGroups) {
 			const members = [...anchors];
@@ -48921,7 +48974,16 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			}
 			if (members.length > anchors.length || ids.length > 1) {
 				const primary = ids.toSorted((a, b) => index.topicPages.get(b).size - index.topicPages.get(a).size || a.localeCompare(b))[0];
-				groups.push({ ...index.topics.get(primary), equivalentIds: ids, rows: members.map((key) => available.get(key)) });
+				const topic = index.topics.get(primary);
+				const aliases = ids.flatMap((id) => readerTopicLabels(index.topics.get(id)));
+				const equivalentIds = [...ids];
+				const local = members.slice(anchors.length);
+				if (local.length > 1) {
+					equivalentIds.push("reader-story:" + local.toSorted()[0]);
+					aliases.push(readerStoryLead(local.map((key) => evidence.get(key))));
+				}
+				groups.push({ ...topic, equivalentIds, rows: members.map((key) => available.get(key)),
+					aliases: normalizeTopicLabels(aliases).filter((label) => topicFilterKey(label) !== topicFilterKey(topic.label)) });
 			}
 		}
 		for (const key of remaining.keys()) {
@@ -49993,12 +50055,72 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return figure;
 	}
 
+	function appTopicDiscussionDivider(aside) {
+		const divider = appTopicArticleNode("div", "app-topic-divider");
+		divider.tabIndex = 0;
+		divider.title = "Resize discussions";
+		divider.setAttribute("role", "separator");
+		divider.setAttribute("aria-label", divider.title);
+		divider.setAttribute("aria-orientation", "vertical");
+		divider.setAttribute("aria-controls", aside.id);
+		divider.setAttribute("aria-valuemin", "0");
+		divider.setAttribute("aria-valuemax", "100");
+		divider.setAttribute("aria-valuenow", String(Math.round(appState.topicDiscussionSplit)));
+
+		const setSplit = (value) => {
+			const split = Math.max(0, Math.min(100, Math.round(value * 10) / 10));
+			appState.topicDiscussionSplit = split;
+			aside.parentElement.style.setProperty("--topic-discussion-share", String(split / 100));
+			divider.setAttribute("aria-valuenow", String(Math.round(split)));
+		};
+		const remember = () => {
+			const split = appState.topicDiscussionSplit;
+			appState.topicSplitSave = (appState.topicSplitSave || Promise.resolve())
+				.then(() => save(STORAGE.appTopicSplit, split)).catch(console.error);
+		};
+		let drag = null;
+		const finishDrag = (event) => {
+			if (drag?.id !== event.pointerId) return;
+			if (drag.split !== appState.topicDiscussionSplit) remember();
+			drag = null;
+			if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId);
+		};
+		divider.onpointerdown = (event) => {
+			if (!event.isPrimary || event.button !== 0) return;
+			const brief = aside.parentElement.querySelector(".app-topic-narrative");
+			const room = [brief, aside].reduce((sum, pane) => sum + pane.getBoundingClientRect().width - parseFloat(getComputedStyle(pane).minWidth), 0);
+			if (room <= 0) return;
+			drag = { id: event.pointerId, x: event.clientX, split: appState.topicDiscussionSplit, room };
+			divider.setPointerCapture(event.pointerId);
+			divider.focus({ preventScroll: true });
+			event.preventDefault();
+		};
+		divider.onpointermove = (event) => {
+			if (drag?.id !== event.pointerId) return;
+			if (!(event.buttons & 1) || !divider.hasPointerCapture(event.pointerId)) return finishDrag(event);
+			setSplit(drag.split + (drag.x - event.clientX) * 100 / drag.room);
+		};
+		divider.onpointerup = divider.onpointercancel = divider.onlostpointercapture = finishDrag;
+		divider.onkeydown = (event) => {
+			const split = appState.topicDiscussionSplit;
+			const value = { ArrowLeft: split + 5, ArrowRight: split - 5, Home: 0, End: 100 }[event.key];
+			if (value == null || event.altKey || event.ctrlKey || event.metaKey) return;
+			event.preventDefault();
+			setSplit(value);
+			if (split !== appState.topicDiscussionSplit) remember();
+		};
+		return divider;
+	}
+
 	function appTopicArticleDiscussions() {
 		const aside = appTopicArticleNode("aside", "app-topic-discussions");
+		aside.id = "app-topic-discussions";
+		const header = appTopicArticleNode("div", "app-topic-discussion-head");
 		const heading = appTopicArticleNode("h2", "", "Discussions");
 		heading.id = "app-topic-discussions-heading";
 		aside.setAttribute("aria-labelledby", heading.id);
-		aside.append(heading, appTopicArticleNode("div", "app-topic-controls"), appTopicArticleNode("div", "app-topic-feed"));
+		header.append(heading, appTopicArticleNode("div", "app-topic-controls"));
+		aside.append(appTopicDiscussionDivider(aside), header, appTopicArticleNode("div", "app-topic-feed"));
 		return aside;
 	}
 
@@ -50023,6 +50145,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const scroller = appTopicArticleNode("div", "app-reader-scroll app-topic-article-scroll");
 		const story = appTopicArticleNode("article", "bc-reader app-topic-article");
 		story.dataset.topicId = article.topic.id;
+		story.style.setProperty("--topic-discussion-share", String(appState.topicDiscussionSplit / 100));
 		story.setAttribute("aria-labelledby", "app-topic-article-heading");
 		const narrative = appTopicArticleNode("div", "app-topic-narrative");
 		const head = appTopicArticleNode("header", "bc-reader-head");
@@ -50113,12 +50236,25 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return scroller;
 	}
 
-	function appTopicVisitIds(group) {
+	function appTopicVisitIds(group, visits) {
 		const ids = [group.id, ...(group.equivalentIds || [])];
 		if (!group.curated) {
-			const urls = [...group.rows, ...(group.extraRows || [])].map((row) => normalizeURL(appTopicRowURL(row))).filter(Boolean);
+			const rows = [...group.rows, ...(group.extraRows || [])];
+			const urls = rows.map((row) => normalizeURL(appTopicRowURL(row))).filter(Boolean);
 			const [first, second] = [...new Set(urls)].sort();
 			if (second) ids.push(JSON.stringify([group.kind, topicFilterKey(group.label), first, second]));
+			if (visits && group.kind === "story" && isSharedTopicId(group.id)) {
+				let event;
+				for (const row of rows) {
+					const url = appTopicRowURL(row);
+					const local = "reader-story:" + normalizeURL(url);
+					if (!visits[local]) continue;
+					event ||= readerPublishedEvent(group.label);
+					if (!event) break;
+					const member = readerMemberEvidence(row, url);
+					if (readerCompatibleMembers({ ...event, dated: member.dated }, member)) ids.push(local);
+				}
+			}
 		}
 		return ids;
 	}
@@ -50139,7 +50275,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 		const missing = new Set();
 		for (const group of active ? [active] : topics) {
-			const ids = appTopicVisitIds(group);
+			const ids = appTopicVisitIds(group, visits);
 			group.visited = Boolean(active) || ids.some((id) => visits[id] || successors.has(id));
 			if (!group.visited) continue;
 			for (const id of ids) {
@@ -50442,8 +50578,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	async function refreshAppTopicArticle(reading, group) {
 		const revision = ++reading.revision;
 		reading.group = group;
-		const [settings, hidden, looks] = await Promise.all([loadSettings(), loadHiddenStories(), loadLooks()]);
+		const [settings, hidden, looks, split] = await Promise.all([loadSettings(), loadHiddenStories(), loadLooks(),
+			appState.topicDiscussionSplit ?? load(STORAGE.appTopicSplit, 40)]);
 		if (appState.topicArticle !== reading || revision !== reading.revision) return;
+		appState.topicDiscussionSplit ??= Number.isFinite(split) ? Math.max(0, Math.min(100, split)) : 40;
 		reading.settings = settings;
 		reading.hidden = new Set(hidden.flatMap((entry) => [entry.key, normalizeURL(entry.url)]).filter(Boolean));
 		const extra = reading.topicExtra;
@@ -51853,24 +51991,42 @@ ${frontPageChooserHTML()}
 			panel.paintDetailRows?.();
 			updateAppTopicFeed(reading);
 		});
-		const sourceButton = appTopicArticleNode("button", "app-topic-control", "Sources");
+		const sortSlot = appTopicArticleNode("span", "app-discussion-sort");
+		sortSlot.append(sort.element);
+		const sources = appTopicArticleNode("span", "app-discussion-meta");
+		const anchor = appTopicArticleNode("span", "source-menu-anchor");
+		const sourceButton = appTopicArticleNode("button", "app-head-icon");
 		sourceButton.type = "button";
-		sourceButton.setAttribute("aria-label", "Discussion sources");
+		sourceButton.innerHTML = APP_DISCUSSIONS_ICON;
+		sourceButton.title = "Discussion sources";
+		sourceButton.setAttribute("aria-label", sourceButton.title);
 		sourceButton.setAttribute("aria-expanded", "false");
 		const menu = appTopicArticleNode("div", "source-menu hidden");
+		if (typeof menu.showPopover === "function") menu.popover = "manual";
 		menu.id = "app-topic-discussion-sources";
 		menu.setAttribute("role", "group");
 		menu.setAttribute("aria-label", "Filter discussions by source");
 		sourceButton.setAttribute("aria-controls", menu.id);
-		controls.append(sort.element, sourceButton, menu);
+		const arrow = appTopicArticleNode("span", "app-drop-arrow");
+		arrow.setAttribute("aria-hidden", "true");
+		anchor.append(sourceButton, menu, arrow);
+		sources.append(anchor);
+		controls.append(sortSlot, sources);
+		let menuEvents;
 		const close = (focus = false) => {
+			menuEvents?.abort();
+			menuEvents = null;
 			menu.classList.add("hidden");
+			if (menu.popover && menu.matches(":popover-open")) menu.hidePopover();
 			sourceButton.setAttribute("aria-expanded", "false");
-			controls.getRootNode().removeEventListener("pointerdown", outside);
 			menu.replaceChildren();
 			if (focus) sourceButton.focus({ preventScroll: true });
 		};
-		const outside = (event) => { if (!event.composedPath().includes(controls)) close(); };
+		const fit = () => fitSourceMenuToRoom(menu, panel.scroller, close);
+		menu.addEventListener("toggle", () => {
+			if (menuEvents && !menu.matches(":popover-open")) close();
+		});
+		panel.controller.signal.addEventListener("abort", () => close(), { once: true });
 		let signature;
 		const update = () => {
 			sort.paint(reading.settings.commentSort, reading.settings.newCommentsFirst);
@@ -51885,19 +52041,17 @@ ${frontPageChooserHTML()}
 				const focusGroup = focused?.dataset.sourceGroup;
 				const choices = appTopicArticleNode("div");
 				choices.innerHTML = sourceMenuHTML(stories, menu.id, []);
-				const top = appTopicArticleNode("div", "app-sources-head");
 				const total = stories.reduce((sum, story) => sum + story.commentCount, 0);
-				top.append(appTopicArticleNode("span", "", pluralize(total, "comment") + " across " + pluralize(stories.length, "discussion")));
-				const sync = appTopicArticleNode("button", "app-topic-control", "Sync");
-				sync.type = "button";
-				sync.onclick = () => {
+				const top = appDiscussionSourcesHead(() => {
 					const selected = panel.entries.get(panel.selected);
 					close(true);
 					refreshAppTopicThreads(reading, selected ? [selected] : appTopicFilteredThreads(panel));
-				};
-				top.append(sync);
+				});
 				menu.replaceChildren(top, ...choices.firstElementChild.children);
+				const hint = appTopicArticleNode("div", "settings-option-hint app-discussion-summary", pluralize(total, "comment") + " across " + pluralize(stories.length, "discussion"));
+				(menu.querySelector("[data-select-all]") || top).after(hint);
 				signature = next;
+				fit();
 				if (focused) {
 					const label = [...menu.querySelectorAll(".source-menu-option")].find((option) =>
 						focusKey ? option.dataset.discussionKey === focusKey : focusGroup ? option.dataset.sourceGroup === focusGroup : option.hasAttribute("data-select-all"));
@@ -51905,9 +52059,11 @@ ${frontPageChooserHTML()}
 				}
 			}
 			syncSourceMenuState(menu, panel.filter || null);
-			const sync = menu.querySelector("button");
-			sync.disabled = !appTopicFilteredThreads(panel).length || Boolean(panel.active.size || panel.detail?.querySelector('[aria-busy="true"]'));
-			sync.setAttribute("aria-busy", String(Boolean(panel.active.size)));
+			const sync = menu.querySelector(".app-sources-sync");
+			const busy = Boolean(panel.active.size || panel.detail?.querySelector('[aria-busy="true"]'));
+			sync.disabled = busy || !appTopicFilteredThreads(panel).length;
+			sync.classList.toggle("is-syncing", busy);
+			sync.setAttribute("aria-busy", String(busy));
 		};
 		wireDiscussionSelection(menu, (keys) => {
 			panel.filter = keys;
@@ -51917,17 +52073,21 @@ ${frontPageChooserHTML()}
 		});
 		sourceButton.onclick = (event) => {
 			if (!menu.classList.contains("hidden")) { close(true); return; }
+			const root = controls.getRootNode();
+			openSelects.get(root)?.();
+			menuEvents = new AbortController();
+			const { signal } = menuEvents;
 			menu.classList.remove("hidden");
+			menu.showPopover?.();
 			sourceButton.setAttribute("aria-expanded", "true");
 			update();
-			const bounds = controls.getBoundingClientRect();
-			const scroller = panel.scroller.getBoundingClientRect();
-			const below = Math.min(innerHeight, scroller.bottom) - bounds.bottom - 6;
-			const above = bounds.top - Math.max(0, scroller.top) - 6;
-			const up = below < 180 && above > below;
-			menu.classList.toggle("opens-up", up);
-			menu.style.maxHeight = Math.min(320, Math.max(80, up ? above : below)) + "px";
-			controls.getRootNode().addEventListener("pointerdown", outside, { signal: panel.controller.signal });
+			root.addEventListener("pointerdown", (e) => { if (!e.composedPath().includes(anchor)) close(); }, { signal });
+			root.addEventListener("scroll", (e) => { if (!menu.contains(e.target)) fit(); }, { capture: true, passive: true, signal });
+			window.addEventListener("scroll", fit, { passive: true, signal });
+			window.addEventListener("resize", fit, { signal });
+			const observer = new ResizeObserver(fit);
+			observer.observe(controls.parentElement);
+			signal.addEventListener("abort", () => observer.disconnect(), { once: true });
 			if (event.detail === 0) menu.querySelector("input:not(:disabled)")?.focus({ preventScroll: true });
 		};
 		controls.addEventListener("focusout", (event) => {

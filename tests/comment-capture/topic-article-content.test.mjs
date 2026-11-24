@@ -36,10 +36,10 @@ const issue = {
 	],
 };
 
-function openReader({ catalogPages = [], artwork, responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
+function openReader({ catalogPages = [], catalogTopics = [], artwork, responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
 	const now = Date.now();
 	const index = {
-		version: 1, generatedAt: new Date(now).toISOString(), topics: [{ ...topic, image: artwork }],
+		version: 1, generatedAt: new Date(now).toISOString(), topics: [{ ...topic, image: artwork }, ...catalogTopics],
 		pages: [{ key: "framed.example.com/post/260", topicIds: [topic.id] }, { key: "plain.example.org/post", topicIds: [topic.id] }, ...catalogPages],
 	};
 	const stories = issue.sources.map((source, i) => ({
@@ -143,6 +143,107 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 		}
 	});
 }
+
+test("the topic discussion divider widens the feed and remembers pointer and keyboard adjustments", async (t) => {
+	const second = { ...topic, id: "topic:platform-signals", label: "Platform signals" };
+	const app = await openReader({ catalogTopics: [second], responses: [
+		{ match: (url) => url === articleURL, json: issue },
+		{ match: (url) => url === catalogURL + "/article?id=" + encodeURIComponent(second.id), json: { ...issue, topic: second } },
+	] });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	const article = page.locator("#app-article-body article");
+	const feed = article.locator(".app-topic-feed");
+	const divider = article.getByRole("separator", { name: /discussions/i });
+	const width = async () => Math.round((await feed.boundingBox()).width);
+	const open = async (id) => {
+		await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(id));
+		await article.getByRole("heading", { name: issue.sections[0].heading }).waitFor();
+	};
+	const drag = async (delta) => {
+		const box = await divider.boundingBox();
+		const x = box.x + box.width / 2, y = Math.max(0, box.y) + 24;
+		await page.mouse.move(x, y);
+		await page.mouse.down();
+		await page.mouse.move(x + delta, y);
+		await page.mouse.up();
+	};
+
+	await open(topic.id);
+	const initial = await width();
+	assert(initial >= 400, "a 1440px desktop gives discussion text at least 400px, measured " + initial);
+	assert.equal(await divider.getAttribute("aria-orientation"), "vertical");
+	await drag(-80);
+	const dragged = await width();
+	assert(Math.abs(dragged - initial - 80) <= 2, "the divider follows the pointer outside its grab area");
+	await open(second.id);
+	assert.equal(await width(), dragged, "another topic uses the saved column width");
+	await divider.press("ArrowLeft");
+	assert(await width() > dragged);
+	await divider.press("ArrowRight");
+	assert(Math.abs(await width() - dragged) <= 1);
+	await divider.press("End");
+	const widest = await width();
+	assert(widest > dragged && (await article.locator(".app-topic-narrative").boundingBox()).width >= 310);
+	await drag(-440);
+	assert.equal(await width(), widest, "the pointer respects the readable brief width");
+	await divider.press("Home");
+	const narrowest = await width();
+	assert(narrowest >= 240 && narrowest < initial);
+	await drag(440);
+	assert.equal(await width(), narrowest, "the pointer respects the minimum discussion width");
+	await divider.press("ArrowLeft");
+	const keyed = await width();
+	assert(keyed > narrowest && keyed < initial, "the next key moves one step after a drag ends outside the window");
+	await page.reload();
+	await article.getByRole("heading", { name: issue.sections[0].heading }).waitFor();
+	assert.equal(await width(), keyed, "the keyboard adjustment survives a reload");
+	assert.deepEqual(app.errors, []);
+});
+
+test("the topic discussion divider fits the reading pane across resizing, text zoom and phone layout", async (t) => {
+	const app = await openReader({ viewport: { width: 1280, height: 800 } });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	const article = page.locator("#app-article-body article");
+	const aside = article.getByRole("complementary", { name: "Discussions", exact: true });
+	const divider = article.getByRole("separator", { name: /discussions/i });
+	const fits = () => article.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 &&
+		el.parentElement.scrollWidth <= el.parentElement.clientWidth + 1);
+	const open = async () => {
+		await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+		await article.getByRole("heading", { name: issue.sections[0].heading }).waitFor();
+	};
+	const zoom = async (percent) => {
+		await page.getByRole("button", { name: "Style settings", exact: true }).click();
+		const field = page.getByRole("textbox", { name: "Font size in percent" });
+		await field.fill(String(percent));
+		await field.press("Enter");
+	};
+	await open();
+	const width = (await aside.locator(".app-topic-feed").boundingBox()).width;
+	assert(width >= 330, "the 1280px layout gives discussions room, measured " + width);
+	await divider.press("End");
+	const widest = (await aside.boundingBox()).width;
+	await page.setViewportSize({ width: 1080, height: 800 });
+	assert(await divider.isVisible());
+	assert((await article.locator(".app-topic-narrative").boundingBox()).width >= 310);
+	assert((await aside.boundingBox()).width < widest && await fits());
+	await page.setViewportSize({ width: 1280, height: 800 });
+	assert.equal((await aside.boundingBox()).width, widest, "the wider window restores the chosen split");
+
+	await zoom(150);
+	assert(await waitFor(() => divider.isHidden()), "larger type stacks the two columns in the same window");
+	assert(await fits());
+	await page.setViewportSize({ width: 320, height: 740 });
+	await open();
+	assert.equal(await divider.count(), 0, "the stacked phone layout has no focusable divider");
+	await page.setViewportSize({ width: 700, height: 740 });
+	await zoom(80);
+	assert.equal(await divider.count(), 0, "smaller text keeps the full-width phone feed stacked");
+	assert(await fits());
+	assert.deepEqual(app.errors, []);
+});
 
 test("a topic illustrates its reporting with attributed publisher photos and quiet source references", async (t) => {
 	const images = [
