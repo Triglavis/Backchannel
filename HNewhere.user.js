@@ -42370,8 +42370,8 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		return `<button class="app-head-icon app-collection-filter" type="button" aria-label="Filter and sort Collection" title="Filter and sort Collection" aria-haspopup="menu" aria-expanded="false" aria-controls="app-row-menu" hidden>${COLLECTION_FILTER_ICON}</button>`;
 	}
 
-	function appRailButtonHTML(id, label, inner, { reorderable = false } = {}) {
-		return `<button class="rail-button${APP_FILLED_VIEWS.includes(id) ? " rail-empty" : ""}${reorderable ? " rail-reorderable" : ""}" type="button" data-app-view="${escapeHTML(id)}" data-tip="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" aria-pressed="false"><span class="rail-icon">${inner}<span class="rail-badge" data-app-badge="${escapeHTML(id)}"></span></span><span class="rail-label" aria-hidden="true">${escapeHTML(label)}</span></button>`;
+	function appRailButtonHTML(id, label, inner, { reorderable = false, disabled = false } = {}) {
+		return `<button class="rail-button${APP_FILLED_VIEWS.includes(id) ? " rail-empty" : ""}${reorderable ? " rail-reorderable" : ""}" type="button" data-app-view="${escapeHTML(id)}" data-tip="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" aria-pressed="false"${disabled ? " disabled" : ""}><span class="rail-icon">${inner}<span class="rail-badge" data-app-badge="${escapeHTML(id)}"></span></span><span class="rail-label" aria-hidden="true">${escapeHTML(label)}</span></button>`;
 	}
 
 	// -------------------------
@@ -44847,7 +44847,7 @@ ${readerMenuHTML()}
 <button id="app-rail-search" class="rail-button" type="button" data-tip="${escapeHTML(appShortcutTip("search"))}" aria-label="Search Backchannel" aria-pressed="false" aria-controls="app-search-page"><span class="rail-icon">${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10.2 10.2 13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>')}</span><span class="rail-label" aria-hidden="true">Search</span></button>
 <div class="rail-rule" aria-hidden="true"></div>
 <button id="app-rail-welcome" class="rail-button is-current" type="button" data-tip="Welcome" aria-label="Welcome" aria-current="page" hidden><span class="rail-icon">${APP_ICON('<path fill="currentColor" d="M8 1.3 10 5.6l4.7.5-3.5 3.2 1 4.6L8 11.5l-4.2 2.4 1-4.6-3.5-3.2 4.7-.5z"/>')}</span><span class="rail-label" aria-hidden="true">Welcome</span></button>
-${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon)).join("\n")}
+${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon, { disabled: true })).join("\n")}
 <div id="app-rail-rule" class="rail-rule" aria-hidden="true"></div>
 <div id="app-rail-sources"></div>
 <div class="rail-spacer"></div>
@@ -44971,7 +44971,9 @@ ${readingListShareHTML()}
 		sidebarUI = ui;
 		sidebarHasDiscussion = false;
 		appState = createAppState(ui);
-		appState.topicsMode = (await load(APP_TOPICS_MODE_KEY, false)) === true;
+		const [topicsMode, queue] = await Promise.all([load(APP_TOPICS_MODE_KEY, false), loadQueue()]);
+		appState.topicsMode = topicsMode === true;
+		paintAppRailFill({ queue: queue.length > 0 });
 		const linkedTopic = new URLSearchParams(location.search).get("topic");
 		if (isSharedTopicId(linkedTopic)) {
 			appState.topicArticleIntent = linkedTopic;
@@ -45031,13 +45033,17 @@ ${readingListShareHTML()}
 		const composeBar = shadow.getElementById("app-discussion-compose");
 		new MutationObserver(paintAppPhoneComposer).observe(composeBar, { childList: true });
 
-		shadow.querySelector("#app-rail").addEventListener("click", (event) => {
+		const rail = shadow.querySelector("#app-rail");
+		rail.addEventListener("click", (event) => {
 			const button = event.target?.closest?.("[data-app-view]");
 
 			if (button && !button.disabled) {
 				chooseAppView(button.dataset.appView, false, event);
 			}
 		});
+		for (const button of rail.querySelectorAll("[data-app-view]:disabled")) {
+			button.disabled = false;
+		}
 
 		shadow.querySelector("#app-list-tags").addEventListener("click", (event) => {
 			const chip = event.target?.closest?.("[data-app-view]");
@@ -45717,7 +45723,7 @@ ${readingListShareHTML()}
 			{ passive: true },
 		);
 		shadow.querySelector("#comments")?.addEventListener("scroll", noteScrolling, { passive: true });
-		new ResizeObserver(() => paintAppChrome()).observe(shadow.querySelector("#app-rail"));
+		new ResizeObserver(() => paintAppChrome()).observe(rail);
 		paintAppChrome();
 
 		const noteKeyboard = () => {
@@ -45738,7 +45744,6 @@ ${readingListShareHTML()}
 			}
 		});
 
-		const rail = shadow.querySelector("#app-rail");
 		const railButton = (event) => event.target?.closest?.(".rail-button") || null;
 
 		rail.addEventListener("pointerover", (event) => {

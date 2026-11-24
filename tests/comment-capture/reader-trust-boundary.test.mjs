@@ -194,10 +194,20 @@ test("Reader shortcuts require keyboard focus outside the publisher frame", asyn
 		await app.page.goto("https://backchnnl.app/");
 		await app.page.locator(`#app-list-body .browse-title-link[href="${article.url}"]`).first().click();
 		await app.page.locator('#app-article-body[data-mode="frame-agent"]').waitFor();
+		const frame = app.page.locator(".app-article-frame");
+		const publisherLink = frame.contentFrame().locator("#onward-link");
+		await publisherLink.focus();
+		assert(await publisherLink.evaluate((link) => document.activeElement === link), "keyboard focus enters the publisher");
+		assert(await frame.evaluate((node) => node.getRootNode().activeElement === node));
+		await app.page.keyboard.press("s");
+		assert.equal(app.store.get("HNewhere:favorites")?.length ?? 0, 0, "the publisher keystroke does not save the article");
+
 		const save = app.page.locator('#app-article-actions [data-item-action="save"]');
-		await app.page.frameLocator(".app-article-frame").locator("body").press("s");
-		await save.click();
-		assert(await waitFor(() => app.store.get("HNewhere:favorites")?.length === 1));
+		await save.focus();
+		assert(await save.evaluate((button) => button.getRootNode().activeElement === button), "keyboard focus returns to Reader");
+		await app.page.keyboard.press("s");
+		assert(await waitFor(() => app.store.get("HNewhere:favorites")?.some((item) => item.url === article.url)),
+			"Reader keyboard focus enables the Save shortcut for the open article");
 	} finally {
 		await app.browser.close();
 	}

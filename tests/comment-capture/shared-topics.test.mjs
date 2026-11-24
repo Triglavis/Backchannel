@@ -2375,6 +2375,7 @@ test("Collection groups different wording with cached page metadata and specific
 	].map((entry) => ({ ...entry, key: new URL(entry.url).host + new URL(entry.url).pathname, addedAt: now * 1000 }));
 	const app = await launchTopics({
 		status: 503,
+		slowGets: { key: "HNewhere:queue", armed: true, afterRead: true, delays: [2600, 2600, 2600, 2600] },
 		stored: {
 			"HNewhere:collected": bookmarks,
 			"HNewhere:looks": {
@@ -2386,7 +2387,10 @@ test("Collection groups different wording with cached page metadata and specific
 	try {
 		const { page } = app;
 		await page.goto("https://backchnnl.app/");
-		await rail(page, "collection").click();
+		const collection = rail(page, "collection").and(page.locator(":enabled"));
+		await collection.waitFor();
+		assert.equal(await rail(page, "queue").isVisible(), true, "the saved Queue is visible before Collection can be clicked");
+		await collection.click();
 		const list = page.locator("#app-list-body");
 		await expectLinkTitles(list, bookmarks.map(({ title }) => title));
 		await page.getByRole("tab", { name: "By topic", exact: true }).click();
