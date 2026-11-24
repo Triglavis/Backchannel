@@ -58,6 +58,39 @@ The sources you enable determine where Backchannel looks for discussions.
 Optional Account sync uses Cloudflare to store an encrypted snapshot and
 related account metadata.
 
+In Reader, **By link** lists individual links. **By topic** groups links about
+the same development under a headline drawn from their coverage. Each topic
+shows how many comments, discussions, and links it includes. Opening a topic
+keeps your place in the list. Its article brings together the reported
+development, attributed photos, and a timeline when the reporting gives dates.
+The article and its discussions scroll independently on desktop. On phones,
+tap **Discussion** to open the comments over the article. Use **Sort** to
+change the order or prioritize unread comments, and **Sources** to choose or
+refresh discussions. Each comment links back to its source. Select **Read
+thread** to see the conversation in place. The message bar stays at the bottom
+of Discussions. On phones, the compose button in the right-hand stack opens
+it. Choose a discussion to post a comment or a source article to keep a note
+with. Open an individual link’s original page from **Aa**.
+Source links are collected at the end. Select a number beside a passage to
+inspect the supporting text or open the publisher’s page in a new tab.
+Opening a topic marks the topic as read. Each link keeps its own read status.
+
+For a published topic, Reader requests the brief by public topic ID. The Topics
+Worker uses discussion activity to choose which originals to read, draws on
+distinct publishers for details, and caches the cited brief across readers.
+If the brief is empty, Reader checks the linked publishers for short excerpts
+and can show available shared link previews. Imported bookmarks marked for
+preview on open use saved metadata until you open the individual link.
+You can share a published
+topic by copying the Reader address. Reader also groups
+links using titles, URL paths, and saved page metadata on your device. Articles
+for device-only groups use the sources available there.
+
+The Topics Worker finds credited Wikipedia and Wikimedia Commons images for
+public subjects. Reader can look up a short subject name directly on Wikipedia
+when it needs a thumbnail, and caches the result on your device. The Commons
+file page gives the image credit and license.
+
 - Hacker News talks to the HN API, Algolia search, and news.ycombinator.com, with
 no persistent identifier attached.
 - Reddit sends the pages you visit to reddit.com, and if you're

@@ -4,7 +4,7 @@ import {launchApp,waitFor} from './harness.mjs';
 
 const settings={sources:{hn:true,lemmy:true},frontPageMode:'topics',frontPageTopics:['technology'],updateCheck:false};
 const orderKey='HNewhere:app_rail_order';
-const order=app=>app.page.locator('#app-rail-sources .rail-button').evaluateAll(nodes=>nodes.map(node=>node.dataset.appView));
+const order=app=>app.page.locator('#app-rail-sources .rail-reorderable').evaluateAll(nodes=>nodes.map(node=>node.dataset.appView));
 
 async function ready(app){
   await app.page.goto('https://backchnnl.app/');

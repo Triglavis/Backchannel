@@ -60,7 +60,7 @@ test('expanded replies remain available to another page using the shared discuss
     await remaining.click();
     assert(await waitFor(async () => await other.locator('#comments-content .comment[data-comment-id="reddit:extra100"]').count() === 1, 10000));
     await other.locator('#comment-sort').click();
-    await other.getByRole('option', { name: 'Newest', exact: true }).click();
+    await other.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await other.locator('#comments-content .discussion-loading').count() === 0 && await other.locator('#comments-content .comment[data-comment-id]').count() === 102, 15000), 'sorting keeps all replies expanded from the shared cache');
     assert.equal(await remaining.count(), 0, 'already loaded replies are not offered again');
     assert.deepEqual(app.errors, []);
@@ -141,7 +141,7 @@ test("sync keeps expanded Bluesky replies without restoring an exhausted more bu
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id]').count(), 12);
     assert.equal(await more.count(), 0, 'an already expanded reply is not offered a second time');
     await app.page.locator('#comment-sort').click();
-    await app.page.getByRole('option', { name: 'Newest', exact: true }).click();
+    await app.page.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 1, 5000));
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-comment-id]').count() === 12, 15000));

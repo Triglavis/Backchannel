@@ -3,10 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test runner.test.mjs && node run.mjs && node comment-capture/run.mjs",
+    "test": "node --test runner.test.mjs topics/*.test.mjs && node run.mjs && node comment-capture/run.mjs",
     "test:account": "node --test --test-concurrency=1 account/*.test.mjs",
+    "test:topics": "node --test topics/*.test.mjs",
     "test:capture": "node comment-capture/run.mjs",
-    "test:slow": "node --test runner.test.mjs && node run.mjs --all && node comment-capture/run.mjs"
+    "test:slow": "node --test runner.test.mjs topics/*.test.mjs && node run.mjs --all && node comment-capture/run.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

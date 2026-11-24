@@ -16,7 +16,7 @@ concurrency:
 jobs:
   regression:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.browser == 'webkit' && 45 || 35 }}
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +43,7 @@ jobs:
         run: npm run test:capture
         env:
           CAPTURE_ENGINES: ${{ matrix.browser }}
+          CAPTURE_CONCURRENCY: ${{ matrix.browser == 'firefox' && '2' || '1' }}
 
   account:
     name: Account Worker

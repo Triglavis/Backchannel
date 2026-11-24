@@ -1,0 +1,31 @@
+{
+  "name": "backchannel-topics",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-20",
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [{ "pattern": "topics.backchnnl.app", "custom_domain": true }],
+  "triggers": { "crons": ["17 */3 * * *"] },
+  "ai": { "binding": "AI" },
+  "d1_databases": [
+    {
+      "binding": "TOPICS_DB",
+      "database_name": "backchannel-topics-preview",
+      "database_id": "2cb5316d-8196-4395-a2e6-f0bfd7c95637",
+      "migrations_dir": "migrations"
+    },
+    {
+      "binding": "ACCOUNTS_DB",
+      "database_name": "backchannel-accounts-v2",
+      "database_id": "d1770976-e972-4d00-99e4-d21db317e843"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "TOPIC_REPORT_RATE_LIMIT",
+      "namespace_id": "1129618217",
+      "simple": { "limit": 12, "period": 60 }
+    }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

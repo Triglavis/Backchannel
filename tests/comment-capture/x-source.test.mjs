@@ -251,19 +251,40 @@ test('X resolves shortened links but rejects a different destination', {timeout:
 
 test('a failed X refresh quietly keeps the previously displayed post', {timeout:45000}, async()=>{
   const article=STORIES[0].url;
+  const showSearch=Promise.withResolvers();
+  const finishFirstWrite=Promise.withResolvers();
+  const slowSets={prefix:'HNewhere:thread_cache:x:',armed:true,wait:finishFirstWrite.promise};
   const response={match:url=>url.startsWith('https://cdn.syndication.twimg.com/'),status:200,json:{id_str:'101',user:{screen_name:'alice'},text:'Previously displayed post',entities:{urls:[{expanded_url:article}]}}};
-  const app=await launchApp({appHost:new URL(article).hostname,sharedStore:true,tabs:true,topHosts:['x.com'],settings:{sources:{hn:true,x:true},autoOpenSidebar:true,updateCheck:false},responses:[response]});
-  await app.context.route('https://x.com/**',route=>route.fulfill({status:200,contentType:'text/html',body:xSearchHTML(article)}));
+  const app=await launchApp({appHost:new URL(article).hostname,sharedStore:true,tabs:true,topHosts:['x.com'],settings:{sources:{hn:true,x:true},autoOpenSidebar:true,updateCheck:false},responses:[response],slowSets});
   try {
+    await app.context.route('https://x.com/**',async route=>{
+      await showSearch.promise;
+      await route.fulfill({status:200,contentType:'text/html',body:xSearchHTML(article)});
+    });
     await app.page.goto(article);
+    const sync=app.page.locator('#browse-home-sync');
+    await sync.waitFor({timeout:10000});
+    showSearch.resolve();
     const comment=app.page.locator('#comments-content .comment[data-comment-id="x:101"]');
     await comment.waitFor({timeout:20000});
+    assert(await waitFor(()=>!slowSets.armed),'the first X snapshot is still being saved');
+    assert(await app.page.locator('#comment-sort').isDisabled(),'the sidebar is still rendering the first X discussion');
+    assert.match(await comment.innerText(),/Previously displayed post/);
+    const verificationCount=()=>app.requests.filter(({url})=>response.match(url)).length;
+    const before=verificationCount();
     response.status=503;
-    await app.page.locator('#browse-home-sync').click();
-    assert(await waitFor(async()=>await app.page.locator('#browse-home-sync').getAttribute('aria-busy')!=='true',15000));
+    await sync.click();
+    assert(await waitFor(()=>verificationCount()>before,10000),'Sync attempts X verification with the mocked 503');
+    finishFirstWrite.resolve();
+    assert(await waitFor(async()=>await sync.getAttribute('aria-busy')!=='true',15000),'Sync finishes after the failed verification');
     assert.equal(await app.page.locator('#comments-content .x-source-notice').count(),0,'a partial refresh does not add a search diagnostic');
-    assert.match(await comment.innerText(),/Previously displayed post/,'the existing discussion remains readable');
-  } finally {await app.browser.close()}
+    const [text]=await comment.allInnerTexts();
+    assert.match(text ?? '',/Previously displayed post/,'the existing discussion remains readable');
+  } finally {
+    showSearch.resolve();
+    finishFirstWrite.resolve();
+    await app.browser.close();
+  }
 });
 
 test('an X login redirect reports that sign-in is needed', {timeout:30000}, async()=>{

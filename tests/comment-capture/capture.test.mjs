@@ -361,7 +361,7 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps existing comm
     assert.equal(await status.locator('.discussion-source-status').count(), 0, 'retaining saved comments does not add a refresh diagnostic');
     await sourceMenu.click();
     await app.page.locator('#comment-sort').click();
-    await app.page.getByRole('option', { name: 'Newest', exact: true }).click();
+    await app.page.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 1, 5000));
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     assert(await waitFor(async () => await root.count() === 1 && await retained.count() === 1 && await app.page.locator('#comments-content .comment[data-comment-id="reddit:newroot"]').count() === 1, 15000), 'sorting reuses the retained and newly synced comments');
@@ -426,7 +426,7 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync preserves Hacker Ne
     assert.match(await retained.textContent(), /Previously loaded Hacker News comment/);
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="hn:900199"]').count(), 1);
     await app.page.locator('#comment-sort').click();
-    await app.page.getByRole('option', { name: 'Newest', exact: true }).click();
+    await app.page.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 1, 5000));
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     assert(await waitFor(async () => await retained.count() === 1, 15000), 'the retained comment survives a later render from cache');
@@ -456,7 +456,7 @@ test('a stale in-flight Hacker News reply cannot overwrite the refreshed cache',
     assert.match(await reply.textContent(), /Refreshed reply/);
     await new Promise((resolve) => setTimeout(resolve, 2800));
     await app.page.locator('#comment-sort').click();
-    await app.page.getByRole('option', { name: 'Newest', exact: true }).click();
+    await app.page.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 1, 5000));
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     assert.match(await reply.textContent(), /Refreshed reply/, 'the earlier response cannot replace the updated cache');
@@ -480,6 +480,7 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync preserves the selec
     await disclosure.click();
     const menu = app.page.locator(sidebar ? '#comments-content .source-menu' : '#app-discussion-meta .source-menu');
     await menu.getByRole('checkbox', {name:'All sources',exact:true}).uncheck();
+    await menu.getByRole('button', {name:/Reddit discussions/i}).click();
     await menu.locator('[data-discussion-key="reddit:fixture1"] input').check();
     assert(await waitFor(async () => await other.evaluate((element) => element.classList.contains('comment-filter-hidden')), 5000));
     await app.page.locator('#comments-content').evaluate((body) => {

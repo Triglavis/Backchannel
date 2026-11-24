@@ -130,7 +130,7 @@ function commentsFor(story, live = []) {
 	}));
 }
 
-function frontPageHTML(listed = STORIES) {
+export function frontPageHTML(listed = STORIES) {
 	const rows = listed.map((story) => {
 		const host = story.url ? new URL(story.url).hostname : "";
 		const link = story.url || `item?id=${story.id}`;
@@ -285,7 +285,9 @@ function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts =
 		listValues: async () => (shared ? await window.__gmStore("list") : [...store.keys()]),
 		getResourceText: async () => "",
 		xmlHttpRequest(options) {
-			window.__gmXHR({ url: options.url, method: options.method || "GET", anonymous: Boolean(options.anonymous), responseType: options.responseType || "" }).then(
+			const request = { url: options.url, method: options.method || "GET", anonymous: Boolean(options.anonymous), responseType: options.responseType || "" };
+			if (options.data !== undefined) request.hasBody = true;
+			window.__gmXHR(request).then(
 				(response) => {
 					const bytes = response.base64 ? Uint8Array.from(atob(response.base64), (c) => c.charCodeAt(0)) : null;
 					const type = /content-type:\s*([^\r\n;]+)/i.exec(response.responseHeaders || "")?.[1] || "";
@@ -455,7 +457,7 @@ export async function launchApp({
 		if (slowSets.armed && key.startsWith(slowSets.prefix) && (!slowSets.query || value?.query === slowSets.query)) {
 			slowSets.armed = false;
 			delayedSet = true;
-			await new Promise((resolve) => setTimeout(resolve, slowSets.ms));
+			await (slowSets.wait ?? new Promise((resolve) => setTimeout(resolve, slowSets.ms)));
 		}
 		store.set(key, value);
 		if (delayedSet) slowSets.completed = true;
