@@ -13855,8 +13855,14 @@ html[data-backchannel-installed] .chin {
 		if (staged.compose || draft) {
 			const received = await draft;
 			if (!sameURL(pageHref(), url.href)) return;
-			const shell = appState.ui.shadow;
-			const box = shell.querySelector("#app-discussion-compose .compose-box");
+			const ui = appState.ui;
+			const composer = "#app-discussion-compose .compose-box";
+			let box = ui.shadow.querySelector(composer);
+			if (!box && (received?.mode === "note" || staged.compose)) {
+				const settings = await loadSettings();
+				if (!sameURL(pageHref(), url.href)) return;
+				box = ui.shadow.querySelector(composer) || mountComposeBox(ui, [], settings);
+			}
 			const field = box?.querySelector(".composer-text");
 			if (!field) return;
 			if (received?.text) {

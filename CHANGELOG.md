@@ -10,6 +10,16 @@ use to detect updates, so every release bumps it.
 
 ## [1.6.19.2] — 2026-11-24
 
+### Fixed
+
+- Topic Article comments use the same actions and focused byline as Reader.
+  Closing Focus returns you to your place in the discussion.
+- The Sidebar composer stays at the bottom and shows its actions as you type.
+  You can carry a note into Reader and save it even if its discussion is unavailable.
+- The Sidebar's focused byline sits below the discussion title and counts.
+  Reader adds space between the focused quote and divider.
+- Reader shows Related coverage after the article and before Next in queue.
+
 ### Security
 
 - Keep private notes, drafts and Collection views inside Backchannel.
@@ -17,6 +27,9 @@ use to detect updates, so every release bumps it.
   background lookups.
 - Add safeguards for Account recovery and sessions, topic reports and shared
   Topic Article generation.
+- Once an account upgrades to signed sync proofs, update Reader on every device
+  to keep signing in and uploading sync snapshots. A Worker rollback must also
+  support signed proofs.
 
 ## [1.6.19.1] — 2026-11-24
 

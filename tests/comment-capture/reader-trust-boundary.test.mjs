@@ -132,6 +132,37 @@ test("The Sidebar composer has a compact Reader handoff on a page with strict CS
 	}
 });
 
+test("A Sidebar note can be kept when Reader cannot load its discussion", async (t) => {
+	const outage = { match: () => false, status: 503 };
+	const app = await launchApp({
+		topHosts: [new URL(article.url).hostname], sharedStore: true,
+		settings: { autoOpenSidebar: true, updateCheck: false, sources: { hn: true } },
+		responses: [outage],
+	});
+	t.after(() => app.browser.close());
+	await app.page.goto(article.url);
+	await app.page.locator(".comment[data-comment-id]").first().waitFor();
+	const editor = app.page.frameLocator("#sidebar-discussion-compose iframe");
+	await editor.getByRole("textbox").fill(privateNote);
+	outage.match = (url) => ["hn.algolia.com", "hacker-news.firebaseio.com"].includes(new URL(url).hostname) ||
+		url.startsWith("https://news.ycombinator.com/news");
+	const [reader] = await Promise.all([
+		app.context.waitForEvent("page"),
+		editor.getByRole("button", { name: "Keep a note" }).click(),
+	]);
+	const empty = reader.locator("#comments-content .no-discussion");
+	await empty.waitFor({ timeout: 10000 });
+	const composer = reader.locator("#app-discussion-compose");
+	const input = composer.getByRole("textbox", { name: /keep a note/i });
+	assert(await waitFor(async () => await input.count() === 1 && await input.inputValue() === privateNote),
+		"the note draft arrives even when discussion discovery fails");
+	assert.equal(await composer.getByRole("button", { name: "Add a comment" }).count(), 0);
+	await composer.getByRole("button", { name: "Keep a note" }).click();
+	await reader.locator("[data-notes-section]").getByText(privateNote).waitFor();
+	assert(await waitFor(() => app.store.get(`HNewhere:notes:url:${articleKey}`)?.notes?.some(({ text }) => text === privateNote)));
+	assert.deepEqual(app.errors, []);
+});
+
 test("Sidebar saves keep the identity of the rendered discussion", async () => {
 	const app = await launchApp({
 		appHost: new URL(article.url).hostname, sharedStore: true,
