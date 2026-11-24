@@ -1473,7 +1473,7 @@ test("the mixed topic message bar keeps its draft and saves a note to the select
 });
 
 test("the phone message bar keeps its app-sized typography, Aa colors and draft", async (t) => {
-	const { aside, page, store, errors } = await openTopic(t, { phone: true });
+	const { aside, page, store, errors } = await openTopic(t, { phone: true, values: { "HNewhere:reader_font": "georgia" } });
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
 	const send = aside.getByRole("button", { name: "Add a comment", exact: true });
@@ -1488,7 +1488,6 @@ test("the phone message bar keeps its app-sized typography, Aa colors and draft"
 		await appearance.tap();
 		await page.locator('[data-reader-page="' + paper + '"]').tap();
 		if (paper === "night") {
-			await page.locator('[data-reader-font="georgia"]').tap();
 			await page.locator("#app-zoom-in").tap();
 			await page.locator("#app-zoom-in").tap();
 		}
@@ -1506,6 +1505,7 @@ test("the phone message bar keeps its app-sized typography, Aa colors and draft"
 			};
 		});
 		assert.deepEqual([style.paper, style.ink, style.arrow, style.glyph], [background, ink, link, background]);
+		assert.match(style.articleFace, /Georgia/);
 		assert.notEqual(style.face, style.articleFace);
 		assert.equal(style.placeholder, style.secondary);
 		assert.equal(style.size, 16);
