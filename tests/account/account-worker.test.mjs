@@ -35,7 +35,7 @@ const { outputFiles: [mailWorkerScript] } = await build({
   bundle: true, write: false, format: 'esm', platform: 'browser',
 });
 
-function createWorker(t, { database = false, limit, mail, deliver, sender = 'accounts@backchnnl.app', hourlyLimit = 120, enrollmentLimit, topicTokenSecret } = {}) {
+function createWorker(t, { database = false, limit, mail, deliver, sender = 'accounts@backchnnl.app', hourlyLimit = 120, enrollmentLimit, topicTokenSecret, topicReports } = {}) {
   const worker = new Miniflare(convertV4MiniflareOptions({
     modules: true, script: (mail ? mailWorkerScript : workerScript).text, compatibilityDate: config.compatibility_date,
     assets: { ...config.assets, directory: fileURLToPath(new URL('site', root)), routerConfig: { has_user_worker: true } },
@@ -46,14 +46,15 @@ function createWorker(t, { database = false, limit, mail, deliver, sender = 'acc
       ...(enrollmentLimit !== undefined && { ACCOUNT_EMAIL_ENROLLMENT_HOURLY_LIMIT: String(enrollmentLimit) }),
       ...(topicTokenSecret && { TOPIC_REPORT_TOKEN_SECRET: topicTokenSecret }),
     },
-    ...(mail ? {
-      serviceBindings: { TEST_MAIL: async request => {
+    serviceBindings: {
+      ...(mail && { TEST_MAIL: async request => {
         const message = await request.json();
         mail.push(message);
         await deliver?.(message);
         return Response.json({ messageId: String(mail.length) });
-      } },
-    } : {}),
+      } }),
+      ...(topicReports && { TOPIC_REPORTS: topicReports }),
+    },
   }));
   t.after(() => worker.dispose());
   return worker;
@@ -448,40 +449,42 @@ test('a live Account session receives a short-lived Topics reporting capability'
 });
 
 test('queued Topics report deletion survives a service failure and clears when delivered', async t => {
-  const worker = createWorker(t, { database:true, limit:20 });
-  const db = await applySchema(worker, '0002_recovery_email.sql');
   const subject = 'b'.repeat(32);
   const secret = 'topics-reporting-test-secret';
-  await db.prepare('INSERT INTO account_report_deletions (subject, queued_at) VALUES (?, ?)').bind(subject, Date.now()).run();
+  const deliveries = [];
   let result = 503;
-  let delivered = 0;
-  const env = { ACCOUNTS_DB:db, TOPIC_REPORT_TOKEN_SECRET:secret, TOPIC_REPORTS:{
-    async fetch(url, options) {
-      assert.equal(url, 'https://topics.backchnnl.app/internal/account-reports');
-      assert.equal(options.method, 'DELETE');
-      const [version, encoded, signature] = options.headers.Authorization.replace(/^Bearer /, '').split('.');
-      assert.equal(signature, createHmac('sha256', secret).update(`${version}.${encoded}`).digest('base64url'));
-      const claims = JSON.parse(Buffer.from(encoded, 'base64url').toString());
-      assert.equal(claims.scope, 'topic:report:delete');
-      assert.equal(claims.sub, subject);
-      delivered++;
+  const worker = createWorker(t, {
+    database:true, limit:20, topicTokenSecret:secret,
+    topicReports(request) {
+      deliveries.push(request);
       return new Response(null, { status:result });
     },
-  } };
+  });
+  const db = await applySchema(worker, '0002_recovery_email.sql');
+  await db.prepare('INSERT INTO account_report_deletions (subject, queued_at) VALUES (?, ?)').bind(subject, Date.now()).run();
+  const account = await worker.getWorker();
   const run = async () => {
-    const pending = [];
-    accountApp.scheduled({}, env, { waitUntil: promise => pending.push(promise) });
-    await Promise.all(pending);
+    const { outcome } = await account.scheduled();
+    assert.equal(outcome, 'ok');
   };
   await run();
-  assert.equal(delivered, 1);
+  assert.equal(deliveries.length, 1);
   assert.equal(await db.prepare('SELECT COUNT(*) AS count FROM account_report_deletions WHERE next_attempt_at > ?').bind(Date.now()).first('count'), 1);
   await run();
-  assert.equal(delivered, 1);
+  assert.equal(deliveries.length, 1);
   await db.prepare('UPDATE account_report_deletions SET next_attempt_at = 0').run();
   result = 204;
   await run();
-  assert.equal(delivered, 2);
+  assert.equal(deliveries.length, 2);
+  for (const delivery of deliveries) {
+    assert.equal(delivery.url, 'https://topics.backchnnl.app/internal/account-reports');
+    assert.equal(delivery.method, 'DELETE');
+    const [version, encoded, signature] = delivery.headers.get('Authorization').replace(/^Bearer /, '').split('.');
+    assert.equal(signature, createHmac('sha256', secret).update(`${version}.${encoded}`).digest('base64url'));
+    const claims = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+    assert.equal(claims.scope, 'topic:report:delete');
+    assert.equal(claims.sub, subject);
+  }
   assert.equal(await db.prepare('SELECT COUNT(*) AS count FROM account_report_deletions').first('count'), 0);
 });
 
