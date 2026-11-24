@@ -51985,6 +51985,7 @@ ${frontPageChooserHTML()}
 			lastTail = tail;
 			lastFilter = panel.filter;
 			panel.pageFrom ||= tail;
+			panel.pageKeys = new Set(Array.from(panel.list.children, (item) => item.dataset.commentKey));
 			panel.target += APP_TOPIC_COMMENT_PAGE;
 			panel.budget += APP_TOPIC_THREAD_BATCH;
 			updateAppTopicFeed(reading);
@@ -52049,7 +52050,14 @@ ${frontPageChooserHTML()}
 		if (panel.list.parentElement !== feed) feed.append(panel.compose.holder, panel.list, panel.status, panel.retry, panel.end);
 		panel.compose.update();
 		const focus = feed.getRootNode().activeElement;
-		const visible = rows.slice(0, panel.target).map(({ entry, row, unread }) => {
+		let page = rows.slice(0, panel.target);
+		if (rows.length > panel.target && panel.pageKeys?.size) {
+			const fresh = rows.filter(({ row }) => !panel.pageKeys.has(row.comment.key));
+			const retained = rows.length - fresh.length;
+			const additions = new Set(fresh.slice(0, panel.target - retained));
+			page = rows.filter((item) => panel.pageKeys.has(item.row.comment.key) || additions.has(item));
+		}
+		const visible = page.map(({ entry, row, unread }) => {
 			const key = entry.thread.url + "\n" + row.comment.key;
 			if (!panel.nodes.has(key)) panel.nodes.set(key, appTopicCommentNode(reading, entry, row, true));
 			panel.nodes.get(key).classList.toggle("app-topic-unread", unread);
@@ -52108,6 +52116,7 @@ ${frontPageChooserHTML()}
 		if (panel.filter !== panel.feedFilter) {
 			panel.feedFilter = panel.filter;
 			panel.pageFrom = null;
+			panel.pageKeys = null;
 			panel.target = APP_TOPIC_COMMENT_PAGE;
 			panel.budget = APP_TOPIC_THREAD_BATCH;
 		}
@@ -52369,6 +52378,8 @@ ${frontPageChooserHTML()}
 	function refreshAppTopicThreads(reading, entries) {
 		const panel = reading.discussionPanel;
 		if (appState.topicArticle !== reading || !entries.length) return;
+		panel.pageFrom = null;
+		panel.pageKeys = null;
 		forgetSyncedItems(entries.map(({ discussion }) => discussion), entries.flatMap(({ discussion }) => Array.from(panel.hnItems.get(discussion.key) || [])));
 		for (const { discussion, thread } of entries) {
 			const key = discussion.key;
@@ -52388,6 +52399,8 @@ ${frontPageChooserHTML()}
 		const controls = panel.scroller.querySelector(".app-topic-controls");
 		const sort = commentSortControl("app-topic-comment-sort", (_, settings) => {
 			if (appState.topicArticle !== reading) return;
+			panel.pageFrom = null;
+			panel.pageKeys = null;
 			reading.settings = settings;
 			panel.paintDetailRows?.();
 			updateAppTopicFeed(reading);

@@ -147,6 +147,36 @@ test("scrolling one busy topic thread reaches its final comment without duplicat
 	assert.deepEqual(errors, []);
 });
 
+test("a new batch of highly rated threads can rise in Best while every comment already reached stays in the feed", async (t) => {
+	const threads = Array.from({ length: 16 }, (_, i) => ({ source: "lemmy", url: "https://lemmy.world/post/" + (15200 + i),
+		title: "Dock " + i, comments: 40 - i, sourceIndex: i % 2 }));
+	const responses = threads.map((_, i) => ({
+		delay: i >= 8 ? 120 : 0,
+		match: (url) => new URL(url).searchParams.get("post_id") === String(15200 + i),
+		json: { comments: Array.from({ length: i < 8 ? 3 : 8 }, (_, j) => {
+			const id = 910000 + 10 * i + j;
+			return { comment: { id, path: "0." + id, content: "Report " + id }, creator: { name: "pilot" },
+				counts: { score: 100 * i - j } };
+		}) },
+	}));
+	const { aside, requests } = await openTopic(t, { threads, responses, enabled: { hn: false } });
+	const items = feedList(aside).getByRole("listitem");
+	const keys = () => items.evaluateAll((nodes) => nodes.map((node) => node.dataset.commentKey));
+	await items.filter({ hasText: "Report 910070" }).waitFor();
+	const first = await keys();
+	assert.equal(first.length, 24);
+	await items.last().evaluate((node) => node.scrollIntoView({ block: "start" }));
+	assert(await waitFor(() => requests.some(({ url }) => new URL(url).searchParams.get("post_id") === "15208")));
+	await items.first().evaluate((node) => node.scrollIntoView({ block: "start" }));
+	await items.filter({ hasText: "Report 910150" }).waitFor();
+	const second = await keys();
+	assert.equal(second[0], "lemmy:910150");
+	assert.equal(second.length, 48, "one scroll asks for one more page");
+	assert.equal(new Set(second).size, second.length);
+	assert(first.every((key) => second.includes(key)), "scrolling retains the full previous page");
+	assert.equal(requests.filter(({ url }) => url.includes("/comment/list?")).length, threads.length);
+});
+
 test("the same conversation reported by two outlets supplies each reply once", async (t) => {
 	const { aside, requests } = await openTopic(t, { threads: [
 		{ sourceIndex: 1, source: "hn", url: threadURL(stories[0].id), title: "Updated harbor report discussion", comments: 900 },
