@@ -484,7 +484,8 @@ test("an empty shared brief reads the available originals and cites what they re
 		responses: [{ match: (url) => url === articleURL, json: thin }],
 		pages: {
 			[sources[0].url]: { html: '<meta name="description" content="' + reports[0] + '">' },
-			[sources[1].url]: { html: '<article><p data-nosnippet>' + restricted + '</p><p>' + reports[1] + '</p></article>' },
+			[sources[1].url]: { html: '<article><p data-nosnippet>' + restricted + '</p><p>' + reports[1] +
+				' <span data-nosnippet>' + restricted + '</span></p></article>' },
 			[sources[2].url]: { html: '<meta name="robots" content="nosnippet"><article><p>' + restricted + '</p></article>' },
 			[sources[3].url]: { html: '<article><p>' + restricted + '</p></article>' },
 		},

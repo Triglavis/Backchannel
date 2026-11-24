@@ -50693,9 +50693,11 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const paid = [...content.querySelectorAll('script[type="application/ld+json"]')].some((script) =>
 			/"isAccessibleForFree"\s*:\s*(?:false|"false")/i.test(script.textContent));
 		if (paid) return noPreview;
+		for (const node of content.querySelectorAll('[data-nosnippet], [hidden], [inert], [aria-hidden="true"], .paywall, aside, footer, header, nav, figure, script, style')) {
+			node.remove();
+		}
 		const paragraphs = content.querySelectorAll('article p, [itemprop~="articleBody"] p');
 		for (const paragraph of [...paragraphs].slice(0, 12)) {
-			if (paragraph.closest('[data-nosnippet], [hidden], [inert], [aria-hidden="true"], .paywall, aside, footer, header, nav, figure')) continue;
 			const excerpt = appTopicSummarySentence(paragraph.textContent, source.title, limit);
 			if (excerpt) return { excerpt };
 		}
