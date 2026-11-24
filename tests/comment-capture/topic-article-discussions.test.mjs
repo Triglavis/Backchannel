@@ -492,17 +492,22 @@ test("the topic header matches the regular discussion header's controls and alig
 	assert(await sources.evaluate((button) => button.textContent.trim() === "" && Boolean(button.title)));
 });
 
-for (const width of [1280, 320]) {
-	test(`the topic Sources menu fits at ${width}px and its last discussion is reachable`, async (t) => {
+for (const [width, withoutPopover] of [[1280, false], [320, false], [320, true]]) {
+	test(`the topic Sources menu fits at ${width}px${withoutPopover ? " without native popovers" : ""} and its last discussion is reachable`, async (t) => {
 		const threads = Array.from({ length: 16 }, (_, i) => ({ source: "hn", url: threadURL(92000 + i),
 			title: "Harbor inspection report from the coast guard, field office " + (i + 1), comments: 1 }));
 		const { page, aside } = await openTopic(t, { phone: width === 320, threads });
+		if (withoutPopover) {
+			await page.addInitScript(() => { delete HTMLElement.prototype.showPopover; });
+			await page.reload();
+		}
 		await page.setViewportSize({ width, height: width === 320 ? 450 : 600 });
 		await feedList(aside).getByText(/Comment 1 on Inspectors/).waitFor();
 		const sources = asideSources(aside);
 		if (width === 320) await sources.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 48));
 		await sources.click();
 		const menu = aside.getByRole("group", { name: "Filter discussions by source" });
+		if (withoutPopover) assert(await page.locator("#app-bar-back").isHidden(), "the floating Back button yields to the open menu");
 		const last = menu.getByRole("checkbox").last();
 		await menu.evaluate((el) => { el.scrollTop = el.scrollHeight; });
 		const geometry = await menu.evaluate((el) => {
@@ -522,6 +527,7 @@ for (const width of [1280, 320]) {
 		assert.equal(await last.isChecked(), false);
 		await last.press("Escape");
 		assert(await menu.isHidden());
+		if (withoutPopover) assert(await page.locator("#app-bar-back").isVisible());
 		assert(await sources.evaluate((el) => el.matches(":focus")));
 	});
 }

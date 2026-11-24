@@ -39357,7 +39357,6 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-controls .app-sources-head { align-items:center; justify-content:space-between; }
 .app-topic-controls .choice-label { white-space:normal; }
 .app-topic-controls .source-menu:popover-open { position:fixed; inset:auto; margin:0; }
-#app-article:has(.app-topic-controls .source-menu:not([popover], .hidden)) :is(#app-bar-back, #app-bar) { visibility:hidden; }
 .app-topic-discussions a { color:var(--reader-ink); text-underline-offset:2px; }
 .app-topic-discussions .app-topic-thread-source, .app-topic-discussions .app-topic-comment-source { color:var(--reader-link); }
 .app-topic-thread-detail { min-width:0; padding:.45em 0 .8em; overflow-wrap:anywhere; }
@@ -41353,7 +41352,8 @@ header .item-action-link {
 		bottom:calc(var(--app-keyboard, 0px) + max(calc(16px + env(safe-area-inset-bottom, 0px)), calc(var(--app-compose-height, 0px) + 8px)));
 	}
 
-	#app[data-stage="discussion"]:has(#panel :is(.source-menu, .compose-targets):not(.hidden)) :is(#app-bar, #app-bar-back) {
+	#app[data-stage="discussion"]:has(#panel :is(.source-menu, .compose-targets):not(.hidden)) :is(#app-bar, #app-bar-back),
+	#app[data-stage="article"]:has(.app-topic-controls .source-menu:not([popover], .hidden)) :is(#app-bar, #app-bar-back) {
 		visibility:hidden;
 	}
 
