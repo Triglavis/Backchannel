@@ -34,6 +34,9 @@ test('Reader removes its single-discussion banner when a second source arrives',
     assert.equal(await byline.getByRole('button').count(),0,'the byline offers a close icon only when a filter is active');
     await app.page.locator('#app-discussion-meta .page-header-disclosure').click();
     assert.equal(await app.page.locator('#app-discussion-meta .source-menu').isVisible(),true);
+    const hnDiscussions = app.page.getByRole('button',{name:/Hacker News discussions/i});
+    assert.equal(await hnDiscussions.count(),1,'the source has a disclosure independent of its checkbox');
+    await hnDiscussions.focus();
     await app.page.waitForFunction(()=>window.__releaseRedditDiscovery);
     await app.page.evaluate(()=>window.__releaseRedditDiscovery());
     await app.page.locator('#comments-content .comment[data-comment-id="reddit:root0"]').waitFor();
@@ -43,6 +46,8 @@ test('Reader removes its single-discussion banner when a second source arrives',
     assert.equal(await app.page.locator('#filter-banner:not(.hidden)').count(),0,'an unfiltered discussion with multiple sources has no focus banner');
     assert(await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').count()>0);
     assert.equal(await app.page.locator('#app-discussion-meta .source-menu').isVisible(),true,'the open Sources menu stays open when the discussion choices update');
+    assert.equal(await hnDiscussions.getAttribute('aria-expanded'),'true','an expanded platform stays open as the source list grows');
+    assert(await hnDiscussions.evaluate(button=>button.matches(':focus')),'keyboard focus stays on the source disclosure during discovery');
     const menu = app.page.locator('#app-discussion-meta .source-menu');
     const all = menu.getByRole('checkbox', {name:'All sources',exact:true});
     await all.uncheck();
@@ -52,6 +57,7 @@ test('Reader removes its single-discussion banner when a second source arrives',
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id]:not(.comment-filter-hidden)').count(), 0);
     assert.equal(await empty.evaluate(node => getComputedStyle(node).justifyContent), 'center');
     const first = menu.locator('[data-discussion-key="reddit:fixture0"] input');
+    await menu.getByRole('button',{name:/Reddit discussions/i}).click();
     await first.check();
     assert.equal(await empty.isVisible(), false);
     assert(await waitFor(async()=>await app.page.locator('#filter-banner:not(.hidden)').count()===1,3000),'choosing a discussion deliberately still shows focus');
@@ -129,6 +135,79 @@ test('the phone Reader discussion byline opens the original discussion in a new 
   }finally{await app.browser.close()}
 });
 
+test('an open Reader source group keeps keyboard focus when the first comments finish loading', {timeout:25000}, async(t)=>{
+  const app = await launchApp({sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
+  t.after(()=>app.browser.close());
+  const {page} = app;
+  await page.goto('https://backchnnl.app/');
+  const article = page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first();
+  await article.waitFor();
+  await page.evaluate(()=>{
+    const request = window.__gmXHR;
+    const gate = new Promise(release=>{ window.__releaseSourceThread = release; });
+    window.__gmXHR = async options=>{
+      if (options.url.endsWith('/v0/item/9001.json')) await gate;
+      return request(options);
+    };
+  });
+  await article.click();
+  const trigger = page.locator('#app-discussion-meta .page-header-disclosure');
+  await trigger.press('Enter');
+  const menu = page.getByRole('group',{name:'Filter discussions by source'});
+  const toggle = menu.getByRole('button',{name:/Hacker News discussions/i});
+  await toggle.press('Space');
+  await page.evaluate(()=>window.__releaseSourceThread());
+  await settled(app);
+  assert(await menu.isVisible(),'loading the first comments keeps the Source menu open');
+  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  assert(await toggle.evaluate(button=>button.matches(':focus')));
+  assert.deepEqual(app.errors,[]);
+});
+
+test('Reader source groups can fold and reopen independently of their selection', {timeout:30000}, async(t)=>{
+  const fixture = discussionFixture(url,{rootCount:2,replyRoots:0});
+  const app = await launchApp({sharedStore:true,handler:'Tampermonkey',settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:redditValues,responses:fixture.responses});
+  t.after(()=>app.browser.close());
+  const {page} = app;
+  await page.goto('https://backchnnl.app/');
+  await page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
+  await page.locator('#comments-content .comment[data-comment-id="reddit:root0"]').waitFor();
+  await settled(app);
+  const trigger = page.locator('#app-discussion-meta .page-header-disclosure');
+  await trigger.press('Enter');
+  const menu = page.getByRole('group',{name:'Filter discussions by source'});
+  const thread = menu.locator('[data-discussion-key="reddit:fixture0"] input');
+  const platform = menu.getByRole('checkbox',{name:'Reddit',exact:true});
+  const all = menu.getByRole('checkbox',{name:'All sources',exact:true});
+  const toggle = menu.getByRole('button',{name:/Reddit discussions/i});
+  assert(await thread.isHidden(),'large source lists open at their platform headings');
+  assert(await platform.isChecked());
+  await platform.uncheck();
+  assert(await thread.isHidden(),'selecting a platform does not expand it');
+  assert(await all.evaluate(box=>box.indeterminate));
+  await toggle.press('Enter');
+  assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+  assert(await thread.isVisible());
+  assert(!(await thread.isChecked()));
+  await thread.check();
+  await toggle.press('Space');
+  assert(await thread.isHidden());
+  assert(await thread.isChecked());
+  assert(await platform.evaluate(box=>box.indeterminate),'a folded platform still communicates its partial selection');
+  await toggle.press('Escape');
+  assert(await trigger.evaluate(button=>button.matches(':focus')));
+  await trigger.press('Enter');
+  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+  assert(await toggle.evaluate(button=>button.matches(':focus')),'keyboard reopening returns to the last platform');
+  await all.check();
+  assert(await platform.isChecked(),'All includes hidden discussions');
+  assert(await thread.isHidden());
+  await toggle.click();
+  await page.keyboard.press('Escape');
+  assert(await trigger.evaluate(button=>button.matches(':focus')),'a pointer disclosure still accepts Escape');
+  assert.deepEqual(app.errors,[]);
+});
+
 for(const pendingFocus of [false,true])test(`Reader clears ${pendingFocus?'a pending comment focus':'the previous focus banner'} as soon as another article is selected`,{timeout:25000},async()=>{
   const app=await launchApp({sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
@@ -175,6 +254,7 @@ for(const mode of ['Sidebar','Reader'])test(`${mode} Sources shows a single repo
     const disclosure=app.page.locator(sidebar?'#comments-content .page-header-disclosure':'#app-discussion-meta .page-header-disclosure');
     await disclosure.click();
     const menu=app.page.locator(sidebar?'#comments-content .source-menu':'#app-discussion-meta .source-menu');
+    await menu.getByRole('button',{name:/Reddit discussions/i}).click();
     const entry=menu.locator('.source-menu-entry').filter({has:app.page.locator('[data-discussion-key="reddit:fixture0"]')});
     assert.equal((await entry.locator('.source-menu-hint').innerText()).trim(),'2156 comments','only the source comment total is presented');
     assert.equal(await menu.locator('.discussion-source-status').count(),0,'partial load diagnostics are not displayed');

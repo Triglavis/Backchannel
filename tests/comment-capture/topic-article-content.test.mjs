@@ -36,7 +36,7 @@ const issue = {
 	],
 };
 
-function openReader({ catalogPages = [], catalogTopics = [], artwork, responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
+function openReader({ catalogPages = [], catalogTopics = [], artwork, theme = "auto", responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
 	const now = Date.now();
 	const index = {
 		version: 1, generatedAt: new Date(now).toISOString(), topics: [{ ...topic, image: artwork }, ...catalogTopics],
@@ -48,12 +48,111 @@ function openReader({ catalogPages = [], catalogTopics = [], artwork, responses 
 	}));
 	return launchApp({
 		sharedStore: true,
-		settings: { updateCheck: false, sourceRefreshMinutes: 0, sources: { hn: true }, frontPageMode: "topics", frontPageTopics: ["technology"] },
+		settings: { theme, updateCheck: false, sourceRefreshMinutes: 0, sources: { hn: true }, frontPageMode: "topics", frontPageTopics: ["technology"] },
 		values: { "HNewhere:app_panes": { list: true, discussion: true }, "HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now, stories } },
 		responses: [{ match: (url) => url === catalogURL, json: index }, ...responses],
 		...options,
 	});
 }
+
+for (const [theme, system, paper, scheme, background, buttonBackground] of [
+	["auto", "light", "night", "dark", "rgb(18, 18, 18)", "rgb(30, 30, 30)"],
+	["dark", "light", "sepia", "light", "rgb(244, 236, 216)", "rgb(235, 224, 198)"],
+	["light", "dark", "gray", "dark", "rgb(74, 74, 76)", "rgb(60, 60, 62)"],
+]) test(`topic Sort and Sources follow Aa ${paper} with ${theme} app appearance`, async (t) => {
+	const { browser, page, errors } = await openReader({ theme, colorScheme: system });
+	t.after(() => browser.close());
+	const address = "https://backchnnl.app/?topic=" + encodeURIComponent(topic.id);
+	await page.goto(address);
+	const article = page.locator(".app-topic-article");
+	await article.getByRole("heading", { name: issue.sections[0].heading }).waitFor();
+	const sort = article.locator(".settings-select-toggle");
+	const sources = article.getByRole("button", { name: "Discussion sources" });
+	const menu = article.getByRole("group", { name: "Filter discussions by source" });
+	const style = (locator, property, pseudo) => locator.evaluate((node, [key, part]) => getComputedStyle(node, part)[key], [property, pseudo]);
+	const list = page.locator("#app-list");
+	const appColor = await style(list, "backgroundColor");
+	const originalSize = parseFloat(await style(sort, "fontSize"));
+	await sources.click();
+	if (theme === "auto") {
+		await page.emulateMedia({ colorScheme: "dark" });
+		assert(await waitFor(async () => await style(menu, "backgroundColor") === "rgb(18, 18, 18)"));
+		await page.emulateMedia({ colorScheme: "light" });
+		assert(await waitFor(async () => await style(menu, "backgroundColor") === "rgb(246, 246, 239)"));
+	}
+	await page.keyboard.press("Escape");
+	assert.equal(page.url(), address, "Escape dismisses the pointer-opened Sources menu");
+	assert(await sources.evaluate((node) => node.getRootNode().activeElement === node));
+	const appearance = page.getByRole("button", { name: "Style settings", exact: true }).filter({ visible: true });
+	await appearance.click();
+	await page.locator(`[data-reader-page="${paper}"]`).click();
+	await page.locator('[data-reader-font="system"]').click();
+	await page.locator("#app-zoom-in").click();
+	await page.keyboard.press("Escape");
+	assert.equal(page.url(), address, "closing Aa keeps the topic open");
+	assert(await appearance.evaluate((node) => node.getRootNode().activeElement === node));
+	const ink = await style(article, "color");
+	const face = await style(article, "fontFamily");
+	const accent = await style(article.locator(".app-topic-cite").first(), "color");
+	const secondary = await style(article.locator(".bc-reader-byline"), "color");
+	const rule = await style(article.locator(".bc-reader-head"), "borderBottomColor");
+	assert.equal(await style(page.locator(".app-topic-article-scroll"), "backgroundColor"), background);
+	assert.equal(await style(list, "backgroundColor"), appColor);
+	assert.equal(await style(sort, "backgroundColor"), buttonBackground);
+	assert.equal(await style(sort, "borderTopColor"), rule);
+	assert.equal(await style(sort.locator("[aria-hidden]"), "color"), ink);
+	assert.equal(await style(article.locator(".page-sort-label"), "color"), secondary);
+	assert.equal(await style(sort, "fontFamily"), face);
+	assert(parseFloat(await style(sort, "fontSize")) > originalSize);
+	assert.equal(await style(sources, "color"), secondary);
+
+	await sort.press("ArrowDown");
+	const options = article.getByRole("menu", { name: "Sort" });
+	const selected = options.getByRole("menuitemradio", { checked: true });
+	assert.equal(await style(options, "backgroundColor"), background);
+	assert.equal(await style(options, "borderTopColor"), rule);
+	assert.equal(await style(options.getByRole("separator"), "borderTopColor"), rule);
+	assert.equal(await style(selected, "color", "::before"), ink);
+	assert.equal(await style(selected, "fontFamily"), face);
+	assert.equal(await style(selected, "outlineColor"), accent);
+	assert.notEqual(await style(selected, "backgroundColor"), await style(options.getByRole("menuitemradio", { checked: false }).first(), "backgroundColor"));
+	await selected.press("Escape");
+	assert.equal(page.url(), address);
+	assert(await sort.evaluate((node) => node.getRootNode().activeElement === node));
+	await sources.press("Enter");
+	const all = menu.getByRole("checkbox", { name: "All sources" });
+	assert.equal(await style(menu, "backgroundColor"), background);
+	assert.equal(await style(menu, "borderTopColor"), rule);
+	assert.equal(await style(menu, "colorScheme"), scheme);
+	assert.equal(await style(article.locator(".app-drop-arrow"), "backgroundColor"), background);
+	assert.equal(await style(article.locator(".app-drop-arrow"), "borderLeftColor"), rule);
+	assert.equal(await style(sources, "color"), accent);
+	assert.equal(await style(menu.locator(".choice-label").first(), "color"), ink);
+	assert.equal(await style(menu.locator(".choice-label").first(), "fontFamily"), face);
+	assert.equal(await style(menu.locator(".app-discussion-summary"), "color"), secondary);
+	assert.equal(await style(menu.locator(".discussion-thread-link").first(), "color"), accent);
+	const group = menu.getByRole("button", { name: /Hacker News discussions/ });
+	assert.equal(await style(group, "fontFamily"), face);
+	assert.equal(await style(group, "borderRightColor", "::after"), secondary);
+	assert.equal(await style(all, "backgroundColor"), accent);
+	assert.equal(await style(all, "borderLeftColor", "::after"), background);
+	assert.equal(await style(all, "outlineColor"), accent);
+	const thread = menu.getByRole("checkbox", { name: issue.sources[0].discussions[0].title, exact: true });
+	await thread.press("Space");
+	assert(await all.evaluate((node) => node.indeterminate));
+	assert.equal(await style(all, "backgroundColor"), accent);
+	assert.equal(await style(all, "backgroundColor", "::after"), background);
+	await thread.press("Space");
+	await all.press("Space");
+	const sync = menu.getByRole("button", { name: "Sync" });
+	assert(await sync.isDisabled());
+	assert.equal(await style(sync, "color"), secondary);
+	assert(await waitFor(async () => await style(all, "borderTopColor") === rule));
+	await all.press("Escape");
+	assert.equal(page.url(), address);
+	assert(await sources.evaluate((node) => node.getRootNode().activeElement === node));
+	assert.deepEqual(errors, []);
+});
 
 for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 	test(`a topic shows its brief, milestones, comments and original sources together at ${width}px in ${scheme}`, async () => {

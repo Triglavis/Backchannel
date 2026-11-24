@@ -4400,6 +4400,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 		isOP: { type: "boolean" },
 		deleted: { type: "boolean" },
 		replyKeys: { type: "array" },
+		replyCount: { type: "number", optional: true },
 		more: { type: "object", nullable: true, optional: true },
 	};
 
@@ -5646,6 +5647,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 			authorName: lemmyDisplayName(commentView.creator),
 			bodyHTML: removed ? "" : markdownToHTML(comment.content || ""),
 			score: commentView.counts?.score ?? null,
+			replyCount: commentView.counts?.child_count ?? 0,
 			createdAt: Math.floor(Date.parse(comment.published) / 1000) || 0,
 			isOP:
 				Boolean(commentView.creator?.id) &&
@@ -6076,6 +6078,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 			authorName: post?.author?.displayName || "",
 			bodyHTML: bskyRichText(post?.record?.text, post?.record?.facets),
 			score: post?.likeCount ?? 0,
+			replyCount: post?.replyCount ?? 0,
 			createdAt: bskyTime(post),
 			isOP: false,
 			deleted: false,
@@ -6085,7 +6088,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 
 	const BSKY_THREAD_DEPTH = 10;
 
-	function indexBskyThread(node, discussion, byKey, parentKey, depth = 0) {
+	function indexBskyThread(node, discussion, byKey, parentKey, depth = 0, expandPartial = false) {
 		const post = node?.post;
 
 		if (!post?.uri) {
@@ -6097,7 +6100,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 
 		byKey.set(key, comment);
 
-		if (depth >= BSKY_THREAD_DEPTH && (post.replyCount || 0) > 0) {
+		if ((post.replyCount || 0) > 0 && (depth >= BSKY_THREAD_DEPTH || expandPartial && post.replyCount > (node.replies?.length || 0))) {
 			comment.more = { ids: [post.uri], count: post.replyCount };
 		}
 
@@ -6107,7 +6110,7 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 			}
 
 			comment.replyKeys.push(bskyKeyFromURI(reply.post.uri));
-			indexBskyThread(reply, discussion, byKey, key, depth + 1);
+			indexBskyThread(reply, discussion, byKey, key, depth + 1, expandPartial);
 		}
 	}
 
@@ -21914,12 +21917,60 @@ header button svg {
 	background:var(--accent-ink);
 }
 
-.source-menu [data-source-group] {
+.source-group-head {
+	display:flex;
+	align-items:stretch;
+	gap:6px;
+}
+
+.source-group-head [data-source-group] {
+	flex:1;
+	min-width:0;
 	font-weight:600;
 }
 
-.source-menu .choice-sub > .source-menu-entry:has([data-discussion-key]) {
-	margin-left:10px;
+.source-menu .source-group-disclosure {
+	display:inline-flex;
+	align-items:center;
+	justify-content:center;
+	gap:6px;
+	box-sizing:border-box;
+	min-width:36px;
+	min-height:24px;
+	width:auto;
+	height:auto;
+	padding:2px 6px;
+	border:0;
+	border-radius:4px;
+	background:transparent;
+	color:var(--muted);
+	font:inherit;
+	font-variant-numeric:tabular-nums;
+	cursor:pointer;
+}
+
+.source-group-disclosure::after {
+	content:"";
+	width:5px;
+	height:5px;
+	border-right:1.5px solid currentColor;
+	border-bottom:1.5px solid currentColor;
+	transform:rotate(-45deg);
+}
+
+.source-group-disclosure[aria-expanded="true"]::after {
+	transform:translateY(-1px) rotate(45deg);
+}
+
+.source-group-choices {
+	margin:2px 0 0 10px;
+}
+
+@media (pointer:coarse), (max-width:700px) {
+	.source-menu .source-group-disclosure {
+		min-width:44px;
+		min-height:40px;
+	}
 }
 
 .source-filter-hidden {
@@ -21957,6 +22008,9 @@ header button svg {
 
 @media (hover: hover) {
 	.source-menu-entry:hover {
+		background:var(--hover-tint);
+	}
+	.source-menu .source-group-disclosure:hover {
 		background:var(--hover-tint);
 	}
 }
@@ -27124,7 +27178,7 @@ ${appMode ? `<div class="browse-tabs" role="tablist">
 </div>
 ${appMode ? "" : '<div id="next-up" class="next-up hidden"></div>'}
 </div>
-${appMode ? '<div id="app-discussion-compose"></div>' : ""}
+${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : ""}
 
 		</div>${appMode ? "</div>" + appChinHTML() + "</div>" : settingsModalHTML()}
 `;
@@ -27308,9 +27362,13 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 
 		window.addEventListener("resize", clampSidebarWidth);
 		window.visualViewport?.addEventListener("resize", onViewportResize);
+		const flushDrafts = () => flushComposerDrafts(shadow).catch(console.error);
+		window.addEventListener("pagehide", flushDrafts);
 
 		host._cleanup = () => {
 			destroyed = true;
+			flushDrafts();
+			window.removeEventListener("pagehide", flushDrafts);
 			closeBrowseRowMenus(shadow);
 			clearTimeout(resizeTimer);
 			resizeHandle?.removeEventListener("mousedown", onResizeMouseDown);
@@ -27743,7 +27801,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 				targets &&
 				!targets.classList.contains("hidden") &&
 				outside(targets) &&
-				outside(box.querySelector(".compose-send-comment"))
+				outside(box.querySelector(".compose-send.is-open"))
 			) {
 				closeComposeTargets(box);
 			}
@@ -27753,21 +27811,25 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 	let composeTargetsMenu = null;
 
 	function closeComposeTargets(box) {
-		const button = box.querySelector(".compose-send-comment");
+		const button = box.querySelector(".compose-send.is-open");
+		const menu = box.querySelector(".compose-targets");
 
-		box.querySelector(".compose-targets")?.classList.add("hidden");
+		if (menu) {
+			menu.classList.add("hidden");
+			menu.onclick = null;
+			if (composeTargetsMenu === menu) composeTargetsMenu = null;
+		}
 		button?.classList.remove("is-open");
 		button?.setAttribute("aria-expanded", "false");
 	}
 
 	function syncComposeSendable(box) {
-		const written = Boolean(
-			box.querySelector(".composer-text")?.value.trim(),
-		);
+		const field = box.querySelector(".composer-text");
+		const written = Boolean(field.value.trim());
 		box.classList.toggle("has-composer-text", written);
 
 		for (const button of box.querySelectorAll(".compose-send")) {
-			if (box.dataset.loading) {
+			if (box.dataset.loading || field.disabled) {
 				button.disabled = true;
 			} else if (!button.dataset.sending) {
 				button.disabled = !written;
@@ -27795,32 +27857,30 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			return;
 		}
 
-		const targets = replyTargets();
+		const count = replyTargets().length;
 		const canNote = Boolean(box.querySelector(".compose-send-note"));
 		const control = sidebarUI.shadow.querySelector("#comment-toggle");
-		const word = targets.length > 1 ? "comment\u2026" : "comment";
-
-		button.hidden = targets.length === 0;
-		composeSendRest.set(button, word);
-
-		if (!button.dataset.sending) {
-			composeSendLabel(button).textContent = word;
-		}
-
 		if (control) {
-			const label = composeDockLabel(targets.length > 0);
-
+			const label = composeDockLabel(count > 0);
 			control.title = label;
 			control.setAttribute("aria-label", label);
 		}
+		setComposeOptions(box, count, canNote, !count && !canNote && Boolean(box.closest("#app-discussion-compose")));
+	}
 
-		if (!targets.length) {
-			closeComposeTargets(box);
+	function setComposeOptions(box, count, canNote, unavailable = false) {
+		const button = box.querySelector(".compose-send-comment");
+		const word = count > 1 ? "comment\u2026" : "comment";
+		if (button) {
+			button.hidden = !count;
+			composeSendRest.set(button, word);
+			if (!button.dataset.sending && !button.classList.contains("is-sending")) composeSendLabel(button).textContent = word;
+			if (button.classList.contains("is-open") && count < 2) closeComposeTargets(box);
+			if (count > 1) button.setAttribute("aria-expanded", String(button.classList.contains("is-open")));
+			else button.removeAttribute("aria-expanded");
 		}
-
 		const field = box.querySelector(".composer-text");
-		const unavailable = targets.length === 0 && !canNote && Boolean(box.closest("#app-discussion-compose"));
-		const placeholder = unavailable ? "Select a discussion to comment" : composePlaceholder(targets.length > 0, canNote);
+		const placeholder = unavailable ? "Select a discussion to comment" : composePlaceholder(count > 0, canNote);
 
 		field.readOnly = unavailable;
 		field.placeholder = placeholder;
@@ -27863,6 +27923,17 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 		if (bar) bar.replaceChildren(box);
 		else ui.body.insertBefore(box, before);
 
+		const first = stories[0];
+		box._hnewhereStoryKey = first?.key ?? null;
+		wireComposeBox(box, { compact: Boolean(bar), storyID: first?.id, source: first?.source, commentTargets: replyTargets });
+		syncComposeBox();
+		if (!bar) box._hnewhereDock = wireComposeDock(ui, box, composeDockLabel(canComment));
+		return box;
+	}
+
+	function wireComposeBox(box, { compact, storyID, source, draftKey, commentTargets, noteTargets }) {
+		const commentButton = box.querySelector(".compose-send-comment");
+		const noteButton = box.querySelector(".compose-send-note");
 		const textarea = box.querySelector(".composer-text");
 		const status = box.querySelector(".composer-status");
 
@@ -27882,7 +27953,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 				Math.round((textarea.scrollHeight - padding) / line),
 			);
 
-			textarea.rows = bar ? Math.min(5, used) : Math.min(COMPOSE_MAX_ROWS, Math.max(textarea.dataset.opened ? 2 : 1, used + 1));
+			textarea.rows = compact ? Math.min(5, used) : Math.min(COMPOSE_MAX_ROWS, Math.max(textarea.dataset.opened ? 2 : 1, used + 1));
 		};
 
 		textarea.addEventListener("focus", () => {
@@ -27893,8 +27964,11 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			textarea.dataset.opened = "1";
 			grow();
 		});
-		textarea.addEventListener("input", grow);
-		textarea.addEventListener("input", () => syncComposeSendable(box));
+		textarea.addEventListener("input", () => {
+			closeComposeTargets(box);
+			syncComposeSendable(box);
+			grow();
+		});
 		textarea.addEventListener("blur", () => {
 			if (appState) {
 				return;
@@ -27907,14 +27981,9 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			}
 		});
 		const menu = box.querySelector(".compose-targets");
-		const first = stories[0];
-
-		box._hnewhereStoryKey = first?.key ?? null;
-
-		const held = canComment
+		const held = commentButton || draftKey
 			? wireComposer(box, {
-					source: first?.source || "hn",
-					storyID: first?.id,
+					source, storyID, draftKey,
 					onPosted: grow,
 					onRestored: () => {
 						syncComposeSendable(box);
@@ -27922,7 +27991,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 						new ResizeObserver((_, watch) => {
 							if (textarea.getClientRects().length) {
 								watch.disconnect();
-								grow();
+								requestAnimationFrame(grow);
 							}
 						}).observe(textarea);
 					},
@@ -27940,137 +28009,103 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			status.textContent = message || "";
 		};
 
-		const commentButton = box.querySelector(".compose-send-comment");
 		const closeMenu = () => closeComposeTargets(box);
-
-		const openMenu = () => {
-			composeTargetsMenu = menu;
-			menu.classList.remove("hidden");
-			commentButton.classList.add("is-open");
-			commentButton.setAttribute("aria-expanded", "true");
-		};
-
-		let offered = [];
-
-		if (canComment) {
-			box.addEventListener("keydown", (event) => {
-				if (event.key !== "Escape" || menu.classList.contains("hidden")) return;
-				event.preventDefault();
-				event.stopPropagation();
-				closeMenu();
-				commentButton.focus();
-			});
-
-			menu.addEventListener("click", (event) => {
-				const choice = event.target.closest(".compose-target");
-				const story = offered.find(
-					(candidate) => candidate.key === choice?.dataset.discussionKey,
-				);
-
-				if (!story) {
-					return;
-				}
-
+		box.addEventListener("keydown", (event) => {
+			if (event.key !== "Escape" || menu.classList.contains("hidden")) return;
+			event.preventDefault();
+			event.stopPropagation();
+			const opener = box.querySelector(".compose-send.is-open");
+			closeMenu();
+			opener?.focus();
+		});
+		box.addEventListener("focusout", (event) => {
+			if (event.relatedTarget && !box.contains(event.relatedTarget)) closeMenu();
+		});
+		const choose = (event, targets, act, label) => {
+			const button = event.currentTarget;
+			const wasOpen = button.classList.contains("is-open");
+			closeMenu();
+			if (wasOpen) return;
+			const options = targets();
+			const select = (target) => {
 				closeMenu();
 				box._hnewhereDock?.undock();
-				held
-					.send({ source: story.source, storyID: story.id })
-					.finally(() => syncComposeSendable(box));
-			});
-
-			commentButton.onclick = (event) => {
-				const targets = replyTargets();
-
-				if (!targets.length) {
-					return;
-				}
-
-				if (targets.length === 1) {
-					closeMenu();
-					box._hnewhereDock?.undock();
-					held
-						.send({ source: targets[0].source, storyID: targets[0].id })
-						.finally(() => syncComposeSendable(box));
-					return;
-				}
-
-				if (!menu.classList.contains("hidden")) {
-					closeMenu();
-					return;
-				}
-
-				offered = targets;
-				menu.innerHTML = discussionChoiceGroupsHTML(
-					targets,
-					(story, about) =>
-						`<button type="button" class="compose-target" data-discussion-key="${escapeHTML(story.key)}">${discussionChoiceHTML("", about)}</button>`,
-				);
-				openMenu();
-				if (event.detail === 0) menu.querySelector("button")?.focus();
+				act(target);
 			};
+			if (!options.length) return;
+			if (options.length === 1) { select(options[0]); return; }
+
+			const row = (target, about) => `<button type="button" class="compose-target" data-discussion-key="${escapeHTML(target.key)}">${discussionChoiceHTML("", about)}</button>`;
+			menu.innerHTML = button === commentButton ? discussionChoiceGroupsHTML(options, row) :
+				options.map((target) => row(target, { label: target.label })).join("");
+			menu.onclick = (click) => {
+				const key = click.target.closest(".compose-target")?.dataset.discussionKey;
+				const target = targets().find((item) => item.key === key);
+				if (target) select(target);
+			};
+			composeTargetsMenu = menu;
+			menu.setAttribute("aria-label", label);
+			menu.classList.remove("hidden");
+			button.classList.add("is-open");
+			button.setAttribute("aria-expanded", "true");
+			if (event.detail === 0) menu.querySelector("button")?.focus();
+		};
+		if (commentButton) {
+			commentButton.onclick = (event) => choose(event, commentTargets, (story) => {
+				const sending = held.send({ source: story.source, storyID: story.id, refresh: story.refresh });
+				syncComposeSendable(box);
+				sending.finally(() => syncComposeSendable(box));
+			}, "Choose a discussion");
 		}
 
-		if (canNote) {
-			const noteButton = box.querySelector(".compose-send-note");
+		if (noteButton) {
 			let warnedFor = null;
-
-			noteButton.onclick = () => {
-				closeMenu();
-
+			noteButton.onclick = (event) => {
 				const parsed = noteFromText(textarea.value);
-
 				if (!parsed.text && !parsed.exact) {
 					say("Write something first.", true);
 					textarea.focus();
 					return;
 				}
 
-				if (parsed.exact && warnedFor !== parsed.exact && !anchorNoteQuote(parsed.exact)) {
+				if (parsed.exact && warnedFor !== parsed.exact && (noteTargets || !anchorNoteQuote(parsed.exact))) {
 					warnedFor = parsed.exact;
-					say(
-						"Your quoted text wasn't found in this document. Press again to keep it without a highlight.",
-						true,
-					);
+					say(noteTargets ? "Press note again to save this quotation with the source article." :
+						"Your quoted text wasn't found in this document. Press again to keep it without a highlight.", true);
 					return;
 				}
 
-				textarea.value = "";
-				grow();
-				say("");
-				box._hnewhereDock?.undock();
-				startComposeSend(noteButton, "saving…", "saved");
-				syncComposeSendable(box);
-				writeNote(parsed)
-					.then(() => settleComposeSend(noteButton, "saved"))
-					.catch((error) => {
-						restComposeSend(noteButton);
-						console.error(error);
-					})
-					.finally(() => syncComposeSendable(box));
+				const keep = (target) => {
+					say("");
+					textarea.disabled = true;
+					startComposeSend(noteButton, "saving…", "saved");
+					syncComposeSendable(box);
+					writeNote(parsed, target?.context)
+						.then(async () => {
+							textarea.value = "";
+							textarea.dispatchEvent(new Event("input"));
+							await flushComposerDrafts(box);
+							settleComposeSend(noteButton, "saved");
+						})
+						.catch((error) => {
+							restComposeSend(noteButton);
+							say("Couldn’t save your note. Try again.", true);
+							console.error(error);
+						})
+						.finally(() => { textarea.disabled = false; syncComposeSendable(box); });
+				};
+				if (noteTargets) choose(event, noteTargets, keep, "Choose a source article");
+				else {
+					closeMenu();
+					box._hnewhereDock?.undock();
+					keep();
+				}
 			};
 		}
 
-		if (canNote && !bar) {
-			holdComposeSendWidth(box.querySelector(".compose-send-note"), [
-				"saving…",
-				"saved",
-			]);
-		}
-
-		if (canComment && !bar) {
-			holdComposeSendWidth(box.querySelector(".compose-send-comment"), [
-				"comment\u2026",
-				"posting…",
-				"posted",
-			]);
-		}
-
-		syncComposeBox();
+		if (!compact && noteButton) holdComposeSendWidth(noteButton, ["saving…", "saved"]);
+		if (!compact && commentButton) holdComposeSendWidth(commentButton, ["comment\u2026", "posting…", "posted"]);
 		syncComposeSendable(box);
-
-		if (!bar) box._hnewhereDock = wireComposeDock(ui, box, composeDockLabel(canComment));
-
-		return box;
 	}
 
 	const COMPOSE_MAX_ROWS = 12;
@@ -28085,13 +28120,13 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 	<div class="composer-status hidden" role="status"></div>
 	<span class="compose-send-row">${
 		canNote
-			? `<button type="button" class="compose-send compose-send-note" title="Keep this as a note"><span class="compose-send-label">note</span></button>`
+			? `<button type="button" class="compose-send compose-send-note" aria-label="Keep a note" title="Keep this as a note"><span class="compose-send-label">note</span></button>`
 			: ""
 	}${
 		canComment
 			? `<button type="submit" class="composer-submit compose-send compose-send-comment" aria-label="Add a comment" title="Add this as a comment">${appState ? APP_ICON('<path d="M8 12V4m-3 3 3-3 3 3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>') : ""}<span class="compose-send-label">comment</span></button>`
 			: ""
-	}<div class="compose-targets hidden" role="menu"></div></span>
+	}<div class="compose-targets hidden" role="group"></div></span>
 	</div>
 	</div>
 	<div class="composer-help hidden">
@@ -28241,13 +28276,12 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 
 	function wireComposer(
 		composer,
-		{ source = "hn", storyID, parentId = null, onPosted, onRestored, refresh } = {},
+		{ source = "hn", storyID, parentId = null, draftKey = composerDraftKey({ storyID, parentId }), onPosted, onRestored, refresh } = {},
 	) {
 		if (!composer) {
 			return null;
 		}
 
-		const draftKey = composerDraftKey({ storyID, parentId });
 		const textarea = composer.querySelector(".composer-text");
 		const submitButton = composer.querySelector(".composer-submit");
 		const helpToggle = composer.querySelector(".composer-help-toggle");
@@ -28289,7 +28323,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			}, 140);
 		};
 
-		helpToggle.onclick = () => {
+		if (helpToggle) helpToggle.onclick = () => {
 			const hidden = help.classList.toggle("hidden");
 
 			helpToggle.classList.toggle("is-open", !hidden);
@@ -28307,29 +28341,21 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 
 		let saveTimer = 0;
 		let unsaved = false;
-		const saveDraft = () => {
+		textarea._hnewhereFlushDraft = () => {
+			if (!unsaved) return Promise.resolve();
+			clearTimeout(saveTimer);
+			window.removeEventListener("beforeunload", savePendingDraft);
 			unsaved = false;
 			return textarea.value ? save(draftKey, textarea.value) : forget(draftKey);
 		};
-
+		const savePendingDraft = () => textarea._hnewhereFlushDraft().catch(console.error);
+		textarea.addEventListener("blur", savePendingDraft);
 		textarea.addEventListener("input", () => {
+			if (!unsaved) window.addEventListener("beforeunload", savePendingDraft);
 			unsaved = true;
 			clearTimeout(saveTimer);
-
-			saveTimer = window.setTimeout(() => {
-				saveDraft().catch(console.error);
-			}, 400);
+			saveTimer = window.setTimeout(savePendingDraft, 400);
 		});
-
-		textarea._hnewhereFlushDraft = () => {
-			if (!unsaved) {
-				return Promise.resolve();
-			}
-
-			clearTimeout(saveTimer);
-
-			return saveDraft();
-		};
 
 		const setBusy = (busy) => {
 			submitButton.disabled = busy;
@@ -28375,14 +28401,15 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 					}
 
 					textarea.value = "";
-					clearTimeout(saveTimer);
-					await forget(draftKey);
+					unsaved = true;
+					await textarea._hnewhereFlushDraft();
 
 					settleComposeSend(submitButton, "posted");
 
 					window.setTimeout(() => {
 						onPosted?.();
-						if (refresh) refresh();
+						const update = aim.refresh || refresh;
+						if (update) update();
 						else reloadDiscussion(shownUI, shownDiscussions);
 					}, 1400);
 				} finally {
@@ -28391,7 +28418,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			})();
 		};
 
-		submitButton.onclick = () => send();
+		if (submitButton) submitButton.onclick = () => send();
 
 		return { focus: () => textarea.focus(), send, setStatus, textarea };
 	}
@@ -29528,6 +29555,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 	}
 
 	function prepareDiscussionStream(stories, ui, settings) {
+		const menuState = captureDiscussionMenu(ui);
 		const waiting = discussionLoading();
 		ui.body.replaceChildren(waiting);
 		renderedFor = openPageKey();
@@ -29540,6 +29568,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			onSortChange: () => renderDiscussionSnapshot(stories, ui),
 		});
 		ui.body.insertBefore(header, waiting);
+		restoreDiscussionMenu(ui, menuState);
 		mountFilterBanner(header, ui);
 		const details = document.createElement("div");
 		details.className = "submission-details";
@@ -29592,6 +29621,7 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 		setWordmarkLocation(ui, "Discussion");
 		stopObservingNewComments();
 		renderedComments = [];
+		const sidebarMenu = appState ? null : captureDiscussionMenu(ui);
 		ui.body.innerHTML = "";
 
 		if (kept && !bar) {
@@ -29614,8 +29644,10 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			newCommentsFirst: settings.newCommentsFirst,
 			onSortChange: () => renderDiscussionSnapshot(stories, ui),
 		};
+		const initialMenu = appState ? captureDiscussionMenu(ui) : sidebarMenu;
 		let headerElement = renderPageHeader(stories, ui.body, headerOptions);
 		ui.body.insertBefore(headerElement, waiting);
+		restoreDiscussionMenu(ui, initialMenu);
 		mountFilterBanner(headerElement, ui);
 
 		sidebarSourceKeys.clear();
@@ -29693,10 +29725,12 @@ ${appMode ? '<div id="app-discussion-compose"></div>' : ""}
 			: threads[index].refreshIncomplete ? [[story.key, discussionStatus("refresh-incomplete", threads[index])]]
 			: threads[index].empty && Number(story.commentCount) > 0 ? [[story.key, discussionStatus("unavailable", threads[index])]]
 			: threads[index].incomplete && !threads[index].empty ? [[story.key, discussionStatus("incomplete", threads[index])]] : []));
+		const loadingMenu = captureDiscussionMenu(ui);
 		headerElement.remove();
 		sortRow?.remove();
 		headerElement = renderPageHeader(stories, ui.body, { ...headerOptions, loadStatus });
 		ui.body.insertBefore(headerElement, details);
+		restoreDiscussionMenu(ui, loadingMenu);
 		mountFilterBanner(headerElement, ui);
 		sortRow = ui.body.querySelector(".page-sort");
 		if (sortRow) ui.body.insertBefore(sortRow, waiting);
@@ -30222,6 +30256,8 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 
 	function renderPageHeader(stories, container, options = {}) {
 		stories = discussionChoices(stories);
+		const view = appState?.open || container;
+		const sourceState = view.sourceMenuState ||= { expanded: new Map() };
 		const sort = options.sort || "best";
 		const loadStatus = options.loadStatus || new Map();
 		const page = options.page ?? discussionsPageTitle(stories);
@@ -30250,7 +30286,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 <div class="page-header-title">${single ? "" : escapeHTML(page)}</div>
 <div class="page-header-meta">${
 	hasMenu
-	? `<span class="page-header-total">${escapeHTML(pluralize(total, "comment"))}</span> across <span class="source-menu-anchor"><button type="button" class="page-header-disclosure" aria-expanded="false" aria-controls="source-menu">${stories.length} ${stories.length === 1 ? "discussion" : "discussions"}</button>${sourceMenuHTML(stories)}</span>${pageSave ? '<span class="page-header-sep">|</span>' : ""}`
+	? `<span class="page-header-total">${escapeHTML(pluralize(total, "comment"))}</span> across <span class="source-menu-anchor"><button type="button" class="page-header-disclosure" aria-expanded="false" aria-controls="source-menu">${stories.length} ${stories.length === 1 ? "discussion" : "discussions"}</button>${sourceMenuHTML(stories, sourceState)}</span>${pageSave ? '<span class="page-header-sep">|</span>' : ""}`
 		: ""
 }${stories.length > 1 && pageSave ? pageSave : ""}</div>
 `;
@@ -30274,6 +30310,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 			}
 
 			syncSourceMenuState(menu);
+			rememberSourceGroups(menu, sourceState);
 			menu.classList.remove("hidden");
 			disclosure.setAttribute("aria-expanded", "true");
 			fitSourceMenuToRoom(menu);
@@ -30281,9 +30318,13 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 
 		setMenuOpen(false);
 
-		disclosure.onclick = () => setMenuOpen(menu.classList.contains("hidden"));
+		disclosure.onclick = (event) => {
+			const open = menu.classList.contains("hidden");
+			setMenuOpen(open);
+			if (open && event.detail === 0) focusSourceMenuControl(menu, sourceState.focused);
+		};
 
-		wireDiscussionSelection(menu, (keys) => {
+		wireDiscussionSelection(menu, sourceState, (keys) => {
 			const options = { animate: false, scroll: false, restore: true };
 			if (!keys) clearCommentFilter(options);
 			else applyDiscussionSelection(keys, options);
@@ -30300,7 +30341,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 
 		const menuAnchor = disclosure.closest(".source-menu-anchor");
 		menuAnchor.addEventListener("focusout", (event) => {
-			if (!menuAnchor.contains(event.relatedTarget)) {
+			if (!menuAnchor.contains(event.relatedTarget) && (event.relatedTarget || !menuAnchor.matches(":active"))) {
 				setMenuOpen(false);
 			}
 		});
@@ -30313,10 +30354,10 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		return wrapper;
 	}
 
-	function appDiscussionSourcesHead(onSync) {
+	function appDiscussionSourcesHead(menu, onSync) {
 		const title = document.createElement("div");
 		title.className = "app-sources-head";
-		title.innerHTML = `<span class="app-sources-title">Sources</span><button type="button" class="app-head-icon app-sources-sync" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>`;
+		title.innerHTML = `<span class="app-sources-title">Sources</span><button type="button" id="${menu.id}-sync" class="app-head-icon app-sources-sync" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>`;
 		title.querySelector("button").onclick = onSync;
 		return title;
 	}
@@ -30356,7 +30397,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		disclosure.classList.add("app-head-icon");
 		disclosure.setAttribute("aria-label", summary);
 		disclosure.title = summary;
-		menu.prepend(appDiscussionSourcesHead(() => shadow.querySelector("#app-list-sync")?.click()));
+		menu.prepend(appDiscussionSourcesHead(menu, () => shadow.querySelector("#app-list-sync")?.click()));
 		hint.className = "settings-option-hint app-discussion-summary";
 		hint.textContent = summary;
 
@@ -30504,69 +30545,65 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		}${live ? `<span class="live-pill">LIVE</span>` : ""}`;
 	}
 
-	function discussionChoiceGroupsHTML(stories, row, groupToggle = null, liveKeys = liveDiscussions.keys()) {
+	function discussionChoiceGroupsHTML(stories, row, sourceSection = null, liveKeys = liveDiscussions.keys()) {
 		const groups = sourceMenuGroups(
 			stories,
 			liveKeys,
 			(id) => getSource(id)?.label,
 		);
 
-		return groups
-			.map(
-				(group) => `<div class="choice-group">${
-					group.live && groups.length > 1
-						? `<div class="choice-head"><span class="live-pill">LIVE</span></div>`
-						: ""
-				}${group.sources
-					.map(
-						(source) => `<div class="choice-sub">${
-							groupToggle
-								? groupToggle(source, group.live)
-								: group.sources.length > 1
-								? `<div class="choice-sub-head">${escapeHTML(source.label)}</div>`
-								: ""
-						}${source.stories
-							.map((story) =>
-								row(story, {
-									label: discussionChoiceLabel(story),
-									count: story.commentCount ?? 0,
-									live: group.live && groups.length === 1,
-								}),
-							)
-							.join("")}</div>`,
-					)
-					.join("")}</div>`,
-			)
-			.join("");
+		return groups.map((group) => {
+			const heading = group.live && groups.length > 1 ? '<div class="choice-head"><span class="live-pill">LIVE</span></div>' : "";
+			const sections = group.sources.map((source) => {
+				const rows = source.stories.map((story) => row(story, {
+					label: discussionChoiceLabel(story),
+					count: story.commentCount ?? 0,
+					live: group.live && groups.length === 1,
+				})).join("");
+				const content = sourceSection ? sourceSection(source, group.live, rows) :
+					(group.sources.length > 1 ? `<div class="choice-sub-head">${escapeHTML(source.label)}</div>` : "") + rows;
+				return `<div class="choice-sub">${content}</div>`;
+			}).join("");
+			return `<div class="choice-group">${heading}${sections}</div>`;
+		}).join("");
 	}
 
-	function discussionHintHTML(story, count) {
+	function discussionHintHTML(story, count, linkId) {
 		const text = escapeHTML(pluralize(count ?? 0, "comment"));
 		const href = discussionURL(story);
 		const label = `Open this discussion on ${sourceShortLabel(story)}`;
 
 		return `<div class="settings-option-hint source-menu-hint">${
 			href
-				? `<a class="discussion-thread-link" href="${escapeHTML(href)}" target="_blank" rel="noopener" title="${escapeHTML(label)}">${text}</a>`
+				? `<a id="${linkId}" class="discussion-thread-link" href="${escapeHTML(href)}" target="_blank" rel="noopener" title="${escapeHTML(label)}">${text}</a>`
 				: text
 		}</div>`;
 	}
 
-	function sourceMenuHTML(stories, id = "source-menu", liveKeys = liveDiscussions.keys()) {
-		const option = (attributes, about, story = null) => `
-<div class="source-menu-entry"><label class="settings-option source-menu-option" ${attributes}>${discussionChoiceHTML(
-			'<input type="checkbox" checked>',
+	function sourceMenuHTML(stories, state, id = "source-menu", liveKeys = liveDiscussions.keys()) {
+		const option = (control, attributes, about) => `<label class="settings-option source-menu-option" ${attributes}>${discussionChoiceHTML(
+			`<input type="checkbox" id="${control}" checked>`,
 			{ ...about, count: null },
-		)}</label>${story ? discussionHintHTML(story, about.count) : ""}</div>`;
+		)}</label>`;
+		const row = (story, about) => {
+			const key = escapeHTML(story.key);
+			const control = `${id}-discussion-${key}`;
+			return `<div class="source-menu-entry">${option(control, `data-discussion-key="${key}"`, about)}${discussionHintHTML(story, about.count, id + "-link-" + key)}</div>`;
+		};
+		const section = (source, live, rows) => {
+			const key = (live ? "live:" : "other:") + source.id;
+			const list = id + "-" + escapeHTML(key);
+			const expanded = state.expanded.get(key) ?? stories.length <= 4;
+			const count = source.stories.length;
+			const name = escapeHTML(`${source.label} discussions, ${count}${live ? ", live" : ""}`);
+			return `<div class="source-menu-entry source-group-head">${option(list + "-select", `data-source-group="${escapeHTML(key)}"`, { label: source.label })}
+<button type="button" class="source-group-disclosure" id="${list}-toggle" aria-controls="${list}" aria-expanded="${expanded}" aria-label="${name}">${count}</button></div>
+<div id="${list}" class="source-group-choices"${expanded ? "" : " hidden"}>${rows}</div>`;
+		};
 
 		return `<div class="source-menu hidden" id="${id}" role="group" aria-label="Filter discussions by source">
-<div class="choice-group">${option("data-select-all", { label: "All sources" })}</div>
-${discussionChoiceGroupsHTML(
-			stories,
-			(story, about) => option(`data-discussion-key="${escapeHTML(story.key)}"`, about, story),
-			(source, live) => option(`data-source-group="${escapeHTML((live ? "live:" : "other:") + source.id)}"`, { label: source.label }),
-			liveKeys,
-		)}
+<div class="choice-group"><div class="source-menu-entry">${option(id + "-all", "data-select-all", { label: "All sources" })}</div></div>
+${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 </div>`;
 	}
 
@@ -30574,10 +30611,66 @@ ${discussionChoiceGroupsHTML(
 		return Number.isSafeInteger(reader?.archiveCount) ? { kind, archiveCount: reader.archiveCount } : kind;
 	}
 
-	function wireDiscussionSelection(menu, change) {
+	function focusSourceMenuControl(menu, id) {
+		const control = id ? menu.getRootNode().getElementById(id) : null;
+		const folded = control?.closest(".source-group-choices[hidden]");
+		const target = folded?.previousElementSibling.querySelector("button") || (control?.getClientRects().length && !control.disabled ? control : menu.querySelector("input:not(:disabled)"));
+		target?.focus({ preventScroll: true });
+	}
+
+	function rememberSourceGroups(menu, state) {
+		for (const button of menu.querySelectorAll(".source-group-disclosure")) {
+			state.expanded.set(button.previousElementSibling.dataset.sourceGroup, button.getAttribute("aria-expanded") === "true");
+		}
+	}
+
+	function captureDiscussionMenu(ui) {
+		const menu = ui.shadow.getElementById("source-menu");
+		if (!menu) return null;
+		const focused = ui.shadow.activeElement;
+		const trigger = focused === menu.parentElement.querySelector(".page-header-disclosure");
+		const open = !menu.classList.contains("hidden");
+		return open || trigger ? { open, trigger, scroll: menu.scrollTop, control: menu.contains(focused) ? focused.id : "" } : null;
+	}
+
+	function restoreDiscussionMenu(ui, state) {
+		if (!state) return;
+		const menu = ui.shadow.getElementById("source-menu");
+		if (!menu) return;
+		const trigger = menu.parentElement.querySelector(".page-header-disclosure");
+		if (state.open) {
+			syncSourceMenuState(menu);
+			menu.classList.remove("hidden");
+			trigger.setAttribute("aria-expanded", "true");
+			menu.scrollTop = state.scroll;
+			fitSourceMenuToRoom(menu);
+			if (state.control) focusSourceMenuControl(menu, state.control);
+		}
+		if (state.trigger) trigger.focus({ preventScroll: true });
+	}
+
+	function wireDiscussionSelection(menu, state, change, fit = () => fitSourceMenuToRoom(menu)) {
+		menu.addEventListener("focusin", (event) => {
+			state.focused = event.target.id;
+			const group = event.target.closest(".choice-sub");
+			if (group) rememberSourceGroups(group, state);
+		});
+		menu.addEventListener("click", (event) => {
+			const button = event.target.closest(".source-group-disclosure");
+			if (!button) return;
+			const head = button.closest(".source-group-head");
+			const choices = head.nextElementSibling;
+			const open = choices.hidden;
+			button.focus({ preventScroll: true });
+			button.setAttribute("aria-expanded", String(open));
+			choices.hidden = !open;
+			state.expanded.set(button.previousElementSibling.dataset.sourceGroup, open);
+			fit();
+		});
 		menu.addEventListener("change", (event) => {
 			const option = event.target.closest(".source-menu-option");
 			if (!option) return;
+			event.target.focus({ preventScroll: true });
 			const leaves = ".source-menu-option[data-discussion-key]";
 			if (!option.dataset.discussionKey) {
 				const scope = option.hasAttribute("data-select-all") ? menu : option.closest(".choice-sub");
@@ -35887,13 +35980,7 @@ ${discussionChoiceGroupsHTML(
 		const body = ui.body;
 		const oldHeader = body.querySelector(":scope > .page-header");
 		const oldSort = body.querySelector(":scope > .page-sort");
-		const oldMenu = ui.shadow.querySelector("#source-menu");
-		const oldDisclosure = ui.shadow.querySelector(".page-header-disclosure");
-		const menuOpen = oldMenu && !oldMenu.classList.contains("hidden");
-		const focused = ui.shadow.activeElement;
-		const optionKey = (option) => option.dataset.discussionKey ?? option.dataset.sourceGroup ?? "";
-		const focusedOption = oldMenu?.contains(focused) && focused.closest(".source-menu-option");
-		const focusSync = oldMenu?.contains(focused) && focused.classList.contains("app-sources-sync");
+		const menuState = captureDiscussionMenu(ui);
 		const filterAtHeader = oldHeader?.nextElementSibling === ui.filterBanner;
 		const header = renderPageHeader(stories, body, {
 			page: discussionsPageTitle(stories),
@@ -35924,15 +36011,7 @@ ${discussionChoiceGroupsHTML(
 		}
 		syncFilterAffordances();
 		paintAppPinnedDiscussion();
-		const menu = ui.shadow.querySelector("#source-menu");
-		const disclosure = ui.shadow.querySelector(".page-header-disclosure");
-		if (menuOpen && menu) {
-			menu.classList.remove("hidden");
-			disclosure?.setAttribute("aria-expanded", "true");
-			fitSourceMenuToRoom(menu);
-		}
-		const nextFocus = focusSync ? menu?.querySelector(".app-sources-sync") : focusedOption ? [...(menu?.querySelectorAll(".source-menu-option") || [])].find((option) => optionKey(option) === optionKey(focusedOption))?.querySelector("input") : null;
-		if (nextFocus || focused && focused === oldDisclosure) (nextFocus || disclosure)?.focus({ preventScroll: true });
+		restoreDiscussionMenu(ui, menuState);
 	}
 
 	function syncDiscussionBookends(comments, entries, settings, lookup) {
@@ -39347,13 +39426,52 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-source-threads li { padding:.35em 0 .35em .8em; border-inline-start:1px solid var(--reader-rule); }
 .app-topic-thread-title { display:block; color:var(--reader-ink); font-weight:600; text-decoration:none; }
 .app-topic-thread-original { color:var(--reader-link); text-decoration:none; }
-.app-topic-discussions { margin-top:1.6em; padding-top:.8em; border-top:1px solid var(--reader-rule); }
+.app-topic-discussions {
+	--bg:var(--reader-page);
+	--text:var(--reader-ink);
+	--meta:var(--topic-secondary);
+	--muted:var(--topic-secondary);
+	--link:var(--reader-link);
+	--accent:var(--reader-link);
+	--accent-ink:var(--reader-page);
+	--surface:var(--reader-page);
+	--surface-text:var(--reader-ink);
+	--surface-border:var(--reader-rule);
+	--surface-divider:var(--reader-rule);
+	--border:var(--reader-rule);
+	--border-soft:var(--reader-rule);
+	--button-bg:var(--reader-code);
+	--button-text:var(--reader-ink);
+	--button-border:var(--reader-rule);
+	--field-bg:var(--reader-page);
+	--field-text:var(--reader-ink);
+	--field-border:var(--reader-rule);
+	--field-disabled-bg:var(--reader-code);
+	--help-bg:var(--reader-code);
+	--help-border:var(--reader-rule);
+	--help-text:var(--topic-secondary);
+	--status-text:var(--topic-secondary);
+	--code-bg:var(--reader-code);
+	--hover-tint:color-mix(in srgb, var(--reader-ink) 10%, transparent);
+	--active-tint:color-mix(in srgb, var(--reader-link) 18%, transparent);
+	--icon-on:var(--reader-link);
+	--icon-fill:var(--reader-page);
+	--icon-knock:var(--reader-page);
+	color-scheme:var(--reader-scheme);
+	margin-top:1.6em; padding-top:.8em; border-top:1px solid var(--reader-rule);
+}
 .app-topic-discussion-head {
 	position:relative; z-index:2; display:flex; align-items:center; flex-wrap:wrap; gap:2px 8px;
 	min-height:36px; margin-bottom:.45em; border-bottom:1px solid var(--reader-rule);
 }
 .app-topic-discussion-head h2 { margin:0; }
-.app-topic-controls { display:flex; align-items:center; gap:2px; margin-inline-start:auto; font:12px/1.4 var(--topic-sans); }
+.app-topic-controls { display:flex; align-items:center; gap:2px; margin-inline-start:auto; font:.75em/1.4 var(--reader-face); }
+.app-topic-controls .app-discussion-sort .page-sort { font-size:calc(10em / 12); }
+.app-topic-controls .settings-select-menu { font-size:1.2em; }
+.app-topic-controls .dropdown .dropdown-item { font-family:inherit; font-size:inherit; }
+.app-topic-controls .app-discussion-meta :is(.source-menu, .source-menu-option, .app-sources-title) { font-size:inherit; }
+.app-topic-controls .app-discussion-meta :is(.choice-head, .choice-sub-head, .settings-option-hint) { font-size:calc(11em / 12); }
+.app-topic-controls .discussion-thread-link { color:var(--reader-link); }
 .app-topic-controls .app-sources-head { align-items:center; justify-content:space-between; }
 .app-topic-controls .choice-label { white-space:normal; }
 .app-topic-controls .source-menu:popover-open { position:fixed; inset:auto; margin:0; }
@@ -39365,11 +39483,24 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-thread-back, .app-topic-comment-context { padding:.18em .35em; border:0; border-radius:999px; background:none; color:var(--reader-link); cursor:pointer; }
 .app-topic-thread-back { margin:0 0 .6em; }
 .app-topic-feed-status { margin:.6em 0; color:var(--topic-secondary); font:.82em/1.45 var(--topic-sans); }
+.app-topic-feed-end { height:1px; }
 .app-topic-feed-more { padding:.35em .9em; border:1px solid var(--reader-rule); border-radius:999px; background:transparent; color:var(--reader-link); font:600 .75em/1.5 var(--topic-sans); cursor:pointer; }
 .app-topic-feed-more:hover { background:var(--topic-tint); }
-.app-topic-feed-compose { margin-top:.6em; font:600 .77em/1.45 var(--topic-sans); color:var(--reader-link); }
-.app-topic-compose-choices { display:grid; gap:2px; margin:.25em 0; padding:.35em; border:1px solid var(--reader-rule); border-radius:5px; }
-.app-topic-compose-choices button { padding:5px; text-align:start; }
+.app-topic-discussions .app-compose-bar {
+	margin:.6em 0;
+	font:normal .82em/1.45 var(--reader-face);
+	--send-note-stage:var(--topic-secondary);
+	--send-note-peak:var(--reader-ink);
+	--send-ink-stage:color-mix(in srgb, var(--accent-ink) 68%, transparent);
+	--send-ink-peak:var(--accent-ink);
+}
+.app-topic-discussions .app-compose-bar .composer-text { min-width:0; font:inherit; }
+.app-topic-discussions .composer-text::placeholder { color:var(--topic-secondary); opacity:1; }
+.app-topic-discussions .app-compose-bar :is(.composer-help-toggle, .compose-target) { font-family:inherit; }
+.app-topic-discussions .compose-field:focus-within { box-shadow:0 0 0 2px color-mix(in srgb, var(--reader-link) 18%, transparent); }
+.app-topic-discussions .app-topic-feed-compose .compose-targets { top:calc(100% + 6px); bottom:auto; }
+.app-topic-discussions .compose-targets { width:max-content; max-width:min(270px, 76vw); }
+.app-topic-discussions .compose-target .choice-label { white-space:normal; }
 .app-topic-comments { margin:0; padding:0; list-style:none; }
 .app-topic-comments > li { padding:.68em 0; }
 .app-topic-feed-comment + .app-topic-feed-comment { border-top:1px solid var(--reader-rule); }
@@ -39389,18 +39520,18 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-thread-detail .app-topic-comment-actions { align-items:center; }
 .app-topic-comment-action, .app-topic-thread-detail .item-action-link { padding:3px 0; background:none; border:0; font:inherit; color:var(--reader-link); cursor:pointer; }
 .app-topic-clear-focus { margin-bottom:.4em; font:600 .75em/1.5 var(--topic-sans); }
-.app-topic-thread-detail :is(.comment-composer, .composer-text) { box-sizing:border-box; width:100%; max-width:100%; min-width:0; }
-.app-topic-thread-detail .comment-composer { margin:.6em 0; padding:.45em; background:var(--topic-tint); border-radius:5px; font:.8em/1.4 var(--topic-sans); }
-.app-topic-thread-detail .composer-text { border:1px solid var(--reader-rule); border-radius:4px; padding:6px; background:var(--reader-page); color:var(--reader-ink); font:inherit; }
-.app-topic-thread-detail .composer-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:.3em; }
-.app-topic-thread-detail .compose-send-row { display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px; margin-inline-start:auto; }
-.app-topic-thread-detail .compose-send-comment > svg { display:none; }
-.app-topic-thread-detail :is(.composer-submit, .composer-help-toggle, .compose-send-note) { color:var(--reader-link); }
-.app-topic-thread-detail .composer-status { color:var(--topic-secondary); }
+.app-topic-reply :is(.comment-composer, .composer-text) { box-sizing:border-box; width:100%; max-width:100%; min-width:0; }
+.app-topic-reply .comment-composer { margin:.6em 0; padding:.45em; background:var(--topic-tint); border-radius:5px; font:.8em/1.4 var(--topic-sans); }
+.app-topic-reply .composer-text { border:1px solid var(--reader-rule); border-radius:4px; padding:6px; background:var(--reader-page); color:var(--reader-ink); font:inherit; }
+.app-topic-reply .composer-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:.3em; }
+.app-topic-reply :is(.composer-submit, .composer-help-toggle) { color:var(--reader-link); }
+.app-topic-reply .composer-status { color:var(--topic-secondary); }
 .app-topic-discussions [hidden] { display:none !important; }
 @media (pointer:coarse) {
 	.app-topic-controls :is(.source-menu-option,.dropdown-item), .app-topic-discussions :is(.app-topic-comment-action,.app-topic-comment-context,.app-topic-thread-back,.item-action-link) { min-height:40px; }
-	.app-topic-thread-detail .composer-text { font-size:16px; }
+	.app-topic-discussions .composer-text { font-size:16px; }
+	.app-topic-discussions .app-compose-bar .composer-text { font-size:max(16px, 1em); }
+	.app-topic-discussions :is(.compose-send, .compose-target) { min-height:32px; min-width:32px; }
 }
 @container topic-article (min-width:720px) and (min-width:45em) {
 	.app-topic-article.bc-reader:has(> .app-topic-discussions) {
@@ -40327,7 +40458,7 @@ ${READER_LIST_CSS}
 	text-transform:none;
 }
 
-#panel.app-docked .app-discussion-meta .source-menu button {
+#panel.app-docked .app-discussion-meta .source-menu button:where(:not(.source-group-disclosure)) {
 	display:inline;
 	width:auto;
 	height:auto;
@@ -40463,11 +40594,11 @@ ${READER_LIST_CSS}
 	display:none;
 }
 
-#app-discussion-compose .compose-box {
+.app-compose-bar .compose-box {
 	margin:0 auto;
 }
 
-#app-discussion-compose .compose-field {
+.app-compose-bar .compose-field {
 	display:grid;
 	grid-template-columns:minmax(0, 1fr) auto;
 	align-items:end;
@@ -40476,7 +40607,7 @@ ${READER_LIST_CSS}
 	padding:2px 3px;
 }
 
-#app-discussion-compose .composer-text {
+.app-compose-bar .composer-text {
 	padding:3px 7px;
 	resize:none;
 	border-radius:16px;
@@ -40484,48 +40615,50 @@ ${READER_LIST_CSS}
 	line-height:17px;
 }
 
-#app-discussion-compose .composer-actions {
+.app-compose-bar .composer-actions {
 	display:contents;
 }
 
-#app-discussion-compose .compose-send-row {
+.app-compose-bar .compose-send-row {
 	grid-column:2;
 	grid-row:1;
 	align-items:center;
 	gap:3px;
 	max-width:0;
+	overflow:clip;
 	opacity:0;
 	visibility:hidden;
 	transform:translateX(4px);
 	transition:max-width .18s ease, opacity .16s ease, transform .16s ease, visibility 0s .18s;
 }
 
-#app-discussion-compose .compose-box:is(.has-composer-text, :has(.is-sending)) .compose-send-row {
+.app-compose-bar .compose-box:is(.has-composer-text, :has(.is-sending)) .compose-send-row {
 	max-width:180px;
+	overflow:visible;
 	opacity:1;
 	visibility:visible;
 	transform:none;
 	transition-delay:0s;
 }
 
-#app-discussion-compose .compose-send {
+.app-compose-bar .compose-send {
 	height:23px;
 	padding:0 7px;
 	font-size:10px;
 }
 
-#app-discussion-compose .compose-send-comment {
+.app-compose-bar .compose-send-comment {
 	padding:0 4px;
 	min-width:23px;
 }
 
-#app-discussion-compose .compose-send-comment > svg {
+.app-compose-bar .compose-send-comment > svg {
 	flex:none;
 	width:14px;
 	height:14px;
 }
 
-#app-discussion-compose .compose-send-comment:not(.is-sending) .compose-send-label {
+.app-compose-bar .compose-send-comment:not(.is-sending) .compose-send-label {
 	position:absolute;
 	width:1px;
 	height:1px;
@@ -40533,46 +40666,46 @@ ${READER_LIST_CSS}
 	clip-path:inset(50%);
 }
 
-#app-discussion-compose .compose-send-comment.is-sending > svg {
+.app-compose-bar .compose-send-comment.is-sending > svg {
 	display:none;
 }
 
-#app-discussion-compose .composer-help-toggle,
-#app-discussion-compose .composer-status {
+.app-compose-bar .composer-help-toggle,
+.app-compose-bar .composer-status {
 	grid-row:2;
 	margin:2px 8px 4px;
 }
 
-#app-discussion-compose .composer-help-toggle {
+.app-compose-bar .composer-help-toggle {
 	justify-self:start;
 }
 
-#app-discussion-compose .composer-status {
+.app-compose-bar .composer-status {
 	grid-column:1 / -1;
 }
 
-#app-discussion-compose .compose-field:has(.composer-status:not(.hidden)) .composer-help-toggle {
+.app-compose-bar .compose-field:has(.composer-status:not(.hidden)) .composer-help-toggle {
 	grid-row:3;
 }
 
-#app-discussion-compose .compose-box:not(.has-composer-text, :has(.composer-help:not(.hidden))) .composer-help-toggle {
+.app-compose-bar .compose-box:not(.has-composer-text, :has(.composer-help:not(.hidden))) .composer-help-toggle {
 	display:none;
 }
 
-#app-discussion-compose .compose-targets {
+.app-compose-bar .compose-targets {
 	top:auto;
 	bottom:calc(100% + 6px);
 }
 
 @media (max-width:700px) {
-	#app-discussion-compose .composer-text {
+	.app-compose-bar .composer-text {
 		font-size:16px;
 		line-height:19px;
 	}
 }
 
 @media (prefers-reduced-motion:reduce) {
-	#app-discussion-compose .compose-send-row {
+	.app-compose-bar .compose-send-row {
 		transition:none;
 	}
 }
@@ -44996,8 +45129,9 @@ ${readingListShareHTML()}
 		loadReaderLook().catch(console.error);
 		viewMenu.addEventListener("keydown", (event) => {
 			if (event.key === "Escape") {
-				setAppViewMenuOpen(false);
-				appViewMenuToggle(shadow).focus();
+				event.preventDefault();
+				event.stopPropagation();
+				setAppViewMenuOpen(false, true);
 			}
 		});
 		shadow.addEventListener("pointerdown", (event) => {
@@ -51393,8 +51527,9 @@ ${frontPageChooserHTML()}
 		return id ? knownDiscussionFromFeed({ source: thread.source, id, url: source.url, title: thread.title, descendants: thread.comments }) : null;
 	}
 
-	const APP_TOPIC_COMMENT_PAGE = 6;
+	const APP_TOPIC_COMMENT_PAGE = 24;
 	const APP_TOPIC_THREAD_BATCH = 8;
+	const APP_TOPIC_THREAD_SAMPLE = 8;
 
 	async function cachedAppTopicReader(discussion, automatic) {
 		const { source } = discussion;
@@ -51408,96 +51543,297 @@ ${frontPageChooserHTML()}
 		for (const key of keys) {
 			const root = await reader.getComment(key);
 			if (!root || source === "bsky" && !(key === sourceKey("bsky", discussion.actor + "/" + discussion.rkey) || root.author === discussion.actor)) continue;
-			return { ...reader, rootKeys: root.replyKeys || [] };
+			return { ...reader, rootKeys: root.replyKeys || [], rootMore: root.more };
 		}
 		return null;
 	}
 
-	async function readAppTopicComments(panel, discussion, limit, automatic, current, refresh = false) {
-		const source = discussion.source;
-		const localOnly = source === "x" || automatic && source === "reddit" && !panel.published.has(discussion.key);
-		let reader = !refresh || localOnly ? await cachedAppTopicReader(discussion, automatic) : null;
-		if (!current()) return null;
-		if (!reader || reader.empty) {
-			if (localOnly) {
-				return { comments: [], restricted: true, localOnly: source === "reddit" };
+	async function readAppTopicArchiveBranch(branches, id, byKey, current) {
+		const task = branches.pending[branches.offset];
+		const batch = Array.isArray(task);
+		const path = batch ? "/ids?ids=" + task.map(encodeURIComponent).join(",") :
+			"/tree?link_id=" + encodeURIComponent("t3_" + id) + "&limit=48&start_breadth=48&start_depth=10" + (task ? "&parent_id=" + encodeURIComponent("t1_" + task) : "");
+		const data = await checkedSourceJSON("https://arctic-shift.photon-reddit.com/api/comments" + path,
+			(value) => Array.isArray(value?.data), undefined, { anonymous: true });
+		if (!current()) return [];
+		branches.offset++;
+		if (batch) return data.data;
+		const rows = [];
+		const nodes = [...data.data];
+		for (const node of nodes) {
+			const { kind, data } = node || {};
+			if (kind === "t1" && String(data?.link_id || "").replace(/^t3_/, "") === id) {
+				rows.push(data);
+				for (const reply of data.replies?.data?.children || []) nodes.push(reply);
+			} else if (kind === "more" && Array.isArray(data?.children)) {
+				const leaves = data.count === data.children.length;
+				const ids = [];
+				for (const child of data.children) if (/^[a-z0-9]+$/i.test(child) && !branches.seen.has(child)) {
+					branches.seen.add(child);
+					if (!leaves || !byKey.has(sourceKey("reddit", child))) ids.push(child);
+				}
+				if (leaves) {
+					for (let i = 0; i < ids.length; i += 100) branches.pending.push(ids.slice(i, i + 100));
+				} else {
+					for (const id of ids) branches.pending.push(id);
+				}
 			}
-			const result = await sourceReadJob(source, "thread", ["topic", discussion.key, limit, automatic, panel.revisions.get(discussion.key) || 0], async ({ signal }) => {
-				if (signal.aborted || !current()) return emptyThreadReader();
-				if (source === "reddit" && automatic) {
+		}
+		return rows;
+	}
+
+	function appTopicPagedReader(discussion, archive) {
+		const byKey = new Map();
+		let page = 1, after = null, branches;
+		const reader = {
+			rootKeys: [], flat: true,
+			getComment: (key) => byKey.get(key),
+			async nextPage(current) {
+				const size = archive && page > 1 ? 100 : 50;
+				let index, more, nextAfter;
+				if (archive) {
 					const [tier, cooldown] = await Promise.all([redditTier(), load(REDDIT_POLL_KEY, null)]);
-					if (tier === "off" || cooldown?.until > Date.now() || signal.aborted || !current()) return emptyThreadReader();
-					const maximum = limit * 3;
-					const data = await checkedSourceJSON("https://arctic-shift.photon-reddit.com/api/comments/search?limit=" + maximum + "&link_id=" + encodeURIComponent(discussion.id),
-						(value) => Array.isArray(value?.data), undefined, { anonymous: true });
-					const replies = data.data.slice(0, maximum).filter((row) => String(row?.link_id || "").replace(/^t3_/, "") === discussion.id);
-					const index = redditThreadIndexFromFlat(replies, discussion);
-					return { rootKeys: index.rootKeys, more: data.data.length >= maximum, incomplete: !replies.length && discussion.commentCount > 0,
-						getComment: async (key) => index.byKey.get(key) };
-				}
-				if (source === "bsky") {
-					let did = discussion.actor;
-					if (!did.startsWith("did:")) {
-						if (!panel.actors.has(did)) panel.actors.set(did, checkedSourceJSON(BSKY_APPVIEW + "/com.atproto.identity.resolveHandle?handle=" + encodeURIComponent(did),
-							(value) => typeof value?.did === "string" && /^did:[a-z0-9]+:[a-z0-9._:%-]+$/i.test(value.did), undefined, { anonymous: true })
-							.catch((error) => { panel.actors.delete(discussion.actor); throw error; }));
-						did = (await panel.actors.get(did)).did;
+					if (!current()) return [];
+					if (tier === "off" || cooldown?.until > Date.now()) throw Object.assign(new Error("Reddit archive unavailable"), { retryAt: cooldown?.until });
+					let rows;
+					if (branches) {
+						rows = await readAppTopicArchiveBranch(branches, discussion.id, byKey, current);
+						more = branches.offset < branches.pending.length;
+					} else {
+						const url = "https://arctic-shift.photon-reddit.com/api/comments/search?limit=" + size + "&link_id=" + encodeURIComponent(discussion.id) +
+							"&sort=asc" + (after == null ? "" : "&after=" + after);
+						const data = await checkedSourceJSON(url, (value) => Array.isArray(value?.data), undefined, { anonymous: true });
+						if (!current()) return [];
+						rows = data.data.slice(0, size);
+						nextAfter = Number(rows.at(-1)?.created_utc) - 1;
+						more = rows.length === size && nextAfter > (after || 0);
+						if (rows.length === size && after != null && nextAfter === after) {
+							branches = { pending: [null], offset: 0, seen: new Set() };
+							more = true;
+						}
 					}
-					if (signal.aborted || !current()) return emptyThreadReader();
-					const uri = "at://" + did + "/app.bsky.feed.post/" + discussion.rkey;
-					const data = await checkedSourceJSON(BSKY_APPVIEW + "/app.bsky.feed.getPostThread?uri=" + encodeURIComponent(uri) + "&depth=3&parentHeight=0",
-						(value) => value?.thread?.post?.uri === uri || value?.thread?.notFound || value?.thread?.blocked, undefined, { anonymous: true });
-					const byKey = new Map();
-					indexBskyThread(data.thread, discussion, byKey, null);
-					const root = byKey.get(bskyKeyFromURI(uri));
-					return { rootKeys: root?.replyKeys || [], getComment: async (key) => byKey.get(key) };
+					if (!current()) return [];
+					const replies = rows.filter((row) => String(row?.link_id || "").replace(/^t3_/, "") === discussion.id);
+					index = redditThreadIndexFromFlat(replies, discussion);
+					reader.incomplete = !byKey.size && !index.byKey.size && discussion.commentCount > 0;
+				} else {
+					const url = "https://lemmy.world/api/v3/comment/list?post_id=" + encodeURIComponent(discussion.id) +
+						"&type_=All&sort=Top&limit=" + size + "&page=" + page;
+					const data = await checkedSourceJSON(url, (value) => Array.isArray(value?.comments), undefined, { anonymous: true });
+					if (!current()) return [];
+					const rows = data.comments.slice(0, size);
+					index = lemmyThreadIndex(rows.filter((row) => row?.comment?.post_id == null || String(row.comment.post_id) === String(discussion.id)), discussion);
+					more = page < 100 && rows.length === size && [...index.byKey.keys()].some((key) => !byKey.has(key));
 				}
-				if (source === "hn") {
-					const item = await getItem(discussion.id, { strict: true, anonymous: automatic });
-					if (!item) return emptyThreadReader();
-					const ids = !item.dead && !item.deleted && Array.isArray(item.kids) ? item.kids : [];
-					if (!ids.length) return { rootKeys: [], getComment: async () => null };
-					if (signal.aborted || !current()) return emptyThreadReader();
-					const keys = ids.slice(0, limit * 3).map((id) => sourceKey("hn", id));
-					const reader = await getSource("hn").loadThread({ ...discussion, rootKeys: keys.slice(0, limit) }, { anonymous: automatic });
-					return { ...reader, rootKeys: keys, more: ids.length > keys.length };
+				const roots = [...index.rootKeys];
+				for (const [key, comment] of index.byKey) {
+					if (!byKey.has(key)) byKey.set(key, comment);
+					else roots.push(...comment.replyKeys);
 				}
-				return getSource(source).loadThread(discussion, { anonymous: automatic });
-			}, { timeout: THREAD_CEILING_MS, operation: {
-				attach(cancel) {
-					panel.controller.signal.addEventListener("abort", cancel, { once: true });
-					return () => panel.controller.signal.removeEventListener("abort", cancel);
+				for (const [key, comment] of index.byKey) {
+					const parent = byKey.get(comment.parentKey);
+					if (parent && !parent.replyKeys.includes(key)) parent.replyKeys.push(key);
+				}
+				page++;
+				after = nextAfter;
+				if (!more) reader.nextPage = null;
+				return roots;
+			},
+		};
+		return reader;
+	}
+
+	async function openAppTopicReader(panel, discussion, automatic, current) {
+		const { source } = discussion;
+		if (source === "lemmy" || source === "reddit" && automatic) return appTopicPagedReader(discussion, source === "reddit");
+		if (source === "hn") {
+			const item = await getItem(discussion.id, { strict: true, anonymous: true });
+			if (!item) return emptyThreadReader();
+			const ids = !item.dead && !item.deleted && Array.isArray(item.kids) ? item.kids : [];
+			return {
+				rootKeys: ids.map((id) => sourceKey("hn", id)),
+				async getComment(key) {
+					const id = parseSourceKey(key)?.id;
+					const item = id && await getItem(id, { strict: true, anonymous: true });
+					return item ? hnComment(item, discussion) : null;
 				},
-				record() {},
-			} });
-			reader = result.value;
+			};
 		}
-		if (!current() || !reader || reader.empty || !Array.isArray(reader.rootKeys)) return null;
-		const pending = reader.rootKeys.slice(0, limit * 3).map((key) => ({ key, depth: 0, parent: null }));
-		const seen = new Set(), comments = [];
-		let missing = false;
-		while (pending.length && comments.length < limit && seen.size < limit * 3 && current()) {
-			const { key, depth, parent } = pending.shift();
-			if (seen.has(key)) continue;
-			seen.add(key);
-			const comment = await reader.getComment(key);
-			if (!comment) { missing = true; continue; }
-			if (depth < 3) pending.push(...(comment.replyKeys || []).slice(0, limit).map((child) => ({ key: child, depth: depth + 1, parent: key })));
-			if (comment.deleted || comment.local || comment.muted || comment.hidden || typeof comment.bodyHTML !== "string") continue;
-			const plain = textExcerpt(comment.bodyHTML, 80);
-			if (plain && !/^\[(?:removed|deleted)\]$/i.test(plain)) comments.push({ comment, depth, parent });
+		if (source !== "bsky") return getSource(source).loadThread(discussion, { anonymous: automatic });
+		let did = discussion.actor;
+		if (!did.startsWith("did:")) {
+			if (!panel.actors.has(did)) panel.actors.set(did, checkedSourceJSON(BSKY_APPVIEW + "/com.atproto.identity.resolveHandle?handle=" + encodeURIComponent(did),
+				(value) => typeof value?.did === "string" && /^did:[a-z0-9]+:[a-z0-9._:%-]+$/i.test(value.did), undefined, { anonymous: true })
+				.catch((error) => { panel.actors.delete(discussion.actor); throw error; }));
+			did = (await panel.actors.get(did)).did;
 		}
-		if (source === "hn" && current()) {
-			if (!panel.hnItems.has(discussion.key)) panel.hnItems.set(discussion.key, new Set());
-			const ids = panel.hnItems.get(discussion.key);
-			for (const key of seen) {
-				const parsed = parseSourceKey(key);
-				if (parsed?.source === "hn") ids.add(parsed.id);
+		if (!current()) return emptyThreadReader();
+		const byKey = new Map();
+		const children = async (uri, parent, current) => {
+			const data = await checkedSourceJSON(BSKY_APPVIEW + "/app.bsky.feed.getPostThread?uri=" + encodeURIComponent(uri) + "&depth=" + BSKY_THREAD_DEPTH + "&parentHeight=0",
+				(value) => value?.thread?.post?.uri === uri || value?.thread?.notFound || value?.thread?.blocked, undefined, { anonymous: true });
+			if (!current() || !data.thread.post) return [];
+			indexBskyThread(data.thread, discussion, byKey, parent, 0, true);
+			return byKey.get(bskyKeyFromURI(uri))?.replyKeys || [];
+		};
+		return {
+			rootKeys: await children("at://" + did + "/app.bsky.feed.post/" + discussion.rkey, null, current),
+			getComment: (key) => byKey.get(key),
+			async expandMore([uri], key, current) {
+				const keys = await children(uri, byKey.get(key)?.parentKey, current);
+				return { ok: true, added: keys.map((key) => byKey.get(key)), remaining: [] };
+			},
+		};
+	}
+
+	function queueAppTopicReplies(state, keys, depth, parent) {
+		for (const key of keys || []) {
+			if (!key || state.queued.has(key)) continue;
+			state.queued.add(key);
+			state.pending.push({ key, depth, parent });
+		}
+	}
+
+	function startAppTopicReader(state, reader, cached) {
+		state.reader = reader;
+		state.cached = cached;
+		state.queued = new Set();
+		state.pending = [];
+		state.retry = [];
+		state.offset = 0;
+		state.expansions = [];
+		state.missing = false;
+		state.incomplete = Boolean(reader.incomplete || reader.rootMore);
+		queueAppTopicReplies(state, reader.rootKeys, 0, null);
+		if (!cached && reader.expandMore && reader.rootMore?.ids?.length) state.expansions.push({ ids: reader.rootMore.ids, depth: 0, parent: null });
+	}
+
+	async function advanceAppTopicReader(state, limit, current, hnIDs, budget) {
+		const reader = state.reader;
+		const before = state.comments.length;
+		state.pending.push(...state.retry);
+		state.retry.length = 0;
+		let failure;
+		while (current() && state.comments.length < limit && budget.rows > 0) {
+			if (state.offset === state.pending.length) {
+				if (budget.pages === 0) break;
+				if (reader.nextPage) {
+					budget.pages--;
+					const keys = await reader.nextPage(current);
+					if (current()) queueAppTopicReplies(state, keys, 0, null);
+					continue;
+				}
+				const next = state.expansions[0];
+				if (!next) break;
+				budget.pages--;
+				const batch = next.ids.slice(0, 32);
+				const expanded = await reader.expandMore(batch, next.parent, current);
+				if (!current()) return;
+				if (!expanded?.ok) throw new Error("Replies unavailable");
+				state.expansions.shift();
+				const rest = [...new Set([...next.ids.slice(batch.length), ...(expanded.remaining || []).filter((id) => !batch.includes(id))])];
+				if (rest.length) state.expansions.push({ ...next, ids: rest });
+				queueAppTopicReplies(state, expanded.added.map((comment) => comment.key), next.depth, next.parent);
+				continue;
 			}
+			const batch = state.pending.slice(state.offset, state.offset + Math.min(6, budget.rows, limit - state.comments.length));
+			if (hnIDs) for (const { key } of batch) hnIDs.add(parseSourceKey(key)?.id);
+			const fetched = await Promise.allSettled(batch.map(({ key }) => reader.getComment(key)));
+			if (!current()) return;
+			budget.rows -= batch.length;
+			state.offset += batch.length;
+			for (const [i, { key, parent, depth }] of batch.entries()) {
+				if (fetched[i].status === "rejected") {
+					state.retry.push(batch[i]);
+					if (!failure || fetched[i].reason?.retryAt) failure = fetched[i].reason;
+					continue;
+				}
+				const comment = fetched[i].value;
+				if (!comment) { state.missing = true; continue; }
+				const parentKey = reader.flat || comment.source === "reddit" ? comment.parentKey || parent : parent;
+				const level = parentKey && state.depths.has(parentKey) ? state.depths.get(parentKey) + 1 : depth;
+				state.depths.set(key, level);
+				queueAppTopicReplies(state, comment.replyKeys, level + 1, key);
+				if (comment.more) {
+					state.incomplete = true;
+					if (!state.cached && reader.expandMore && comment.more.ids?.length) state.expansions.push({ ids: comment.more.ids, depth: level + 1, parent: key });
+				}
+				if (state.displayed.has(key) || comment.deleted || comment.local || comment.muted || comment.hidden || typeof comment.bodyHTML !== "string") continue;
+				const plain = textExcerpt(comment.bodyHTML, 80);
+				if (!plain || /^\[(?:removed|deleted)\]$/i.test(plain)) continue;
+				state.displayed.add(key);
+				state.comments.push({ comment, depth: level, parent: parentKey || null });
+			}
+			if (failure?.retryAt) throw failure;
 		}
-		if (!comments.length && (missing || reader.incomplete && !reader.rootKeys.length && source !== "x")) return null;
-		return { comments, restricted: !comments.length && seen.size > 0,
-			more: Boolean(pending.length || reader.more || reader.rootMore || reader.rootKeys.length > seen.size) };
+		if (failure && state.comments.length === before) throw failure;
+	}
+
+	async function readAppTopicComments(panel, discussion, limit, automatic, current, refresh = false) {
+		const { key, source } = discussion;
+		const localOnly = source === "x" || automatic && source === "reddit" && !panel.published.has(key);
+		const mode = localOnly ? "saved" : source === "reddit" && automatic ? "archive" : "thread";
+		const revision = panel.revisions.get(key) || 0;
+		const readers = panel.readers ||= new Map();
+		const id = key + "\n" + mode;
+		let state = readers.get(id);
+		if (!state || state.revision !== revision) {
+			state = { revision, comments: [], displayed: new Set(), depths: new Map() };
+			readers.set(id, state);
+		}
+		const alive = () => current() && !panel.controller.signal.aborted && (panel.revisions.get(key) || 0) === revision;
+		while (state.turn && alive()) await state.turn;
+		if (!alive()) return null;
+		const remaining = () => state.offset < state.pending.length || state.retry.length > 0 || state.expansions.length > 0 || Boolean(state.reader.nextPage);
+		const fallback = () => state.cached && !localOnly && !remaining() && (state.missing || state.incomplete || Number(discussion.commentCount) > state.queued.size);
+		const read = async () => {
+			const before = state.comments.length;
+			const wanted = limit - before;
+			const budget = { rows: Math.min(192, Math.max(24, wanted * 3)), pages: Math.min(8, Math.max(2, Math.ceil(wanted / 8))) };
+			let failed = false;
+			if (!state.checkedCache) {
+				const cached = !refresh || localOnly ? await cachedAppTopicReader(discussion, automatic) : null;
+				if (!alive()) return null;
+				if (cached && !cached.empty) startAppTopicReader(state, cached, true);
+				state.checkedCache = true;
+			}
+			if (!state.reader && localOnly) return { comments: [], restricted: true, localOnly: source === "reddit", more: false };
+			if (source === "hn" && !panel.hnItems.has(key)) panel.hnItems.set(key, new Set());
+			const hnIDs = panel.hnItems.get(key);
+			if (state.cached) await advanceAppTopicReader(state, limit, alive, hnIDs, budget);
+			if (!alive()) return null;
+			if (state.comments.length < limit && (!state.reader || (!state.cached && remaining()) || fallback())) {
+				const result = await sourceReadJob(source, "thread", ["topic", key, mode, revision, limit], async ({ signal }) => {
+					const active = () => alive() && !signal.aborted;
+					if (!active()) return emptyThreadReader();
+					if (!state.reader || state.cached) {
+						const reader = await openAppTopicReader(panel, discussion, automatic, active);
+						if (!active() || !reader || reader.empty) return emptyThreadReader();
+						startAppTopicReader(state, reader, false);
+					}
+					await advanceAppTopicReader(state, limit, active, hnIDs, budget);
+					return state.reader;
+				}, { timeout: THREAD_CEILING_MS, operation: {
+					attach(cancel) {
+						panel.controller.signal.addEventListener("abort", cancel, { once: true });
+						return () => panel.controller.signal.removeEventListener("abort", cancel);
+					},
+					record() {},
+				} });
+				if (!alive()) return null;
+				failed = result.status !== "ok" || !result.value?.getComment || result.value.empty;
+				if (failed && state.comments.length === before) return null;
+			}
+			if (!state.comments.length && !remaining() && (state.missing || state.reader.incomplete && !state.queued.size && source !== "x")) {
+				if (!localOnly) readers.delete(id);
+				return null;
+			}
+			return { comments: state.comments.slice(0, limit), restricted: !state.comments.length && state.queued.size > 0, localOnly: localOnly && source === "reddit",
+				more: failed || state.comments.length > limit || remaining() || Boolean(fallback()), failed,
+				deferred: state.comments.length < limit && (budget.rows === 0 || budget.pages === 0) && remaining() };
+		};
+		state.turn = read().finally(() => { state.turn = null; });
+		return state.turn;
 	}
 
 	function appTopicCommentNode(reading, entry, row, inFeed) {
@@ -51552,64 +51888,136 @@ ${frontPageChooserHTML()}
 	}
 
 	function appTopicFeedRows(reading, selected) {
-		const panel = reading.discussionPanel;
-		const threads = selected.map((entry) => ({ entry, rows: panel.results.get(entry.discussion.key)?.data?.comments || [] }));
-		const rows = [], seen = new Set();
-		for (let i = 0; threads.some((thread) => thread.rows.length > i); i++) {
-			for (const { entry, rows: comments } of threads) {
-				const row = comments[i];
-				if (!row || seen.has(row.comment.key)) continue;
-				seen.add(row.comment.key);
-				rows.push({ entry, row });
-			}
+		const best = (reading.settings.commentSort || "best") === "best";
+		const replies = (comment) => Math.max(comment.replyKeys?.length || 0, comment.replyCount || 0);
+		const engagement = (a, b) => (b.score ?? 0) - (a.score ?? 0) || replies(b) - replies(a);
+		const tie = (a, b) => (b.row.comment.createdAt || 0) - (a.row.comment.createdAt || 0) ||
+			a.entry.discussion.key.localeCompare(b.entry.discussion.key) || a.row.comment.key.localeCompare(b.row.comment.key);
+		const rows = [];
+		for (const entry of selected) {
+			const comments = reading.discussionPanel.results.get(entry.discussion.key)?.data?.comments || [];
+			const ordered = best && entry.discussion.source !== "hn" ? [...comments].sort((a, b) => engagement(a.comment, b.comment)) : comments;
+			ordered.forEach((row, rank) => rows.push({ entry, row, rank }));
 		}
-		return orderAppTopicComments(reading, rows);
+		rows.sort((a, b) => a.rank - b.rank || (best ? tie(a, b) : 0));
+		const seen = new Set(), sources = new Map(), unique = [];
+		for (const item of rows) {
+			if (seen.has(item.row.comment.key)) continue;
+			seen.add(item.row.comment.key);
+			if (best) {
+				const source = item.entry.discussion.source;
+				if (!sources.has(source)) sources.set(source, []);
+				sources.get(source).push(item);
+			}
+			unique.push(item);
+		}
+		for (const [source, items] of sources) {
+			items.sort((a, b) => (source === "hn" ? a.rank - b.rank : 0) ||
+				engagement(a.row.comment, b.row.comment) || a.rank - b.rank || tie(a, b));
+			items.forEach((item, sourceRank) => {
+				item.sourceRank = sourceRank;
+				item.bestPosition = item.rank + sourceRank;
+			});
+		}
+		if (best) unique.sort((a, b) => a.bestPosition - b.bestPosition || a.sourceRank - b.sourceRank || tie(a, b));
+		return orderAppTopicComments(reading, unique);
 	}
 
-	function appTopicFeedComposer(reading) {
+	function appTopicComposer(reading, entry = null) {
 		const panel = reading.discussionPanel;
-		const holder = appTopicArticleNode("div", "app-topic-feed-compose");
-		const choices = appTopicArticleNode("div", "app-topic-compose-choices");
-		choices.id = "app-topic-compose-choices";
-		choices.setAttribute("role", "group");
-		choices.setAttribute("aria-label", "Choose a discussion");
-		choices.hidden = true;
-		const close = () => { choices.hidden = true; choices.replaceChildren(); action.setAttribute("aria-expanded", "false"); };
-		const start = (entry) => {
-			close();
-			if (openAppTopicDiscussion(reading, entry, action)) panel.detail.querySelector(".app-topic-thread-composer textarea")?.focus();
-		};
-		const targets = () => appTopicFilteredThreads(panel).filter(({ discussion }) => (getSource(discussion.source)?.capabilities.reply || reading.settings.notepad) &&
-			(discussion.source !== "x" || panel.results.get(discussion.key)?.data?.comments.length));
-		const action = appTopicCommentAction("", (event) => {
-			if (!choices.hidden) { close(); return; }
-			const entries = targets();
-			if (entries.length === 1) { start(entries[0]); return; }
-			choices.replaceChildren(...entries.map((entry) => appTopicCommentAction(entry.thread.title + " · " + getSource(entry.discussion.source).label, () => start(entry))));
-			choices.hidden = false;
-			action.setAttribute("aria-expanded", "true");
-			if (event.detail === 0) choices.firstElementChild?.focus();
-		});
-		action.setAttribute("aria-controls", choices.id);
-		action.setAttribute("aria-expanded", "false");
-		holder.append(action, choices);
-		holder.onkeydown = (event) => {
-			if (event.key === "Escape" && !choices.hidden) {
-				event.preventDefault(); event.stopPropagation();
-				close(); action.focus({ preventScroll: true });
+		const holder = appTopicArticleNode("div", "app-compose-bar " + (entry ? "app-topic-thread-composer" : "app-topic-feed-compose"));
+		const entries = () => entry ? [entry] : appTopicFilteredThreads(panel);
+		const canReply = ({ discussion }) => Boolean(getSource(discussion.source)?.capabilities.reply);
+		const commentTargets = () => entries().filter(canReply).map((target) => ({
+			...target.discussion, label: target.thread.title,
+			refresh: appTopicComposeTarget(reading, target).refresh,
+		}));
+		const noteTargets = () => {
+			const articles = new Map();
+			if (reading.settings.notepad) for (const { source } of entries()) {
+				articles.set(source.url, { key: source.url, label: [source.title, source.publisher].filter(Boolean).join(" · "), context: rowContext(source) });
 			}
+			return [...articles.values()];
 		};
-		holder.onfocusout = (event) => { if (event.relatedTarget && !holder.contains(event.relatedTarget)) close(); };
+		holder.innerHTML = composeBoxHTML({ canComment: !entry || canReply(entry), canNote: true, placeholder: "" });
+		const box = holder.firstElementChild;
+		const menu = box.querySelector(".compose-targets");
+		menu.id = entry ? "app-topic-thread-compose-choices" : "app-topic-feed-compose-choices";
+		for (const button of box.querySelectorAll(".compose-send")) button.setAttribute("aria-controls", menu.id);
+		const draftID = entry ? (canReply(entry) ? entry.discussion.id : entry.discussion.key) : "topic:" + reading.group.id;
+		wireComposeBox(box, { compact: true, commentTargets, noteTargets, draftKey: composerDraftKey({ storyID: draftID }) });
 		let signature;
 		const update = () => {
-			const entries = targets();
-			holder.hidden = !entries.length;
-			action.textContent = entries.some(({ discussion }) => getSource(discussion.source)?.capabilities.reply) ? "Add a comment" : "Keep a note";
-			const next = JSON.stringify(entries.map(({ thread }) => [thread.url, thread.title]));
-			if (signature !== next) close();
+			const targets = entries();
+			const count = targets.filter(canReply).length;
+			const canNote = Boolean(reading.settings.notepad && targets.length);
+			const next = JSON.stringify([canNote, targets.map(({ thread, source }) => [thread.url, source.url])]);
+			if (next === signature) return;
 			signature = next;
+			closeComposeTargets(box);
+			holder.hidden = !count && !canNote;
+			const note = box.querySelector(".compose-send-note");
+			note.hidden = !canNote;
+			if (canNote && new Set(targets.map(({ source }) => source.url)).size > 1) note.setAttribute("aria-expanded", "false");
+			else note.removeAttribute("aria-expanded");
+			const help = box.querySelector(".composer-help-toggle");
+			if (help) {
+				help.hidden = !count;
+				if (!count && help.classList.contains("is-open")) help.click();
+			}
+			setComposeOptions(box, count, canNote);
 		};
+		update();
 		return { holder, update };
+	}
+
+	function appTopicFeedEnd(reading, feed) {
+		const panel = reading.discussionPanel;
+		const end = appTopicArticleNode("div", "app-topic-feed-end");
+		end.setAttribute("aria-hidden", "true");
+		let lastTail, lastFilter;
+		const advance = (gesture) => {
+			if (end.hidden || panel.selected || panel.controller.signal.aborted) return;
+			const tail = panel.list.lastElementChild;
+			if (!gesture && tail === lastTail && lastFilter === panel.filter) return;
+			const box = end.getBoundingClientRect(), room = panel.scroller.getBoundingClientRect();
+			if (!box.width || box.top > Math.min(innerHeight, room.bottom) + 96 || box.bottom < Math.max(0, room.top) - 96) return;
+			lastTail = tail;
+			lastFilter = panel.filter;
+			panel.pageFrom ||= tail;
+			panel.target += APP_TOPIC_COMMENT_PAGE;
+			panel.budget += APP_TOPIC_THREAD_BATCH;
+			updateAppTopicFeed(reading);
+		};
+		const observer = new IntersectionObserver((entries) => {
+			const entry = entries.at(-1);
+			if (entry.isIntersecting) advance(false);
+			else if (entry.boundingClientRect.width) lastTail = undefined;
+		}, { rootMargin: "0px 0px 96px", scrollMargin: "0px 0px 96px" });
+		observer.observe(end);
+		const { signal } = panel.controller;
+		signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+		const root = feed.getRootNode();
+		let lastTop = 0;
+		const followScroll = (event) => {
+			if (event.target !== panel.scroller && event.target !== document) return;
+			const top = appIsPhone() ? window.scrollY : panel.scroller.scrollTop;
+			if (top > lastTop) advance(true);
+			lastTop = top;
+		};
+		root.addEventListener("scroll", followScroll, { capture: true, passive: true, signal });
+		window.addEventListener("scroll", followScroll, { passive: true, signal });
+		feed.addEventListener("wheel", (event) => { if (event.deltaY > 0) advance(true); }, { passive: true, signal });
+		let touchY;
+		feed.addEventListener("touchstart", (event) => { touchY = event.touches[0]?.clientY; }, { passive: true, signal });
+		feed.addEventListener("touchmove", (event) => {
+			if (event.touches[0]?.clientY < touchY - 12) { touchY = null; advance(true); }
+		}, { passive: true, signal });
+		root.addEventListener("keydown", (event) => {
+			if (["PageDown", "End", "ArrowDown", " "].includes(event.key) && panel.scroller.contains(event.target) &&
+				!event.target.closest("input, textarea, button, [role=menu]")) advance(true);
+		}, { signal });
+		return end;
 	}
 
 	function paintAppTopicFeed(reading, rows, threads) {
@@ -51623,11 +52031,22 @@ ${frontPageChooserHTML()}
 			panel.list.setAttribute("aria-label", "Comments across discussions");
 			panel.status = appTopicArticleNode("p", "app-topic-feed-status");
 			panel.status.setAttribute("role", "status");
-			panel.more = appTopicArticleNode("button", "app-topic-feed-more");
-			panel.more.type = "button";
-			panel.compose = appTopicFeedComposer(reading);
+			panel.retry = appTopicArticleNode("button", "app-topic-feed-more", "Retry comments");
+			panel.retry.type = "button";
+			panel.retry.onclick = () => {
+				for (const { discussion } of appTopicFilteredThreads(panel)) {
+					const hit = panel.results.get(discussion.key);
+					if (hit?.failed) {
+						if (hit.data) { hit.failed = false; hit.deferredAt = null; }
+						else panel.results.delete(discussion.key);
+					}
+				}
+				updateAppTopicFeed(reading);
+			};
+			panel.end = appTopicFeedEnd(reading, feed);
+			panel.compose = appTopicComposer(reading);
 		}
-		if (panel.list.parentElement !== feed) feed.append(panel.list, panel.status, panel.more, panel.compose.holder);
+		if (panel.list.parentElement !== feed) feed.append(panel.compose.holder, panel.list, panel.status, panel.retry, panel.end);
 		panel.compose.update();
 		const focus = feed.getRootNode().activeElement;
 		const visible = rows.slice(0, panel.target).map(({ entry, row, unread }) => {
@@ -51637,62 +52056,86 @@ ${frontPageChooserHTML()}
 			return panel.nodes.get(key);
 		});
 		if (visible.length !== panel.list.children.length || visible.some((item, i) => panel.list.children[i] !== item)) {
-			panel.list.replaceChildren(...visible);
-			if (panel.list.contains(focus)) focus.focus({ preventScroll: true });
+			const scroll = appIsPhone() ? document.scrollingElement : panel.scroller;
+			const top = Math.max(0, panel.scroller.getBoundingClientRect().top);
+			const box = panel.list.getBoundingClientRect();
+			const pageArrived = panel.pageFrom && visible.length > panel.list.children.length;
+			let nextReply;
+			if (pageArrived && !panel.selected && !focus?.closest(".app-topic-sources") && box.bottom <= top && box.bottom >= top - innerHeight &&
+				!panel.scroller.querySelector(".app-topic-divider")?.getClientRects().length) {
+				const after = visible.indexOf(panel.pageFrom) + 1;
+				nextReply = visible.slice(after).find((node) => !panel.list.contains(node)) ||
+					visible.find((node) => !panel.list.contains(node));
+			}
+			if (pageArrived) panel.pageFrom = null;
+			const anchor = scroll.scrollTop && box.top < top && box.bottom > top &&
+				feed.getRootNode().elementFromPoint(box.left + box.width / 2, top + 1)?.closest(".app-topic-feed-comment");
+			const before = anchor && anchor.getBoundingClientRect().top;
+			let next = panel.list.firstElementChild;
+			for (const item of visible) {
+				if (item === next) next = next.nextElementSibling;
+				else panel.list.insertBefore(item, next);
+			}
+			while (next) {
+				const rest = next.nextElementSibling;
+				next.remove();
+				next = rest;
+			}
+			if (anchor?.isConnected) scroll.scrollTop += anchor.getBoundingClientRect().top - before;
+			else if (nextReply) scroll.scrollTop += nextReply.getBoundingClientRect().top - top - 8;
+			if (panel.list.contains(focus) && focus !== feed.getRootNode().activeElement) focus.focus({ preventScroll: true });
 		}
 		panel.list.hidden = !visible.length;
 		const waiting = panel.active.size > 0 || reading.pending;
 		const untried = threads.some(({ discussion }) => !panel.results.has(discussion.key) && !panel.active.has(discussion.key));
 		const expandable = threads.some(({ discussion }) => {
 			const hit = panel.results.get(discussion.key);
-			return hit?.data?.more && hit.limit < 12;
+			return hit?.data?.more && !hit.failed;
 		});
-		const failed = threads.some(({ discussion }) => panel.results.get(discussion.key)?.data === null);
+		const failed = threads.some(({ discussion }) => panel.results.get(discussion.key)?.failed);
 		const restricted = threads.some(({ discussion }) => panel.results.get(discussion.key)?.data?.restricted);
-		const retry = !visible.length && !untried && failed;
-		panel.status.textContent = !threads.length && panel.filter ? "No discussions selected." : visible.length ? "" : waiting ? "Loading comments…" : failed ? "Comments couldn’t be loaded." :
-			untried ? "No replies found in the discussions checked." : restricted ? "No comments available here." : "No comments yet.";
+		panel.status.textContent = !threads.length && panel.filter ? "No discussions selected." : visible.length ? "" : waiting ? "Loading comments…" :
+			untried || expandable ? "No replies found in the discussions checked." : failed ? "Comments couldn’t be loaded." : restricted ? "No comments available here." : "No comments yet.";
 		panel.status.hidden = !panel.status.textContent;
-		panel.more.hidden = waiting || !(rows.length > panel.target || untried || expandable || retry);
-		panel.more.textContent = retry ? "Retry comments" : "Show more comments";
-		panel.more.onclick = () => {
-			if (retry) {
-				for (const [key, result] of panel.results) if (!result.data) panel.results.delete(key);
-			} else {
-				panel.target += APP_TOPIC_COMMENT_PAGE;
-				panel.budget += APP_TOPIC_THREAD_BATCH;
-			}
-			updateAppTopicFeed(reading);
-		};
+		panel.retry.hidden = panel.active.size > 0 || !failed || untried || expandable || rows.length > panel.target;
+		panel.end.hidden = !(rows.length > panel.target || untried || expandable) || (rows.length < panel.target && panel.active.size > 0);
 	}
 
 	function updateAppTopicFeed(reading) {
 		const panel = reading.discussionPanel;
 		if (appState?.topicArticle !== reading || panel.controller.signal.aborted) return;
 		for (const key of panel.published) if (panel.results.get(key)?.data?.localOnly) panel.results.delete(key);
+		if (panel.filter !== panel.feedFilter) {
+			panel.feedFilter = panel.filter;
+			panel.pageFrom = null;
+			panel.target = APP_TOPIC_COMMENT_PAGE;
+			panel.budget = APP_TOPIC_THREAD_BATCH;
+		}
 		const threads = appTopicFilteredThreads(panel);
 		const rows = appTopicFeedRows(reading, threads);
-		const limit = panel.target > APP_TOPIC_COMMENT_PAGE ? 12 : 4;
-		const contributors = threads.filter(({ discussion }) => panel.results.get(discussion.key)?.data?.comments.length).length;
-		if (rows.length < panel.target || contributors < Math.min(3, threads.length)) {
-			const checked = threads.filter(({ discussion }) => panel.active.has(discussion.key) || panel.results.has(discussion.key)).length;
-			const available = threads.filter(({ discussion }) => !panel.active.has(discussion.key));
-			const next = [...available.filter(({ discussion }) => !panel.results.has(discussion.key)).slice(0, Math.max(0, panel.budget - checked)),
-				...available.filter(({ discussion }) => {
+		if (panel.active.size < 2 && !panel.selected) {
+			const available = threads.slice(0, panel.budget).filter(({ discussion }) => !panel.active.has(discussion.key));
+			const next = available.filter(({ discussion }) => !panel.results.has(discussion.key));
+			if (rows.length < panel.target) {
+				next.push(...available.filter(({ discussion }) => {
 					const hit = panel.results.get(discussion.key);
-					return hit?.limit < limit && hit.data?.more;
-				})];
+					return hit?.data?.more && !hit.failed && hit.deferredAt !== panel.target;
+				}).sort((a, b) => panel.results.get(a.discussion.key).limit - panel.results.get(b.discussion.key).limit));
+			}
 			for (const { discussion } of next.slice(0, Math.max(0, 2 - panel.active.size))) {
 				const key = discussion.key;
+				const previous = panel.results.get(key);
+				const target = panel.target;
+				const limit = previous ? previous.limit + Math.min(APP_TOPIC_COMMENT_PAGE, Math.max(APP_TOPIC_THREAD_SAMPLE, target - rows.length)) : APP_TOPIC_THREAD_SAMPLE;
 				const revision = panel.revisions.get(key) || 0;
 				panel.active.set(key, revision);
 				const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted &&
 					revision === (panel.revisions.get(key) || 0) && panel.ranked.some((entry) => entry.discussion.key === key);
 				readAppTopicComments(panel, discussion, limit, true, current, revision > 0).catch(() => null).then((data) => {
 					if (panel.active.get(key) === revision) panel.active.delete(key);
-					const previous = panel.results.get(key);
-					if (current() && (!previous || previous.limit <= limit)) {
-						panel.results.set(key, { data: data?.comments.length || !previous?.data?.comments.length ? data : previous.data, limit });
+					if (current()) {
+						panel.results.set(key, data ? { data, limit, failed: data.failed, deferredAt: data.deferred ? target : null } :
+							{ ...previous, data: previous?.data || null, failed: true });
 					}
 					updateAppTopicFeed(reading);
 				});
@@ -51712,48 +52155,6 @@ ${frontPageChooserHTML()}
 	function appTopicComposeTarget(reading, entry, parentId = null) {
 		return { source: entry.discussion.source, storyID: entry.discussion.id, parentId,
 			refresh: () => { if (reading.discussionPanel?.entries.has(entry.thread.url)) refreshAppTopicThreads(reading, [entry]); } };
-	}
-
-	function appTopicThreadComposer(reading, entry) {
-		const canComment = Boolean(getSource(entry.discussion.source)?.capabilities.reply);
-		const canNote = Boolean(reading.settings.notepad);
-		if (!canComment && !canNote) return null;
-		const holder = appTopicArticleNode("div", "app-topic-thread-composer");
-		holder.innerHTML = composeBoxHTML({ canComment, canNote, placeholder: composePlaceholder(canComment, canNote) });
-		const box = holder.firstElementChild;
-		const field = box.querySelector("textarea");
-		if (canComment) wireComposer(box, appTopicComposeTarget(reading, entry));
-		const note = box.querySelector(".compose-send-note");
-		if (note) {
-			note.setAttribute("aria-label", "Keep a note");
-			const status = box.querySelector(".composer-status");
-			let unanchored = null;
-			note.onclick = async () => {
-				const parsed = noteFromText(field.value);
-				status.classList.remove("hidden");
-				if (!parsed.text) {
-					status.textContent = "Write a note first.";
-					field.focus();
-					return;
-				}
-				if (parsed.exact && parsed.exact !== unanchored) {
-					unanchored = parsed.exact;
-					status.textContent = "Press note again to save this quotation with the source article.";
-					return;
-				}
-				note.disabled = true;
-				try {
-					await writeNote(parsed, rowContext(entry.source));
-					field.value = "";
-					field.dispatchEvent(new Event("input"));
-					await flushComposerDrafts(box);
-					status.textContent = "Note saved.";
-				} catch {
-					status.textContent = "Couldn’t save your note. Try again.";
-				} finally { note.disabled = false; }
-			};
-		}
-		return holder;
 	}
 
 	function appTopicVoteSlot(discussion, id) {
@@ -51858,8 +52259,7 @@ ${frontPageChooserHTML()}
 		}
 		actions.append(original);
 		region.append(back, appTopicArticleNode("h3", "app-topic-thread-heading", entry.thread.title), actions, clearFocus, content);
-		const composer = appTopicThreadComposer(reading, entry);
-		if (composer) region.append(composer);
+		region.append(appTopicComposer(reading, entry).holder);
 		const feed = panel.scroller.querySelector(".app-topic-feed");
 		feed.hidden = true;
 		feed.after(region);
@@ -51867,7 +52267,7 @@ ${frontPageChooserHTML()}
 		const key = entry.discussion.key;
 		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted && panel.entries.has(entry.thread.url);
 		const hit = panel.results.get(key)?.data;
-		if (!panel.details.has(key)) panel.details.set(key, hit?.comments.length && !hit.more ? Promise.resolve(hit) :
+		if (!panel.details.has(key)) panel.details.set(key, discussion.source !== "reddit" && hit?.comments.length && !hit.more ? Promise.resolve(hit) :
 			readAppTopicComments(panel, entry.discussion, 16, false, current, panel.revisions.has(key)).catch(() => null));
 		Promise.all([panel.details.get(key), panel.collapsed || loadCollapsed()]).then(([loaded, collapsed]) => {
 			if (!current() || panel.detail !== region || !region.isConnected) return;
@@ -51875,7 +52275,7 @@ ${frontPageChooserHTML()}
 			content.removeAttribute("aria-busy");
 			panel.controls.update();
 			const data = loaded || hit;
-			if (data?.comments.length) {
+			if (data?.comments.length || data?.more) {
 				if (!panel.results.get(key)?.data?.comments.length) panel.results.set(key, { data, limit: 16 });
 				const rows = [...data.comments];
 				const origin = panel.origin;
@@ -51925,7 +52325,7 @@ ${frontPageChooserHTML()}
 				};
 				syncActions(rows);
 				if (data.more) {
-					const more = appTopicArticleNode("button", "app-topic-feed-more", "Show more replies");
+					const more = appTopicArticleNode("button", "app-topic-feed-more", data.failed ? "Retry more replies" : "Show more replies");
 					more.type = "button";
 					let limit = Math.max(16, rows.length);
 					more.onclick = async () => {
@@ -51940,7 +52340,8 @@ ${frontPageChooserHTML()}
 						const added = next.comments.filter(({ comment }) => !nodes.has(comment.key));
 						for (const row of added) nodes.set(row.comment.key, appTopicThreadComment(reading, entry, row));
 						rows.push(...added);
-						more.hidden = !next.more || !added.length;
+						more.hidden = !next.more;
+						more.textContent = next.failed ? "Retry more replies" : "Show more replies";
 						panel.details.set(key, Promise.resolve({ ...next, comments: rows, more: !more.hidden }));
 						panel.paintDetailRows();
 						syncActions(added);
@@ -52012,10 +52413,13 @@ ${frontPageChooserHTML()}
 		anchor.append(sourceButton, menu, arrow);
 		sources.append(anchor);
 		controls.append(sortSlot, sources);
+		const sourceState = { expanded: new Map() };
+		let menuScroll = 0;
 		let menuEvents;
 		const close = (focus = false) => {
 			menuEvents?.abort();
 			menuEvents = null;
+			if (!menu.classList.contains("hidden")) menuScroll = menu.scrollTop;
 			menu.classList.add("hidden");
 			if (menu.popover && menu.matches(":popover-open")) menu.hidePopover();
 			sourceButton.setAttribute("aria-expanded", "false");
@@ -52036,13 +52440,13 @@ ${frontPageChooserHTML()}
 				permalink: thread.url, commentCount: Math.max(thread.comments || 0, panel.results.get(discussion.key)?.data?.comments.length || 0) }));
 			const next = JSON.stringify(stories.map((story) => [story.key, story.label, story.permalink, story.commentCount]));
 			if (next !== signature || !menu.firstChild) {
-				const focused = menu.getRootNode().activeElement?.closest(".source-menu-option");
-				const focusKey = focused?.dataset.discussionKey;
-				const focusGroup = focused?.dataset.sourceGroup;
+				const focused = menu.getRootNode().activeElement;
+				const focusId = menu.contains(focused) ? focused.id : "";
+				if (menu.firstChild) menuScroll = menu.scrollTop;
 				const choices = appTopicArticleNode("div");
-				choices.innerHTML = sourceMenuHTML(stories, menu.id, []);
+				choices.innerHTML = sourceMenuHTML(stories, sourceState, menu.id, []);
 				const total = stories.reduce((sum, story) => sum + story.commentCount, 0);
-				const top = appDiscussionSourcesHead(() => {
+				const top = appDiscussionSourcesHead(menu, () => {
 					const selected = panel.entries.get(panel.selected);
 					close(true);
 					refreshAppTopicThreads(reading, selected ? [selected] : appTopicFilteredThreads(panel));
@@ -52051,12 +52455,9 @@ ${frontPageChooserHTML()}
 				const hint = appTopicArticleNode("div", "settings-option-hint app-discussion-summary", pluralize(total, "comment") + " across " + pluralize(stories.length, "discussion"));
 				(menu.querySelector("[data-select-all]") || top).after(hint);
 				signature = next;
+				menu.scrollTop = menuScroll;
 				fit();
-				if (focused) {
-					const label = [...menu.querySelectorAll(".source-menu-option")].find((option) =>
-						focusKey ? option.dataset.discussionKey === focusKey : focusGroup ? option.dataset.sourceGroup === focusGroup : option.hasAttribute("data-select-all"));
-					(label?.querySelector("input") || sourceButton).focus({ preventScroll: true });
-				}
+				if (focusId) focusSourceMenuControl(menu, focusId);
 			}
 			syncSourceMenuState(menu, panel.filter || null);
 			const sync = menu.querySelector(".app-sources-sync");
@@ -52065,12 +52466,12 @@ ${frontPageChooserHTML()}
 			sync.classList.toggle("is-syncing", busy);
 			sync.setAttribute("aria-busy", String(busy));
 		};
-		wireDiscussionSelection(menu, (keys) => {
+		wireDiscussionSelection(menu, sourceState, (keys) => {
 			panel.filter = keys;
 			const selected = panel.entries.get(panel.selected);
 			if (keys && selected && !keys.has(selected.discussion.key)) closeAppTopicDiscussion(reading, false);
 			else updateAppTopicFeed(reading);
-		});
+		}, fit);
 		sourceButton.onclick = (event) => {
 			if (!menu.classList.contains("hidden")) { close(true); return; }
 			const root = controls.getRootNode();
@@ -52081,6 +52482,7 @@ ${frontPageChooserHTML()}
 			menu.showPopover?.();
 			sourceButton.setAttribute("aria-expanded", "true");
 			update();
+			rememberSourceGroups(menu, sourceState);
 			root.addEventListener("pointerdown", (e) => { if (!e.composedPath().includes(anchor)) close(); }, { signal });
 			root.addEventListener("scroll", (e) => { if (!menu.contains(e.target)) fit(); }, { capture: true, passive: true, signal });
 			window.addEventListener("scroll", fit, { passive: true, signal });
@@ -52088,7 +52490,7 @@ ${frontPageChooserHTML()}
 			const observer = new ResizeObserver(fit);
 			observer.observe(controls.parentElement);
 			signal.addEventListener("abort", () => observer.disconnect(), { once: true });
-			if (event.detail === 0) menu.querySelector("input:not(:disabled)")?.focus({ preventScroll: true });
+			if (event.detail === 0) focusSourceMenuControl(menu, sourceState.focused);
 		};
 		controls.addEventListener("focusout", (event) => {
 			if (event.relatedTarget && !menu.classList.contains("hidden") && !menu.contains(event.relatedTarget) && event.relatedTarget !== sourceButton) close();
@@ -52129,17 +52531,19 @@ ${frontPageChooserHTML()}
 			const previous = unique.get(discussion.key);
 			if (!previous || (thread.comments ?? -1) > (previous.thread.comments ?? -1)) unique.set(discussion.key, entry);
 		}
-		const sorted = [...unique.values()].sort((a, b) => (b.thread.comments ?? 1) - (a.thread.comments ?? 1));
-		panel.ranked = [];
+		const sorted = [...unique.values()].sort((a, b) => (b.thread.comments ?? 1) - (a.thread.comments ?? 1) || a.discussion.key.localeCompare(b.discussion.key));
+		const bySource = new Map();
+		for (const entry of sorted) {
+			const source = entry.discussion.source;
+			if (!bySource.has(source)) bySource.set(source, []);
+			bySource.get(source).push(entry);
+		}
+		const sources = [...bySource.values()];
+		panel.ranked = sources.map((group) => group[0]);
 		for (const zero of [false, true]) {
-			const groups = new Map();
-			for (const entry of sorted.filter(({ thread }) => (thread.comments === 0) === zero)) {
-				const source = entry.thread.source;
-				if (!groups.has(source)) groups.set(source, []);
-				groups.get(source).push(entry);
-			}
-			for (let i = 0; [...groups.values()].some((group) => group.length > i); i++) {
-				for (const group of groups.values()) if (group[i]) panel.ranked.push(group[i]);
+			const groups = sources.map((group) => group.slice(1).filter(({ thread }) => (thread.comments === 0) === zero));
+			for (let i = 0; groups.some((group) => group.length > i); i++) {
+				for (const group of groups) if (group[i]) panel.ranked.push(group[i]);
 			}
 		}
 		if (panel.selected && !panel.entries.has(panel.selected)) {
@@ -52203,7 +52607,7 @@ ${frontPageChooserHTML()}
 	}
 
 	function disposeAppTopicDiscussions(reading) {
-		flushComposerDrafts(reading?.discussionPanel?.detail).catch(console.error);
+		flushComposerDrafts(reading?.discussionPanel?.scroller).catch(console.error);
 		reading?.discussionPanel?.controller.abort();
 	}
 
@@ -52483,7 +52887,7 @@ ${frontPageChooserHTML()}
 		refreshSaveControls().catch(console.error);
 	}
 
-	function setAppViewMenuOpen(open) {
+	function setAppViewMenuOpen(open, restoreFocus = false) {
 		const shadow = appState?.ui.shadow;
 		const menu = shadow?.querySelector("#app-view-menu");
 		const toggle = appViewMenuToggle(shadow);
@@ -52505,7 +52909,7 @@ ${frontPageChooserHTML()}
 		if (show) {
 			paintReaderMenu();
 			[...menu.querySelectorAll("button, input, a")].find((element) => !element.disabled && element.getClientRects().length)?.focus({ preventScroll: true });
-		}
+		} else if (restoreFocus) toggle.focus({ preventScroll: true });
 	}
 
 	function placeAppViewMenu() {
@@ -52944,11 +53348,11 @@ ${frontPageChooserHTML()}
 	}
 
 	const READER_PAGES = {
-		paper: { page: "#f6f6ef", ink: "#1f1f1c", meta: "#77776f", rule: "#dcdcd2", link: "#1d5e37", code: "#ecece2", mark: "rgba(242, 207, 91, .45)" },
-		white: { page: "#ffffff", ink: "#1b1b1b", meta: "#6e6e6e", rule: "#e4e4e4", link: "#1d5e37", code: "#f3f3f1", mark: "rgba(242, 207, 91, .45)" },
-		sepia: { page: "#f4ecd8", ink: "#3b2e1e", meta: "#8a7558", rule: "#e0d3b4", link: "#7b4a12", code: "#ebe0c6", mark: "rgba(242, 207, 91, .45)" },
-		gray: { page: "#4a4a4c", ink: "#e8e8e8", meta: "#b4b4b4", rule: "#616164", link: "#a8d5b8", code: "#3c3c3e", mark: "rgba(242, 207, 91, .3)" },
-		night: { page: "#121212", ink: "#d8d8d8", meta: "#8e8e8e", rule: "#2c2c2c", link: "#8fc9a5", code: "#1e1e1e", mark: "rgba(242, 207, 91, .25)" },
+		paper: { scheme: "light", page: "#f6f6ef", ink: "#1f1f1c", meta: "#77776f", rule: "#dcdcd2", link: "#1d5e37", code: "#ecece2", mark: "rgba(242, 207, 91, .45)" },
+		white: { scheme: "light", page: "#ffffff", ink: "#1b1b1b", meta: "#6e6e6e", rule: "#e4e4e4", link: "#1d5e37", code: "#f3f3f1", mark: "rgba(242, 207, 91, .45)" },
+		sepia: { scheme: "light", page: "#f4ecd8", ink: "#3b2e1e", meta: "#8a7558", rule: "#e0d3b4", link: "#7b4a12", code: "#ebe0c6", mark: "rgba(242, 207, 91, .45)" },
+		gray: { scheme: "dark", page: "#4a4a4c", ink: "#e8e8e8", meta: "#b4b4b4", rule: "#616164", link: "#a8d5b8", code: "#3c3c3e", mark: "rgba(242, 207, 91, .3)" },
+		night: { scheme: "dark", page: "#121212", ink: "#d8d8d8", meta: "#8e8e8e", rule: "#2c2c2c", link: "#8fc9a5", code: "#1e1e1e", mark: "rgba(242, 207, 91, .25)" },
 	};
 
 	const READER_FONTS = {
@@ -53970,14 +54374,16 @@ ${frontPageChooserHTML()}
 	function closeAppTransients() {
 		const shadow = appState.ui.shadow;
 
-		if (!shadow.querySelector("#app-view-menu").hidden || !shadow.querySelector("#app-search-page").hidden || !shadow.querySelector("#app-row-menu").hidden) {
+		if (!shadow.getElementById("app-view-menu").hidden) return () => setAppViewMenuOpen(false, true);
+		if (!shadow.querySelector("#app-search-page").hidden || !shadow.querySelector("#app-row-menu").hidden) {
 			return () => {
-				setAppViewMenuOpen(false);
 				setAppSearchOpen(false);
 				closeAppRowMenu();
 			};
 		}
 
+		const topicMenu = shadow.querySelector('.app-topic-controls :is(.settings-select-toggle, .source-menu-anchor > button)[aria-expanded="true"]');
+		if (topicMenu) return () => topicMenu.click();
 		if (appState.bulk) return () => endAppSelection({ refocus: true });
 		if (appState.topicArticle) return returnFromAppTopicArticle;
 

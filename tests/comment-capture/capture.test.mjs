@@ -480,6 +480,7 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync preserves the selec
     await disclosure.click();
     const menu = app.page.locator(sidebar ? '#comments-content .source-menu' : '#app-discussion-meta .source-menu');
     await menu.getByRole('checkbox', {name:'All sources',exact:true}).uncheck();
+    await menu.getByRole('button', {name:/Reddit discussions/i}).click();
     await menu.locator('[data-discussion-key="reddit:fixture1"] input').check();
     assert(await waitFor(async () => await other.evaluate((element) => element.classList.contains('comment-filter-hidden')), 5000));
     await app.page.locator('#comments-content').evaluate((body) => {
