@@ -540,13 +540,14 @@ test("a Collection topic gets a cited excerpt directly from its bookmarks", asyn
 	const bookmarks = [
 		{ url: "https://glaze.example.org/ceramics/glazes", title: "Ceramic glazes for beginners" },
 		{ url: "https://pottery.example.net/ceramics/glazes", title: "Firing ceramic glazes without defects" },
+		{ url: "https://studio.example.org/notes?draft=glaze", title: "Drying ceramic glazes in the studio", previewOnOpen: true },
 	];
 	const detail = "A thin glaze layer reduces the chance of pinholes during the first kiln firing.";
 	const { browser, page, requests } = await launchApp({
 		sharedStore: true,
 		settings: { sources: { hn: true }, updateCheck: false, sourceRefreshMinutes: 0 },
 		values: { "HNewhere:collection_filed": true, "HNewhere:collected_migrated": true,
-			"HNewhere:collected": bookmarks.map((bookmark) => ({ ...bookmark, key: bookmark.url.slice(8), addedAt: Date.now(), previewOnOpen: true })) },
+			"HNewhere:collected": bookmarks.map((bookmark) => ({ ...bookmark, key: bookmark.url.slice(8), addedAt: Date.now() })) },
 		responses: [{ match: (url) => url === catalogURL, status: 503 }],
 		pages: {
 			[bookmarks[0].url]: { html: "<article><h1>" + bookmarks[0].title + "</h1><p>" + detail + "</p></article>" },
@@ -562,6 +563,7 @@ test("a Collection topic gets a cited excerpt directly from its bookmarks", asyn
 	await brief.getByText(new RegExp(detail)).waitFor({ timeout: 6500 });
 	assert.equal(await brief.getByText(/please register/).count(), 0);
 	assert(requests.some(({ url, anonymous }) => url === bookmarks[0].url && anonymous));
+	assert(!requests.some(({ url }) => url === bookmarks[2].url));
 	assert(!requests.some(({ url }) => url.startsWith(catalogURL + "/article")));
 });
 

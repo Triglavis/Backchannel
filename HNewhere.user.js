@@ -50712,7 +50712,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		for (const source of sources) {
 			if (previews.size >= 4) break;
 			const host = hostLabel(source.url);
-			if (hosts.has(host) || isHiddenSite(source.url) ||
+			if (hosts.has(host) || isHiddenSite(source.url) || reading.deferredPublisherURLs.has(topicArticleLinkKey(source.url)) ||
 				/(?:^|\.)(?:news\.ycombinator\.com|lobste\.rs|lemmy\.world|reddit\.com|redd\.it|bsky\.app|twitter\.com|x\.com|facebook\.com|threads\.(?:com|net))$/i.test(host)) continue;
 			hosts.add(host);
 			previews.set(source.url, null);
@@ -50788,7 +50788,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	async function refreshAppTopicArticle(reading, group) {
 		const revision = ++reading.revision;
 		reading.group = group;
-		const [settings, hidden, looks, split] = await Promise.all([loadSettings(), loadHiddenStories(), loadLooks(),
+		const [settings, hidden, looks, collected, split] = await Promise.all([loadSettings(), loadHiddenStories(), loadLooks(), loadCollected(),
 			appState.topicDiscussionSplit ?? load(STORAGE.appTopicSplit, 40)]);
 		if (appState.topicArticle !== reading || revision !== reading.revision) return;
 		appState.topicDiscussionSplit ??= Number.isFinite(split) ? Math.max(0, Math.min(100, split)) : 40;
@@ -50797,6 +50797,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const extra = reading.topicExtra;
 		reading.topicExtraRows = extra && appTopicExtraCoverage(group, reading.hidden, settings, extra, reading.remote?.sources).entries;
 		const rows = [...group.rows, ...(reading.topicExtraRows?.values() || [])];
+		reading.deferredPublisherURLs = new Set(collected.filter(collectedPreviewOnOpen)
+			.flatMap((entry) => [entry.url, entry.key && "https://" + entry.key])
+			.filter(Boolean).map(topicArticleLinkKey));
 		reading.local = appTopicSourceArticle(group.label, group.id, appTopicReadingSources(rows, looks));
 		const index = sharedTopicCache?.index;
 		const id = reading.standalone ? group.id : publicTopicForReading(group, index) || (index?.topics.has(reading.addressId) ? reading.addressId : null);
