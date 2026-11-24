@@ -49800,6 +49800,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const repeatedTitle = topicFilterKey(title).replace(/[.!?…]+$/u, "");
 		const excerptKey = topicFilterKey(suppliedExcerpt);
 		const listing = /^(?:the public listing describes this link as|a public listing shared)\b/u.test(excerptKey);
+		const listingExcerpt = appTopicArticleText(entry.listingExcerpt, 4000) ||
+			/^The public listing describes this link as “(.+)”$/u.exec(suppliedExcerpt)?.[1] || "";
 		const headline = excerptKey.replace(/[.!?…]+$/u, "") === repeatedTitle || (repeatedTitle.length >= 12 && excerptKey.startsWith(repeatedTitle + " "));
 		const excerpt = listing || headline ? "" : suppliedExcerpt;
 		const discussions = new Map();
@@ -49816,32 +49818,39 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			});
 		}
 		const preview = appTopicPhotoURL(entry.preview);
-		return { id, url, title, publisher, excerpt, publishedAt, sharedAt, discussions: [...discussions.values()], ...(preview && { preview }) };
+		return { id, url, title, publisher, excerpt, listingExcerpt, publishedAt, sharedAt,
+			discussions: [...discussions.values()], ...(preview && { preview }) };
 	}
 
 	function appTopicSourceReplies(source) {
 		return source.discussions.reduce((total, thread) => total + (thread.comments || 0), 0);
 	}
 
-	function appTopicCoverageSections(sources) {
+	function appTopicSummarySentence(value, title, limit = 240, sharedPreview = false) {
+		const text = appTopicArticleText(value, 4000);
+		if (!text || /^(?:subscribe\b|sign (?:in|up)\b|enable javascript\b|access denied\b|please (?:log in|enable|subscribe)\b)/i.test(text)) return "";
+		const complete = (line) => line && line.length <= limit && line.split(" ").length >= 5 &&
+			/[.!?][”’"')\]]?$/u.test(line) && !/(?:\.{2,}|…)[”’"')\]]?$/u.test(line);
+		const first = complete(text) ? text : text.match(/^.+?[.!?][”’"')\]]*(?=\s|$)/u)?.[0];
+		const clipped = sharedPreview && text.length <= limit && text.split(" ").length >= 8 && /…$/u.test(text);
+		const excerpt = complete(first) ? first : clipped ? text : "";
+		const headline = topicFilterKey(title).replace(/[.!?…]+$/u, "");
+		const key = topicFilterKey(excerpt).replace(/[.!?…]+$/u, "");
+		return key === headline || (headline.length >= 12 && key.startsWith(headline + " ")) ? "" : excerpt;
+	}
+
+	function appTopicCoverageSections(sources, sharedPreviews = false) {
 		const paragraphs = [], seen = new Set();
-		const complete = (text) => text && text.length <= 240 && text.split(" ").length >= 5 &&
-			/[.!?][”’"')\]]?$/u.test(text) && !/(?:\.{2,}|…)[”’"')\]]?$/u.test(text);
 		for (const source of [...sources].sort((a, b) => appTopicSourceReplies(b) - appTopicSourceReplies(a))) {
-			if (!source.excerpt) continue;
-			let excerpt = source.excerpt;
-			if (!complete(excerpt)) {
-				const sentences = excerpt.match(/[^.!?…]+[.!?](?:[”’"')\]]+)?(?=\s|$)/gu) || [];
-				excerpt = sentences[0]?.trim();
-				if (!complete(excerpt) || !source.excerpt.startsWith(excerpt)) continue;
-			}
+			const excerpt = appTopicSummarySentence(sharedPreviews ? source.listingExcerpt : source.excerpt, source.title, 240, sharedPreviews);
+			if (!excerpt) continue;
 			const key = topicFilterKey(excerpt).replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 			if (seen.has(key)) continue;
 			seen.add(key);
 			paragraphs.push({ text: "“" + excerpt + "” — " + source.publisher, sourceIds: [source.id], citations: [{ sourceId: source.id, excerpt }] });
 			if (paragraphs.length === 3) break;
 		}
-		return paragraphs.length ? [{ heading: "", paragraphs }] : [];
+		return paragraphs.length ? [{ heading: sharedPreviews ? "Shared link previews" : "", sharedPreviews, paragraphs }] : [];
 	}
 
 	function appTopicPublisherPhotos(images, ids) {
@@ -50312,7 +50321,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			for (const part of article.sections) {
 				const { heading, paragraphs } = part;
 				const section = appTopicArticleNode("section", "app-topic-brief-section");
-				if (article.method === "synthesis" && heading && !/^(?:brief|summary|overview|topic brief)$/i.test(heading)) {
+				if (part.sharedPreviews || article.method === "synthesis" && heading && !/^(?:brief|summary|overview|topic brief)$/i.test(heading)) {
 					section.append(appTopicArticleNode("h2", "", heading.replace(/\p{L}/u, (letter) => letter.toUpperCase())));
 				}
 				for (const p of paragraphs) section.append(appTopicCitedParagraph(p, references));
@@ -50322,7 +50331,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}
 		if (!article.sections.length || retry) {
 			const message = article.sections.length ? "" : pending ? "Loading the brief…" :
-				references.size ? "There’s too little reporting available for a brief. You can read the original sources below." : "Source links are unavailable for this topic.";
+				references.size ? "No readable summary was available. You can read the original sources below." : "Source links are unavailable for this topic.";
 			const status = appTopicArticleNode("p", "app-topic-request-status", message);
 			status.setAttribute("role", "status");
 			if (retry && !pending) {
@@ -50628,7 +50637,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				const old = discussions.get(thread.url);
 				if (!old || (thread.comments ?? -1) > (old.comments ?? -1)) discussions.set(thread.url, thread);
 			}
-			sources.set(key, { ...(existing || original), excerpt: existing?.excerpt || original.excerpt, preview: existing?.preview || original.preview,
+			const checked = reading.publisherPreviews?.get(original.url);
+			sources.set(key, { ...(existing || original), excerpt: checked?.excerpt || existing?.excerpt || original.excerpt,
+				listingExcerpt: checked?.noSnippet ? "" : existing?.listingExcerpt || original.listingExcerpt,
+				preview: existing?.preview || original.preview,
 				sharedAt: existing?.sharedAt || original.sharedAt, discussions: [...discussions.values()].slice(0, 64) });
 		}
 		const combined = appTopicSourceArticle(group.label, group.id, [...sources.values()]);
@@ -50652,13 +50664,75 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		};
 	}
 
+	async function appTopicPublisherPreview(source, signal) {
+		const response = await requestPage(source.url, signal, 4500);
+		const address = appTopicArticleURL(response.finalUrl);
+		if (!address || isHiddenSite(address) || hostLabel(address) !== hostLabel(source.url) ||
+			(new URL(source.url).pathname !== "/" && new URL(address).pathname === "/")) return {};
+		const header = parseResponseHeaders(response.headers).get("x-robots-tag") || "";
+		if (!response.ok || !response.text) return { noSnippet: /\b(?:nosnippet|max-snippet:\s*0\b)/i.test(header) };
+		const page = document.createElement("template");
+		page.innerHTML = response.text.slice(0, 768 * 1024);
+		const content = page.content;
+		const robots = [...content.querySelectorAll('meta[name="robots" i], meta[name="googlebot" i]')].map((meta) => meta.content);
+		robots.push(header);
+		const directives = robots.join(", ");
+		const limit = Math.min(240, ...Array.from(directives.matchAll(/\bmax-snippet:\s*(\d+)/gi), (match) => Number(match[1])));
+		if (!limit || /\bnosnippet\b/i.test(directives)) return { noSnippet: true };
+		const noPreview = { noSnippet: limit < 240 };
+		const headline = content.querySelector('meta[property="og:title" i]')?.content ||
+			content.querySelector("article h1, h1, title")?.textContent;
+		if (headline) {
+			const reported = readerStoryTerms(headline);
+			const linked = readerStoryTerms(source.title);
+			if (linked.size >= 2 && [...linked].filter((word) => reported.has(word)).length < 2) return noPreview;
+		}
+		const description = pageLookMetadata(content).description;
+		const excerpt = appTopicSummarySentence(description, source.title, limit);
+		if (excerpt) return { excerpt };
+		const paid = [...content.querySelectorAll('script[type="application/ld+json"]')].some((script) =>
+			/"isAccessibleForFree"\s*:\s*(?:false|"false")/i.test(script.textContent));
+		if (paid) return noPreview;
+		const paragraphs = content.querySelectorAll('article p, [itemprop~="articleBody"] p');
+		for (const paragraph of [...paragraphs].slice(0, 12)) {
+			if (paragraph.closest('[data-nosnippet], [hidden], [inert], [aria-hidden="true"], .paywall, aside, footer, header, nav, figure')) continue;
+			const excerpt = appTopicSummarySentence(paragraph.textContent, source.title, limit);
+			if (excerpt) return { excerpt };
+		}
+		return noPreview;
+	}
+
+	function checkAppTopicPublishers(reading, article) {
+		if (article.sections.length) return false;
+		const previews = reading.publisherPreviews ||= new Map();
+		const hosts = new Set([...previews.keys()].map(hostLabel));
+		const sources = [...article.sources].sort((a, b) => appTopicSourceReplies(b) - appTopicSourceReplies(a));
+		for (const source of sources) {
+			if (previews.size >= 4) break;
+			const host = hostLabel(source.url);
+			if (hosts.has(host) || isHiddenSite(source.url) ||
+				/(?:^|\.)(?:news\.ycombinator\.com|lobste\.rs|lemmy\.world|reddit\.com|redd\.it|bsky\.app|twitter\.com|x\.com|facebook\.com|threads\.(?:com|net))$/i.test(host)) continue;
+			hosts.add(host);
+			previews.set(source.url, null);
+			const controller = reading.publisherAbort ||= new AbortController();
+			appTopicPublisherPreview(source, controller.signal).catch(() => ({})).then((preview) => {
+				if (controller.signal.aborted || appState?.topicArticle !== reading) return;
+				previews.set(source.url, preview);
+				showAppTopicArticle(reading);
+			});
+		}
+		return article.sources.some(({ url }) => previews.get(url) === null);
+	}
+
 	function showAppTopicArticle(reading) {
 		if (appState.topicArticle !== reading || !reading.local) return;
 		const body = appState.ui.shadow.getElementById("app-article-body");
 		const article = visibleAppTopicArticle(reading);
+		const pending = reading.pending || checkAppTopicPublishers(reading, article);
+		if (!pending && !article.sections.length) article.sections = appTopicCoverageSections(article.sources, true);
 		const extra = reading.topicExtra;
 		const coverage = appTopicExtraCoverage(reading.group, reading.hidden, reading.settings, extra, reading.remote?.sources);
-		const signature = JSON.stringify([article, reading.pending, reading.retry, coverage.ids, coverage.available,
+		const signature = JSON.stringify([article, pending, reading.retry, coverage.ids, coverage.available,
 			extra?.failed, extra?.loaded, Boolean(extra?.request), extra?.previousKeys.size]);
 		if (signature === reading.painted) {
 			if (reading.discussionPanel) syncAppTopicDiscussions(reading, reading.discussionPanel.scroller, article);
@@ -50667,7 +50741,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		reading.painted = signature;
 		const scrollTop = body.querySelector(".app-reader-scroll")?.scrollTop || 0;
 		const scroller = paintAppTopicArticle(body, article, {
-			pending: reading.pending,
+			pending,
 			failedPhotos: reading.failedPhotos ||= new Set(),
 			retry: reading.retry ? () => fetchAppTopicArticle(reading) : null,
 			onOpenDiscussion: (entry, anchor) => openAppTopicDiscussion(reading, entry, anchor),
@@ -50746,6 +50820,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const { standalone } = state.topicArticle;
 		disposeAppTopicDiscussions(state.topicArticle);
 		state.topicArticle.abort?.abort();
+		state.topicArticle.publisherAbort?.abort();
 		state.topicArticle.topicExtra?.request?.abort();
 		state.topicArticle = null;
 		setAppTopicAddress(null);
@@ -53241,13 +53316,13 @@ ${frontPageChooserHTML()}
 		applyAppArticleMode(article, plan);
 	}
 
-	function requestPage(url) {
+	function requestPage(url, signal, timeout) {
 		return requestResource({
 			method: "GET",
 			url,
 			anonymous: true,
 			headers: { Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8" },
-		}).then((response) => {
+		}, timeout, signal).then((response) => {
 			if (!response) return { ok: false, status: 0, finalUrl: url, headers: "", contentType: "", text: "" };
 			const headers = response.responseHeaders || "";
 			const contentType = parseResponseHeaders(headers).get("content-type") || "";

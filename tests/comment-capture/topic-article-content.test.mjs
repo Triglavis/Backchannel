@@ -424,7 +424,7 @@ test("uncaptioned alternatives replace a failed lead without repeating it in the
 });
 
 test("thin coverage keeps titles in Sources and quotes only complete publisher descriptions", async () => {
-	const listed = "The public listing describes this link as “Some trains used the old signals until Tuesday.”";
+	const listed = "The public listing describes this link as “Subscribe to continue reading all our coverage.”";
 	const byline = issue.sources[1].title + " Sam Tracks, Transit DeskSun, November 22, 2026 at 3:33 PM UTC Rail...";
 	const full = "A U.S. operator and Rep. Jo Fox reviewed the signal tests with the station manager.";
 	const thin = { ...issue, method: "coverage", sections: [], timeline: issue.timeline.slice(0, 2),
@@ -435,7 +435,7 @@ test("thin coverage keeps titles in Sources and quotes only complete publisher d
 	const app = await openReader({ responses: [
 		{ match: (url) => url === articleURL && limited, json: thin },
 		{ match: (url) => url === articleURL, json: earlier },
-	] });
+	], pages: Object.fromEntries(thin.sources.map(({ url }) => [url, { status: 403, html: "<title>Access denied</title>" }])) });
 	try {
 		const { page } = app;
 		page.setDefaultTimeout(7000);
@@ -443,7 +443,7 @@ test("thin coverage keeps titles in Sources and quotes only complete publisher d
 		const article = page.locator("#app-article-body article");
 		const narrative = article.locator(".app-topic-narrative");
 		await article.getByRole("list", { name: "Sources" }).getByText(/^Signal Journal/).waitFor();
-		assert.match(await narrative.getByRole("status").innerText(), /original sources/i);
+		await narrative.getByRole("status").filter({ hasText: /original sources/i }).waitFor();
 		assert.equal(await narrative.locator("p").count(), 1);
 		assert.equal(await narrative.locator(".bc-reader-byline, .app-topic-timeline").count(), 0);
 		assert.equal(await article.getByRole("list", { name: "Sources" }).getByRole("link").count(), 2);
@@ -466,6 +466,102 @@ test("thin coverage keeps titles in Sources and quotes only complete publisher d
 	} finally {
 		await app.browser.close();
 	}
+});
+
+test("an empty shared brief reads the available originals and cites what they report", async (t) => {
+	const reports = [
+		"The westbound signal tests detected a wiring fault that delayed the railway upgrade.",
+		"Transit engineers traced the faulty relay to the switching cabinet at Willow Station.",
+	];
+	const restricted = "The internal signal audit names three inspectors and describes their disciplinary hearings.";
+	const sources = [...issue.sources.map((source) => ({ ...source, excerpt: "" })),
+		{ ...issue.sources[0], id: "s3", url: "https://restricted.example.org/railway", excerpt: "" },
+		{ ...issue.sources[0], id: "s4", url: "https://hidden.example.org/railway", excerpt: "" },
+	];
+	const thin = { ...issue, sources, method: "coverage", sections: [], timeline: [] };
+	const { browser, page, requests, errors } = await openReader({
+		values: { "HNewhere:hidden_stories": [{ key: "hidden.example.org/railway", url: sources[3].url, title: sources[3].title }] },
+		responses: [{ match: (url) => url === articleURL, json: thin }],
+		pages: {
+			[sources[0].url]: { html: '<meta name="description" content="' + reports[0] + '">' },
+			[sources[1].url]: { html: '<article><p data-nosnippet>' + restricted + '</p><p>' + reports[1] + '</p></article>' },
+			[sources[2].url]: { html: '<meta name="robots" content="nosnippet"><article><p>' + restricted + '</p></article>' },
+			[sources[3].url]: { html: '<article><p>' + restricted + '</p></article>' },
+		},
+	});
+	t.after(() => browser.close());
+	await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const narrative = page.locator(".app-topic-narrative");
+	for (const [i, text] of reports.entries()) {
+		const paragraph = narrative.locator(".app-topic-brief-section p").filter({ hasText: text });
+		await paragraph.waitFor({ timeout: 6500 });
+		await paragraph.getByRole("button", { name: new RegExp(sources[i].publisher) }).click();
+		await page.getByRole("dialog").getByText(text, { exact: true }).waitFor();
+		await page.keyboard.press("Escape");
+	}
+	assert.doesNotMatch(await narrative.innerText(), /internal signal audit|No readable summary|AI-generated/);
+	assert(!requests.some(({ url }) => url === sources[3].url));
+	assert.deepEqual(errors, []);
+});
+
+test("short public link descriptions survive an unavailable brief as labeled previews", async (t) => {
+	const detail = "The system estimates the weight and balance of flights before departure from Atlanta.";
+	const clipped = "The dispatch outage delayed aircraft waiting at gates and crews on the ground…";
+	const suppressed = "The second public preview discusses the same incident with a different set of measurements.";
+	const thin = { ...issue, method: "coverage", sections: [], timeline: [],
+		sources: [{ ...issue.sources[0], excerpt: "The public listing describes this link as “" + detail + " The delays began shortly before…”" },
+			{ ...issue.sources[1], excerpt: "The public listing describes this link as “" + clipped + "”" },
+			{ ...issue.sources[1], id: "s3", url: "https://restricted.example.org/report",
+				excerpt: "The public listing describes this link as “" + suppressed + "”" }],
+	};
+	const { browser, page } = await openReader({
+		responses: [{ match: (url) => url === articleURL, json: thin }],
+		pages: {
+			[thin.sources[0].url]: { status: 403, html: "<title>Access denied</title>" },
+			[thin.sources[1].url]: { status: 403, html: "<title>Access denied</title>" },
+			[thin.sources[2].url]: { headers: { "x-robots-tag": "nosnippet" }, html: "<article><p>" + suppressed + "</p></article>" },
+		},
+	});
+	t.after(() => browser.close());
+	await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const narrative = page.locator(".app-topic-narrative");
+	await narrative.getByRole("heading", { name: "Shared link previews" }).waitFor({ timeout: 6500 });
+	const paragraph = narrative.locator(".app-topic-brief-section p").filter({ hasText: detail });
+	await paragraph.waitFor();
+	assert((await narrative.innerText()).includes(clipped));
+	assert.doesNotMatch(await narrative.innerText(), /No readable summary|The delays began shortly|AI-generated/i);
+	assert(!(await narrative.innerText()).includes(suppressed));
+	await paragraph.getByRole("button", { name: /Signal Journal/ }).click();
+	await page.getByRole("dialog").getByText(detail, { exact: true }).waitFor();
+});
+
+test("a Collection topic gets a cited excerpt directly from its bookmarks", async (t) => {
+	const bookmarks = [
+		{ url: "https://glaze.example.org/ceramics/glazes", title: "Ceramic glazes for beginners" },
+		{ url: "https://pottery.example.net/ceramics/glazes", title: "Firing ceramic glazes without defects" },
+	];
+	const detail = "A thin glaze layer reduces the chance of pinholes during the first kiln firing.";
+	const { browser, page, requests } = await launchApp({
+		sharedStore: true,
+		settings: { sources: { hn: true }, updateCheck: false, sourceRefreshMinutes: 0 },
+		values: { "HNewhere:collection_filed": true, "HNewhere:collected_migrated": true,
+			"HNewhere:collected": bookmarks.map((bookmark) => ({ ...bookmark, key: bookmark.url.slice(8), addedAt: Date.now(), previewOnOpen: true })) },
+		responses: [{ match: (url) => url === catalogURL, status: 503 }],
+		pages: {
+			[bookmarks[0].url]: { html: "<article><h1>" + bookmarks[0].title + "</h1><p>" + detail + "</p></article>" },
+			[bookmarks[1].url]: { html: "<article><h1>Account Login</h1><p>Please register for our site before continuing.</p></article>" },
+		},
+	});
+	t.after(() => browser.close());
+	await page.goto("https://backchnnl.app/");
+	await page.locator('#app-rail [data-app-view="collection"]').click();
+	await page.getByRole("tab", { name: "By topic", exact: true }).click();
+	await page.locator(".app-topic-row").filter({ hasText: /ceramic glazes/i }).click();
+	const brief = page.locator(".app-topic-brief-section");
+	await brief.getByText(new RegExp(detail)).waitFor({ timeout: 6500 });
+	assert.equal(await brief.getByText(/please register/).count(), 0);
+	assert(requests.some(({ url, anonymous }) => url === bookmarks[0].url && anonymous));
+	assert(!requests.some(({ url }) => url.startsWith(catalogURL + "/article")));
 });
 
 test("two claims citing the same article open their respective supporting passages, including after a repaint", async () => {
