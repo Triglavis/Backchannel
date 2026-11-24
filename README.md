@@ -63,12 +63,14 @@ the same development under a headline drawn from their coverage. Each topic
 shows how many comments, discussions, and links it includes. Opening a topic
 keeps your place in the list. Its article brings together the reported
 development, attributed photos, and a timeline when the reporting gives dates.
-Comments from the topic’s discussions appear beside the story on wide screens
-and inline on phones. Use **Sort** to change the order or prioritize unread
-comments, and **Sources** to choose or refresh discussions. Each comment links
-back to its source. Select **Read thread** to see the conversation in place.
-The message bar stays at the bottom of Discussions as you scroll. Choose a
-discussion to post a comment or a source article to keep a note with.
+The article and its discussions scroll independently on desktop. On phones,
+tap **Discussion** to open the comments over the article. Use **Sort** to
+change the order or prioritize unread comments, and **Sources** to choose or
+refresh discussions. Each comment links back to its source. Select **Read
+thread** to see the conversation in place. The message bar stays at the bottom
+of Discussions. On phones, the compose button in the right-hand stack opens
+it. Choose a discussion to post a comment or a source article to keep a note
+with. Open an individual link’s original page from **Aa**.
 Source links are collected at the end. Select a number beside a passage to
 inspect the supporting text or open the publisher’s page in a new tab.
 Opening a topic marks the topic as read. Each link keeps its own read status.
