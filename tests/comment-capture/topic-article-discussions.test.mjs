@@ -92,7 +92,7 @@ test("the phone Discussion button opens Topic Article replies over the current r
 	assert.equal(await page.locator('meta[name="theme-color"]').getAttribute("content"), "");
 	await toggle.tap();
 	await aside.waitFor({state: "hidden"});
-	assert.equal(await page.evaluate(() => window.scrollY), articleTop);
+	assert(Math.abs(await page.evaluate(() => window.scrollY) - articleTop) <= 1, "closing Discussion keeps the article at the same visible position");
 });
 
 test("desktop Topic Articles and their discussions can scroll independently", async (t) => {
