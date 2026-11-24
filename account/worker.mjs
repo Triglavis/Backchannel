@@ -4,7 +4,8 @@ import {
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
 } from '@simplewebauthn/server';
-import { handleAccountDevice, matchAccountDeviceRoute } from './devices.mjs';
+import { deviceRevocationTarget, handleAccountDevice, matchAccountDeviceRoute } from './devices.mjs';
+import { topicReportSubject, topicReportToken } from './topic-reports.mjs';
 
 const jsonHeaders = {
   'Cache-Control': 'no-store',
@@ -31,7 +32,19 @@ const noContent = () => new Response(null, { status: 204, headers: jsonHeaders }
 const encodeBytes = bytes => bytes.toBase64({ alphabet: 'base64url', omitPadding: true });
 const decodeBytes = value => Uint8Array.fromBase64(value, { alphabet: 'base64url' });
 const validSyncVerifier = value => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
+const validSyncSignature = value => typeof value === 'string' && /^[A-Za-z0-9_-]{86}$/.test(value);
 const validEnvelope = value => typeof value === 'string' && /^[A-Za-z0-9_-]{80}$/.test(value);
+
+async function verifySyncSignature(publicKey, signature, purpose, ...fields) {
+  if (!validSyncVerifier(publicKey) || !validSyncSignature(signature)) return false;
+  try {
+    const key = await crypto.subtle.importKey('raw', decodeBytes(publicKey), 'Ed25519', false, ['verify']);
+    const message = textEncoder.encode(JSON.stringify([purpose, 2, ...fields]));
+    return await crypto.subtle.verify('Ed25519', key, decodeBytes(signature), message);
+  } catch {
+    return false;
+  }
+}
 
 export async function expireAccountState(db, now = Date.now()) {
   if (!db) return;
@@ -96,7 +109,7 @@ async function receiveDiagnostics(request, env, url, ip) {
   const { operation, source, outcome, duration, version } = body;
   if (!diagnosticOperations.includes(operation) || (operation === 'account-sync' ? source !== '' : !diagnosticSources.includes(source)) ||
       !diagnosticOutcomes.includes(outcome) || !diagnosticDurations.includes(duration) ||
-      typeof version !== 'string' || !/^(?:unknown|\d{1,3}\.\d{1,3}\.\d{1,3}(?:-(?:alpha|beta|rc)(?:\.\d{1,2})?)?)$/.test(version)) {
+      typeof version !== 'string' || !/^(?:unknown|\d{1,3}(?:\.\d{1,3}){2,3}(?:-(?:alpha|beta|rc)(?:\.\d{1,2})?)?)$/.test(version)) {
     return fail('invalid-diagnostics', 400);
   }
   sink.writeDataPoint({ blobs: [operation, source, outcome, version], doubles: [duration], indexes: [operation + ':' + source] });
@@ -129,7 +142,7 @@ function normalizeEmail(input) {
   return email;
 }
 
-async function sendEmailCode(env, kind, email, auth, format) {
+async function sendEmailCode(env, kind, email, auth, format, continuation = null) {
   const db = env.ACCOUNTS_DB;
   const emailHash = await hashToken(email);
   const now = Date.now();
@@ -154,7 +167,7 @@ async function sendEmailCode(env, kind, email, auth, format) {
   }
 
   const numeric = format === 'numeric' && Boolean(env.ACCOUNT_EMAIL_CODE_SECRET);
-  const verificationId = numeric ? encodeBytes(crypto.getRandomValues(new Uint8Array(16))) : null;
+  const verificationId = numeric ? continuation?.verificationId ?? encodeBytes(crypto.getRandomValues(new Uint8Array(16))) : null;
   const code = numeric ? numericEmailCode() : encodeBytes(crypto.getRandomValues(new Uint8Array(16)));
   const codeHash = numeric ? await hashNumericEmailCode(env.ACCOUNT_EMAIL_CODE_SECRET, verificationId, code) : await hashToken(code);
   const expiresAt = now + emailCodeAge;
@@ -184,11 +197,14 @@ async function sendEmailCode(env, kind, email, auth, format) {
   const admissionTime = Date.now();
   const windowStart = Math.floor(admissionTime / emailBudgetWindow) * emailBudgetWindow;
   const hourlyLimit = Number(env.ACCOUNT_EMAIL_HOURLY_LIMIT ?? defaultHourlyEmailLimit);
+  const enrollmentLimit = Number(env.ACCOUNT_EMAIL_ENROLLMENT_HOURLY_LIMIT ?? hourlyLimit);
+  const enrollment = kind === 'register' && (!continuation || !await db.prepare('SELECT 1 FROM accounts WHERE recovery_email = ?').bind(email).first());
   const admitted = await db.prepare(`
-    INSERT INTO account_email_budget (window_start, send_count) VALUES (?, 1)
-    ON CONFLICT (window_start) DO UPDATE SET send_count = send_count + 1 WHERE send_count < ?
+    INSERT INTO account_email_budget (window_start, send_count, enrollment_count) VALUES (?, 1, ?)
+    ON CONFLICT (window_start) DO UPDATE SET send_count = send_count + 1, enrollment_count = enrollment_count + excluded.enrollment_count
+    WHERE send_count < ? AND (excluded.enrollment_count = 0 OR enrollment_count < ?)
     RETURNING send_count
-  `).bind(windowStart, hourlyLimit).first();
+  `).bind(windowStart, Number(enrollment), hourlyLimit, enrollmentLimit).first();
   if (!admitted) {
     await db.prepare('DELETE FROM account_email_codes WHERE code_hash = ?').bind(codeHash).run();
     const retryAfter = Math.ceil((windowStart + emailBudgetWindow - admissionTime) / 1000);
@@ -258,16 +274,25 @@ async function takeEmailCode(env, kind, email, input, auth) {
   `).bind(await hashToken(code), ...context).first();
 }
 
-async function takeSignInRecovery(db, ceremony, syncKeyVerifier) {
+async function takeSignInRecovery(db, ceremony, { syncKeyVerifier, syncKeySignature }) {
+  const who = `c.id = ? AND c.kind = 'login' AND c.session_hash IS NULL AND c.expires_at > ?
+    AND a.recovery_email = c.recovery_email AND a.recovery_epoch = c.recovery_epoch`;
+  let publicKey = null;
+  if (syncKeySignature !== undefined) {
+    const proof = await db.prepare(`
+      SELECT a.sync_key_public FROM ceremonies c JOIN accounts a ON a.id = c.account_id WHERE ${who}
+    `).bind(ceremony, Date.now()).first();
+    publicKey = proof?.sync_key_public;
+    if (!await verifySyncSignature(publicKey, syncKeySignature, 'backchannel-key-recovery', ceremony)) return null;
+  }
+  const verifier = publicKey ? null : syncKeyVerifier;
   return db.prepare(`
-    DELETE FROM ceremonies WHERE id = ? AND kind = 'login' AND session_hash IS NULL AND expires_at > ?
-      AND recovery_email IS NOT NULL AND EXISTS (
-        SELECT 1 FROM accounts WHERE id = ceremonies.account_id
-          AND recovery_email = ceremonies.recovery_email AND recovery_epoch = ceremonies.recovery_epoch
-          AND sync_key_verifier = ?
-      )
+    DELETE FROM ceremonies WHERE id IN (
+      SELECT c.id FROM ceremonies c JOIN accounts a ON a.id = c.account_id WHERE ${who}
+        AND a.sync_key_public IS ? AND a.sync_key_verifier IS ?
+    )
     RETURNING account_id, recovery_email AS email, recovery_epoch
-  `).bind(ceremony, Date.now(), syncKeyVerifier).first();
+  `).bind(ceremony, Date.now(), publicKey, verifier).first().then(proof => proof && { ...proof, sync_key_public: publicKey });
 }
 
 async function authenticate(request, db) {
@@ -316,10 +341,10 @@ async function beginCeremony(db, kind, rpID, auth, emailProof) {
       `).bind(ceremony, kind, account, options.challenge, expiresAt);
   const created = await insert.run();
   if (!created.meta.changes) return fail('sign-in-required', 401);
-  return reply({ mode: kind, ceremony, options, expiresAt });
+  return reply({ mode: kind, ceremony, options, expiresAt, ...((kind === 'register' || emailProof?.sync_key_public) && { keyProofVersion: 2 }) });
 }
 
-async function register(db, verification, kind, ceremony, { assertion, envelope, syncKeyVerifier }) {
+async function register(db, verification, kind, ceremony, { assertion, envelope, syncKeyVerifier, syncKeyPublic, syncKeySignature }) {
   let key, counter;
   try {
     const result = await verifyRegistrationResponse(verification);
@@ -335,6 +360,12 @@ async function register(db, verification, kind, ceremony, { assertion, envelope,
   } catch {
     return fail('invalid-credential', 401);
   }
+  if (syncKeyPublic) {
+    const purpose = kind === 'recover' ? 'backchannel-key-replace' : 'backchannel-key-register';
+    if (!await verifySyncSignature(syncKeyPublic, syncKeySignature, purpose, ceremony.id, syncKeyPublic)) return fail('invalid-credential', 401);
+  }
+  const verifier = syncKeyPublic ? null : syncKeyVerifier;
+  const publicProof = syncKeyPublic ?? null;
   const token = encodeBytes(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await hashToken(token);
   const account = ceremony.account_id;
@@ -345,9 +376,9 @@ async function register(db, verification, kind, ceremony, { assertion, envelope,
       db.prepare(`
         INSERT INTO sessions (token_hash, account_id, expires_at)
         SELECT ?, id, ? FROM accounts
-        WHERE id = ? AND recovery_epoch = ? AND sync_key_verifier = ?
+        WHERE id = ? AND recovery_epoch = ? AND sync_key_verifier IS ? AND sync_key_public IS ?
           AND NOT EXISTS (SELECT 1 FROM passkeys WHERE id = ?)
-      `).bind(tokenHash, expiresAt, account, ceremony.recovery_epoch, syncKeyVerifier, key.id),
+      `).bind(tokenHash, expiresAt, account, ceremony.recovery_epoch, verifier, publicProof, key.id),
       db.prepare(`
         DELETE FROM passkeys WHERE account_id = ? AND EXISTS (SELECT 1 FROM sessions WHERE token_hash = ?)
       `).bind(account, tokenHash),
@@ -369,14 +400,14 @@ async function register(db, verification, kind, ceremony, { assertion, envelope,
       `).bind(account, tokenHash),
     ]);
     if (!replacement.meta.changes) return fail('invalid-credential', 401);
-    return reply({ account, token, expiresAt });
+    return reply({ account, token, expiresAt, ...(publicProof && { keyProofVersion: 2 }) });
   }
 
   const expiresAt = Date.now() + emailCodeAge;
   await db.prepare(`
     INSERT INTO account_signups (token_hash, account_id, recovery_email, credential_id, public_key,
-      counter, envelope, sync_key_verifier, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(tokenHash, account, ceremony.recovery_email, key.id, publicKey, counter, envelope, syncKeyVerifier, expiresAt).run();
+      counter, envelope, sync_key_verifier, sync_key_public, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(tokenHash, account, ceremony.recovery_email, key.id, publicKey, counter, envelope, verifier, publicProof, expiresAt).run();
   return reply({ signup: token, expiresAt }, 202);
 }
 
@@ -389,14 +420,14 @@ async function finishSignup(request, db) {
     .bind(signupHash, now).first();
   if (!pending) return fail('signup-expired', 401);
   const { account_id: account, recovery_email: email, credential_id: credential, public_key: publicKey,
-    counter, envelope } = pending;
+    counter, envelope, sync_key_public: proofKey } = pending;
   const token = encodeBytes(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await hashToken(token);
   const expiresAt = now + sessionAge;
   const [created] = await db.batch([
     db.prepare(`
-      INSERT INTO accounts (id, recovery_email, sync_key_verifier)
-      SELECT account_id, recovery_email, sync_key_verifier FROM account_signups
+      INSERT INTO accounts (id, recovery_email, sync_key_verifier, sync_key_public)
+      SELECT account_id, recovery_email, sync_key_verifier, sync_key_public FROM account_signups
       WHERE token_hash = ? AND expires_at > ?
       ON CONFLICT(recovery_email) WHERE recovery_email IS NOT NULL DO NOTHING
     `).bind(signupHash, now),
@@ -421,18 +452,21 @@ async function finishSignup(request, db) {
     const existing = await db.prepare('SELECT 1 FROM accounts WHERE recovery_email = ? AND id != ?').bind(email, account).first();
     return existing ? fail('email-in-use', 409) : fail('signup-expired', 401);
   }
-  return reply({ account, token, expiresAt }, 201);
+  return reply({ account, token, expiresAt, ...(proofKey && { keyProofVersion: 2 }) }, 201);
 }
 
-async function beginUnlock(db, key, counter) {
-  const saved = await db.prepare('SELECT envelope FROM account_key_envelopes WHERE credential_id = ?').bind(key.id).first();
+async function beginUnlock(db, key, counter, supportsUpgrade) {
+  const saved = await db.prepare(`
+    SELECT e.envelope, a.sync_key_public FROM account_key_envelopes e JOIN passkeys p ON p.id = e.credential_id
+    JOIN accounts a ON a.id = p.account_id WHERE e.credential_id = ?
+  `).bind(key.id).first();
   if (!saved) return fail('passkey-sync-unavailable', 409);
   const unlock = encodeBytes(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await hashToken(unlock);
   const statements = [db.prepare(`
     INSERT INTO account_unlocks (token_hash, credential_id, expires_at)
     SELECT ?, p.id, ? FROM passkeys p JOIN accounts a ON a.id = p.account_id
-    WHERE p.id = ? AND p.counter = ? AND a.sync_key_verifier IS NOT NULL
+    WHERE p.id = ? AND p.counter = ? AND (a.sync_key_verifier IS NOT NULL OR a.sync_key_public IS NOT NULL)
   `).bind(tokenHash, Date.now() + unlockAge, key.id, key.counter)];
   if (counter !== key.counter) {
     statements.push(db.prepare(`
@@ -442,36 +476,61 @@ async function beginUnlock(db, key, counter) {
   }
   const [created] = await db.batch(statements);
   if (!created.meta.changes) return fail('retry-sign-in', 409);
-  return reply({ account: key.account_id, envelope: saved.envelope, unlock });
+  const keyProofVersion = saved.sync_key_public ? 2 : supportsUpgrade ? 1 : undefined;
+  return reply({ account: key.account_id, envelope: saved.envelope, unlock, keyProofVersion });
 }
 
 async function completeUnlock(request, db) {
-  const { unlock, syncKeyVerifier } = await readJSON(request, 512) ?? {};
-  if (!validSyncVerifier(unlock) || !validSyncVerifier(syncKeyVerifier)) return fail('invalid-credential', 400);
+  const { unlock, syncKeyVerifier, syncKeyPublic, syncKeySignature } = await readJSON(request, 512) ?? {};
+  if (!validSyncVerifier(unlock)) return fail('invalid-credential', 400);
   const unlockHash = await hashToken(unlock);
+  const access = await db.prepare(`
+    SELECT a.sync_key_public FROM account_unlocks g JOIN passkeys p ON p.id = g.credential_id
+    JOIN accounts a ON a.id = p.account_id WHERE g.token_hash = ? AND g.expires_at > ?
+  `).bind(unlockHash, Date.now()).first();
+  if (!access) return fail('passkey-sync-unavailable', 401);
+  const currentKey = access.sync_key_public;
+  const verifier = validSyncVerifier(syncKeyVerifier) ? syncKeyVerifier : null;
+  const upgrading = !currentKey && syncKeyPublic !== undefined;
+  const accepted = currentKey
+    ? await verifySyncSignature(currentKey, syncKeySignature, 'backchannel-account-unlock', unlock)
+    : Boolean(verifier) && (!upgrading ||
+      await verifySyncSignature(syncKeyPublic, syncKeySignature, 'backchannel-key-upgrade', unlock, syncKeyPublic));
   const token = encodeBytes(crypto.getRandomValues(new Uint8Array(32)));
   const tokenHash = await hashToken(token);
   const expiresAt = Date.now() + sessionAge;
-  const [created] = await db.batch([
-    db.prepare(`
+  const insert = db.prepare(`
       INSERT INTO sessions (token_hash, account_id, expires_at)
       SELECT ?, a.id, ? FROM account_unlocks g JOIN passkeys p ON p.id = g.credential_id
       JOIN accounts a ON a.id = p.account_id
-      WHERE g.token_hash = ? AND g.expires_at > ? AND a.sync_key_verifier = ?
+      WHERE g.token_hash = ? AND g.expires_at > ? AND a.sync_key_verifier IS ? AND a.sync_key_public IS ? AND ?
       RETURNING account_id
-    `).bind(tokenHash, expiresAt, unlockHash, Date.now(), syncKeyVerifier),
+    `).bind(tokenHash, expiresAt, unlockHash, Date.now(), currentKey ? null : verifier, currentKey, Number(accepted));
+  const upgrade = upgrading ? [db.prepare(`
+    UPDATE accounts SET sync_key_public = ?, sync_key_verifier = NULL, recovery_epoch = recovery_epoch + 1
+    WHERE id = (SELECT account_id FROM sessions WHERE token_hash = ?)
+  `).bind(typeof syncKeyPublic === 'string' ? syncKeyPublic : null, tokenHash)] : [];
+  const [created] = await db.batch([
+    insert,
+    ...upgrade,
     db.prepare('DELETE FROM account_unlocks WHERE token_hash = ?').bind(unlockHash),
   ]);
   const account = created.results[0]?.account_id;
-  return account ? reply({ account, token, expiresAt }) : fail('passkey-sync-unavailable', 401);
+  return account ? reply({ account, token, expiresAt, ...((currentKey || upgrading) && { keyProofVersion: 2 }) }) : fail('passkey-sync-unavailable', 401);
 }
 
 async function deleteAccount(db, auth, key) {
-  const deleted = await db.prepare(`
-    DELETE FROM accounts WHERE id = ?
-      AND EXISTS (SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?)
-      AND EXISTS (SELECT 1 FROM passkeys WHERE id = ? AND counter = ?)
-  `).bind(auth.account, auth.tokenHash, Date.now(), key.id, key.counter).run();
+  const subject = await topicReportSubject(auth.account);
+  const now = Date.now();
+  const scope = `id = ?
+    AND EXISTS (SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?)
+    AND EXISTS (SELECT 1 FROM passkeys WHERE id = ? AND counter = ?)`;
+  const bindings = [auth.account, auth.tokenHash, now, key.id, key.counter];
+  const [, deleted] = await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO account_report_deletions (subject, queued_at) SELECT ?, ? FROM accounts WHERE ${scope}`)
+      .bind(subject, now, ...bindings),
+    db.prepare(`DELETE FROM accounts WHERE ${scope}`).bind(...bindings),
+  ]);
   if (!deleted.meta.changes) return fail('retry-account-deletion', 409);
   return noContent();
 }
@@ -485,12 +544,14 @@ async function finishCeremony(request, env, kind, rpID, origin, auth) {
   if (kind === 'email' && !email) return fail('invalid-email', 400);
 
   const verifyEmailProof = kind === 'register' || kind === 'recover';
-  if (verifyEmailProof && (!body.assertion?.response || !validEnvelope(body.envelope) || !validSyncVerifier(body.syncKeyVerifier))) {
+  const keyProofValid = body.syncKeyPublic === undefined ? validSyncVerifier(body.syncKeyVerifier)
+    : validSyncVerifier(body.syncKeyPublic) && validSyncSignature(body.syncKeySignature);
+  if (verifyEmailProof && (!body.assertion?.response || !validEnvelope(body.envelope) || !keyProofValid)) {
     return fail('passkey-sync-required', 400);
   }
   const ceremony = await db.prepare(`
     DELETE FROM ceremonies WHERE id = ? AND kind = ? AND session_hash IS ? AND expires_at > ?
-    RETURNING account_id, challenge${verifyEmailProof ? ', recovery_email, recovery_epoch' : ''}
+    RETURNING id, account_id, challenge${verifyEmailProof ? ', recovery_email, recovery_epoch' : ''}
   `).bind(body.ceremony, kind, auth?.tokenHash ?? null, Date.now()).first();
   if (!ceremony) return fail('expired-ceremony', 401);
   if (verifyEmailProof && !ceremony.recovery_email) return fail('invalid-email-code', 401);
@@ -521,16 +582,18 @@ async function finishCeremony(request, env, kind, rpID, origin, auth) {
   }
   if (!result.verified) return fail('invalid-credential', 401);
   const counter = result.authenticationInfo.newCounter;
-  if (kind === 'email') {
+  const revokeTarget = kind.startsWith('device-revoke:') ? kind.slice('device-revoke:'.length) : null;
+  if (kind === 'email' || revokeTarget) {
     const confirmed = await db.prepare(`
       UPDATE passkeys SET counter = ? WHERE id = ? AND counter = ?
         AND EXISTS (SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?)
     `).bind(counter, key.id, key.counter, auth.tokenHash, Date.now()).run();
     if (!confirmed.meta.changes) return fail('invalid-credential', 401);
+    if (revokeTarget) return handleAccountDevice(request, db, auth, { action: 'disconnect', id: revokeTarget }, { fail, noContent });
     return sendEmailCode(env, 'update', email, auth, body?.codeFormat);
   }
   if (kind === 'delete') return deleteAccount(db, auth, key);
-  return beginUnlock(db, key, counter);
+  return beginUnlock(db, key, counter, body.keyProofVersion === 2);
 }
 
 async function readSnapshot(db, { account, tokenHash }, previous = false) {
@@ -557,7 +620,7 @@ async function snapshot(request, db, auth, previous) {
   const restore = restoreHeader === null ? null : /^[1-9]\d*$/.test(restoreHeader) ? Number(restoreHeader) : NaN;
   if (restore !== null && (!Number.isSafeInteger(restore) || restore >= revision)) return fail('invalid-snapshot-restore', 400);
   const proof = request.headers.get('X-Backchannel-Sync-Proof');
-  if (!validSyncVerifier(proof)) return fail('snapshot-proof-required', 428);
+  if (!validSyncVerifier(proof) && !validSyncSignature(proof)) return fail('snapshot-proof-required', 428);
 
   const { ciphertext } = await readJSON(request, maxCiphertextChars + 32) ?? {};
   if (typeof ciphertext !== 'string' || ciphertext.length < 38 || ciphertext.length > maxCiphertextChars ||
@@ -565,16 +628,24 @@ async function snapshot(request, db, auth, previous) {
 
   const sessionScope = `FROM sessions JOIN accounts ON accounts.id = sessions.account_id
     WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND accounts.id = ?`;
-  const access = await db.prepare(`SELECT sync_key_verifier ${sessionScope}`).bind(tokenHash, Date.now(), account).first();
+  const access = await db.prepare(`SELECT sync_key_verifier, sync_key_public ${sessionScope}`).bind(tokenHash, Date.now(), account).first();
   if (!access) return fail('sign-in-required', 401);
   const verifier = access.sync_key_verifier;
-  if (!validSyncVerifier(verifier)) return fail('snapshot-proof-invalid', 403);
-  const key = await crypto.subtle.importKey('raw', decodeBytes(verifier), { name:'HMAC', hash:'SHA-256' }, false, ['verify']);
-  const message = textEncoder.encode(JSON.stringify(['backchannel-snapshot-write', 1, account, tokenHash, revision, restore, ciphertext]));
-  if (!await crypto.subtle.verify('HMAC', key, decodeBytes(proof), message)) return fail('snapshot-proof-invalid', 403);
+  const publicKey = access.sync_key_public;
+  if (publicKey) {
+    if (!validSyncSignature(proof)) return fail('snapshot-proof-upgrade-required', 428);
+    if (!await verifySyncSignature(publicKey, proof, 'backchannel-snapshot-write', account, tokenHash, revision, restore, ciphertext)) {
+      return fail('snapshot-proof-invalid', 403);
+    }
+  } else {
+    if (!validSyncVerifier(verifier) || !validSyncVerifier(proof)) return fail('snapshot-proof-invalid', 403);
+    const key = await crypto.subtle.importKey('raw', decodeBytes(verifier), { name:'HMAC', hash:'SHA-256' }, false, ['verify']);
+    const message = textEncoder.encode(JSON.stringify(['backchannel-snapshot-write', 1, account, tokenHash, revision, restore, ciphertext]));
+    if (!await crypto.subtle.verify('HMAC', key, decodeBytes(proof), message)) return fail('snapshot-proof-invalid', 403);
+  }
 
-  const scope = `EXISTS (SELECT 1 ${sessionScope} AND accounts.sync_key_verifier = ?)`;
-  const held = [tokenHash, Date.now(), account, verifier];
+  const scope = `EXISTS (SELECT 1 ${sessionScope} AND accounts.sync_key_verifier IS ? AND accounts.sync_key_public IS ?)`;
+  const held = [tokenHash, Date.now(), account, verifier, publicKey];
   let result;
   if (revision === 0) {
     result = await db.prepare(`
@@ -637,8 +708,9 @@ export async function fetchAccount(request, env, url, origin, ctx) {
   const limiter = env.ACCOUNT_RATE_LIMIT;
   const available = Boolean(db && limiter);
   const hourlyLimit = Number(env.ACCOUNT_EMAIL_HOURLY_LIMIT ?? defaultHourlyEmailLimit);
+  const enrollmentLimit = Number(env.ACCOUNT_EMAIL_ENROLLMENT_HOURLY_LIMIT ?? hourlyLimit);
   const emailAvailable = available && typeof env.ACCOUNT_EMAIL?.send === 'function' && Boolean(normalizeEmail(env.ACCOUNT_EMAIL_FROM)) &&
-    Number.isSafeInteger(hourlyLimit) && hourlyLimit > 0;
+    Number.isSafeInteger(hourlyLimit) && hourlyLimit > 0 && Number.isSafeInteger(enrollmentLimit) && enrollmentLimit > 0 && enrollmentLimit <= hourlyLimit;
   const { method } = request;
   const { pathname, hostname: rpID } = url;
   const requestOrigin = request.headers.get('Origin');
@@ -646,7 +718,9 @@ export async function fetchAccount(request, env, url, origin, ctx) {
   if ((requestOrigin && requestOrigin !== origin) || requestSite === 'same-site' || requestSite === 'cross-site') {
     return fail('invalid-origin', 403);
   }
-  if (method === 'GET' && pathname === '/account/status') return reply(emailAvailable ? { available, emailAvailable } : { available });
+  if (method === 'GET' && pathname === '/account/status') {
+    return reply({ available, ...(emailAvailable && { emailAvailable, emailContinuation: true }), ...(available && { deviceStepUp: true }) });
+  }
 
   try {
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -668,6 +742,13 @@ export async function fetchAccount(request, env, url, origin, ctx) {
       const email = normalizeEmail(body?.email);
       if (!email) return fail('invalid-email', 400);
       const [, kind] = emailStart;
+      if (kind === 'register' && body?.flow === 'continue') {
+        const verificationId = body.codeFormat === 'numeric' && env.ACCOUNT_EMAIL_CODE_SECRET
+          ? encodeBytes(crypto.getRandomValues(new Uint8Array(16))) : null;
+        ctx.waitUntil(sendEmailCode(env, kind, email, null, body.codeFormat, { verificationId })
+          .catch(() => console.error('Backchannel verification email request failed')));
+        return reply({ ok: true, ...(verificationId && { verificationId }), retryAfter: emailSendInterval / 1000 });
+      }
       if (kind === 'register') return await sendEmailCode(env, kind, email, null, body?.codeFormat);
       const delivery = sendEmailCode(env, kind, email).catch(() => console.error('Backchannel recovery email request failed'));
       ctx.waitUntil(delivery);
@@ -684,8 +765,9 @@ export async function fetchAccount(request, env, url, origin, ctx) {
       const body = await readJSON(request, 1024);
       if (kind === 'recover' && body?.signInCeremony !== undefined) {
         if (typeof body.signInCeremony !== 'string' || !/^[0-9a-f-]{36}$/.test(body.signInCeremony)) return fail('expired-ceremony', 401);
-        if (!validSyncVerifier(body.syncKeyVerifier)) return fail('invalid-recovery-key', 400);
-        const proof = await takeSignInRecovery(db, body.signInCeremony, body.syncKeyVerifier);
+        const valid = body.syncKeySignature === undefined ? validSyncVerifier(body.syncKeyVerifier) : validSyncSignature(body.syncKeySignature);
+        if (!valid) return fail('invalid-recovery-key', 400);
+        const proof = await takeSignInRecovery(db, body.signInCeremony, body);
         if (!proof) {
           const active = await db.prepare(`
             SELECT 1 FROM ceremonies WHERE id = ? AND kind = 'login' AND expires_at > ? AND recovery_email IS NOT NULL
@@ -699,15 +781,15 @@ export async function fetchAccount(request, env, url, origin, ctx) {
       if (!proof) return fail('invalid-email-code', 401);
       if (kind === 'recover') {
         if (!validSyncVerifier(body.syncKeyVerifier)) return fail('invalid-recovery-key', 400);
-        const matching = await db.prepare('SELECT 1 FROM accounts WHERE id = ? AND sync_key_verifier = ?')
+        const matching = await db.prepare('SELECT 1 FROM accounts WHERE id = ? AND sync_key_public IS NULL AND sync_key_verifier = ?')
           .bind(proof.account_id, body.syncKeyVerifier).first();
         if (!matching) return fail('incorrect-recovery-key', 400);
       }
       if (kind === 'register') {
-        const occupied = await db.prepare('SELECT id, recovery_epoch FROM accounts WHERE recovery_email = ?').bind(email).first();
+        const occupied = await db.prepare('SELECT id, recovery_epoch, sync_key_public FROM accounts WHERE recovery_email = ?').bind(email).first();
         if (occupied) {
           if (body.flow !== 'continue') return fail('email-in-use', 409);
-          return await beginCeremony(db, 'login', rpID, null, { account_id: occupied.id, email, recovery_epoch: occupied.recovery_epoch });
+          return await beginCeremony(db, 'login', rpID, null, { ...occupied, account_id: occupied.id, email });
         }
       }
       return await beginCeremony(db, kind, rpID, null, { ...proof, email });
@@ -720,14 +802,30 @@ export async function fetchAccount(request, env, url, origin, ctx) {
     const signOut = pathname === '/account/session' && method === 'DELETE';
     const beginDeletion = pathname === '/account/delete/options' && method === 'POST';
     const finishDeletion = pathname === '/account' && method === 'DELETE';
+    const mintTopicToken = pathname === '/account/topic-report-token' && method === 'POST';
     const deviceRoute = matchAccountDeviceRoute(method, pathname);
-    if (!readEmail && !emailStep && !sync && !signOut && !beginDeletion && !finishDeletion && !deviceRoute) return fail('not-found', 404);
+    if (!readEmail && !emailStep && !sync && !signOut && !beginDeletion && !finishDeletion && !mintTopicToken && !deviceRoute) return fail('not-found', 404);
     if (emailStep && !emailAvailable) return fail('email-unavailable', 503);
+    const issuedAt = mintTopicToken ? Date.now() : null;
     const auth = await authenticate(request, db);
     if (!auth) return fail('sign-in-required', 401);
+    if (mintTopicToken) {
+      if (!env.TOPIC_REPORT_TOKEN_SECRET) return fail('topic-report-unavailable', 503);
+      if (!(await limiter.limit({ key: 'topic-report-token:' + auth.account })).success) return fail('rate-limited', 429);
+      const token = await topicReportToken(env.TOPIC_REPORT_TOKEN_SECRET, await topicReportSubject(auth.account), 'topic:report', issuedAt);
+      return reply({ token });
+    }
     if (deviceRoute) {
       if (deviceRoute.action !== 'list' && !(await limiter.limit({ key: 'device-management:' + auth.account })).success) {
         return fail('rate-limited', 429);
+      }
+      if (deviceRoute.action === 'revoke-options') {
+        const target = deviceRevocationTarget((await readJSON(request, 256))?.target);
+        return target ? await beginCeremony(db, 'device-revoke:' + target, rpID, auth) : fail('invalid-device', 400);
+      }
+      if (deviceRoute.action === 'disconnect') {
+        const target = deviceRevocationTarget(deviceRoute.id);
+        return target ? await finishCeremony(request, env, 'device-revoke:' + target, rpID, origin, auth) : fail('invalid-device', 400);
       }
       return await handleAccountDevice(request, db, auth, deviceRoute, { readJSON, reply, fail, noContent });
     }

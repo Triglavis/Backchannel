@@ -81,6 +81,21 @@ test("an HTML Reader probe adds metadata to an established preview", async () =>
 	}
 });
 
+test("article frame keeps public preview and icon URLs", async () => {
+	const story = STORIES[0];
+	const image = "https://images.example.com/field-report.png";
+	const html = article(`<meta property="og:image" content="${image}"><link rel="icon" href="https://private.invalid/icon.png">`);
+	const app = await launchApp({ sharedStore: true, settings, values: { "HNewhere:queue": [queueEntry(story)] }, pages: { [story.url]: { html } } });
+	try {
+		await openStory(app.page, story);
+		const { look } = await readLook(app, story.url);
+		assert.equal(look.image, image);
+		assert.equal(look.icon, "");
+	} finally {
+		await app.browser.close();
+	}
+});
+
 test("revisiting a saved page fills only missing metadata in its established look", async () => {
 	const url = "https://fieldnotes.example.net/reports/latest";
 	const canonical = "https://fieldnotes.example.net/reports/204";

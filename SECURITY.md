@@ -8,8 +8,8 @@ fix ships as a new version that existing installs pick up automatically.
 
 | Version    | Supported |
 | ---------- | --------- |
-| 1.6.18     | Yes       |
-| < 1.6.18   | No        |
+| 1.6.19.2   | Yes       |
+| < 1.6.19.2 | No        |
 
 Your installed version is shown as the Installed row under Settings › General
 › Updates.
@@ -69,9 +69,11 @@ Worth stating plainly, because the permissions are broad by necessity:
   | `old.reddit.com` | only when you press vote, reply or submit | the post or comment you are acting on, or the page you submit, in a popup window you can see. Nothing at page load |
   | `backchnnl.app` | when the Reddit connection notice is shown | a fixed illustration image, requested without a referrer. No article URL or Reddit session is sent |
   | `topics.backchnnl.app` or `backchannel-topics.triglavis-llc.workers.dev` | when a view uses the shared topic index | an anonymous request for the public index. Link and topic matching takes place on your device |
+  | `topics.backchnnl.app` | when you open a published Topic Article | the public topic ID for its shared brief |
   | `en.wikipedia.org`, `commons.wikimedia.org` | when Reader needs a topic image or its credit | short topic subject names and the names of the resulting Wikimedia files. Anonymous requests omit saved link addresses and article bodies |
-  | `topics.backchnnl.app` | when you confirm a topic report for a link in Reader | your Backchannel session, the link's address, the displayed topic, and any suggested topic. Backchannel stores the report for internal review with a hashed account identifier to count one report per account per link |
+  | `backchnnl.app` and `topics.backchnnl.app` | when you confirm a topic report for a link in Reader | the Account service issues a five-minute reporting credential. Topics receives that credential, the link address, displayed topic and optional suggestion. Older Reader and Account versions use a session for this request. Backchannel stores a hashed account identifier and drops the link's query and fragment before saving the report. Reports expire after 90 days and are queued for removal on account deletion |
   | `upload.wikimedia.org` or `thumb.wikimedia.org` | when a topic with a verified subject image comes into view | the image address without a referrer. The Topics Worker looks up images using subjects from public feeds |
+  | publisher photo hosts | when Reader displays a photo from a Topic Article | the image address without a referrer. The browser may include cookies for that host |
   | `cdn.jsdelivr.net` | when your manager fetches the script's declared resources, and again from the page itself if it did not | nothing about you -- it is a file download of a fixed, versioned URL |
   | the page you open in the reader on backchnnl.app | only when that page gives no answer from inside its frame | nothing but the request itself: one `GET` without cookies, to read whether it may be framed, whether it is a picture and, if it may not be framed, its text |
   | the site of each article in the reader's list on backchnnl.app or the Sidebar's Backchannel view | when the list shows the article, since 1.6.15 in Reader and 1.6.18.1 in the Sidebar | nothing but a request for its icon, `/favicon.ico`, sent without a referrer |
@@ -87,18 +89,20 @@ Worth stating plainly, because the permissions are broad by necessity:
   run while that view is visible. Manual pauses automatic feed and Collection
   checks; opening an article or pressing Sync can still request source data.
 
-- **It checks the pages in your Collection for new discussion.** Since 1.6.17
-  every page you save is watched until you choose *Unwatch* in its card's
-  menu; before, only what you chose to watch was. A page is checked once when
-  you save it, to note how many posts link to it. After that, each time a page
-  you visit is looked up, up to four saved pages not checked in the past hour
-  are. A check sends the saved page's address to Hacker News's search, to
-  Constellation and, while Reddit answers through its archive mirror, to that
-  mirror -- only those you have on -- and asks how many posts link to it. When
-  a count has grown, the saved page is looked up as a page you visit is, by
-  every source you have on. A page with new discussion is not checked again
-  until you have seen it, and one that no source answers five times running is
-  no longer checked.
+- **Private reading surfaces open in Reader.** The Sidebar opens notes, drafts,
+  queue, Collection and exports on Backchannel's HTTPS origin. Reader keeps
+  note text and drafts in its own document when displaying a publisher page.
+
+- **It checks saved Collection links for new discussion.** A check sends the
+  page's address to enabled sources that support checks. Those sources are
+  Hacker News search, Bluesky's Constellation and the Reddit archive. Background
+  requests omit fragments, tracking parameters and save dates. Imported
+  bookmarks, previously unwatched links and links with other query parameters
+  are looked up when you open them. Each automatic check covers up to four
+  links whose last check was at least an hour ago. When a count changes, enabled
+  sources look for matching discussions. Backchannel waits for you to view new
+  discussion before checking that link again. Checks stop after five
+  unanswered attempts.
 - **Enhanced PDF support downloads a copy of pdf.js.** The reader is
   [pdf.js](https://mozilla.github.io/pdf.js/), declared as two `@resource` files
   on `cdn.jsdelivr.net` -- 0.49 MiB for the viewer and 1.25 MiB for its worker,
@@ -163,16 +167,18 @@ Worth stating plainly, because the permissions are broad by necessity:
   offer to restore the previous readable version while preserving local edits.
   Account setup requires a passkey that supplies
   WebAuthn PRF output during an assertion. Reader uses that output to encrypt
-  the random recovery key for that passkey. Cloudflare holds the encrypted
-  key and a domain-separated verifier derived from the recovery key. The PRF
-  output and unencrypted key stay on the device. Sign-in releases the
-  encrypted key after verifying the passkey and creates a session only after
-  Reader opens the key and supplies the verifier with a single-use challenge.
+  the random recovery key for that passkey. The PRF output and unencrypted
+  key stay on the device. Cloudflare holds the encrypted key and a public
+  key for checking signatures from Reader. A fresh passkey sign-in upgrades
+  older accounts that still store a symmetric verifier. Sign-in releases the
+  encrypted key after checking the passkey and creates a session after
+  Reader opens the key and proves possession on a single-use challenge.
   Active sessions contain a random device ID, a browser and platform label,
   and a last-active timestamp for the linked-devices list. A verified recovery
   address lets Cloudflare deliver a one-time code. Account recovery checks the
   saved recovery key before replacing the passkey, preserves the encrypted
-  snapshot, and revokes old credentials and sessions. Sign-out clears the
+  snapshot, and revokes old credentials and sessions. Signing out another
+  device or all other sessions requires a fresh passkey. Sign-out clears the
   local session and decryption key and requests revocation. The encrypted
   checkpoint lets Reader recognize deletions after you sign back in.
   Deleting the account requires fresh passkey confirmation and removes the
@@ -190,9 +196,9 @@ Worth stating plainly, because the permissions are broad by necessity:
   `HNewhere:hn_cache:` followed by its address, and none was removed. Since
   1.6.17.2 the daily pass above deletes them.
 - **The notepad uses your userscript manager's storage.** Notes are keyed by
-  page address or, on a PDF, by the document's fingerprint. With Account sync
-  enabled, encrypted notes sync across your devices. The export option lets
-  you save notes before clearing your manager's storage.
+  page address or by a PDF fingerprint Reader can verify for that document.
+  With Account sync enabled, encrypted notes sync across your devices. The
+  export option lets you save notes before clearing your manager's storage.
 - **Cloudflare records operational requests.** Backchannel uses these logs
   to run and troubleshoot the site and Account API. The host table above
   describes the requests made while you browse and look up discussions.
@@ -280,22 +286,15 @@ Worth stating plainly, because the permissions are broad by necessity:
   comments* on, an image with an https address is kept instead, stripped to
   its address and description and loaded lazily without a referrer; any
   other is dropped.
-- **The UI renders inside shadow roots**, so page styles and page scripts do not
-  reach into it by accident, and its styles do not leak onto the page.
-- **Frames get almost nothing.** The script loads in frames, but anywhere
-  except a frame named `backchannel-article` it stops on its first statement. In
-  that frame, inside the reader on backchnnl.app, it answers only messages from
-  `https://backchnnl.app`, and tells that page only the frame's address, its
-  title, its size, the address of its preview image, its colors, fonts and
-  icon and its site's name (for its card in the Collection), whether it is
-  showing, whether it is a picture, which quotes it found, which link was
-  pressed, a passage you pressed **Add note** on, a pull down from the top of
-  the page, and a key you pressed in it when that key is one of the reader's
-  shortcuts and you were not typing in a field.
-  It performs no lookup there and writes nothing to storage; it reads your
-  settings to know whether to offer **Add note**. A page in that frame could
-  send the reader a passage of its own choosing: the reader would open its note
-  box quoting it, and nothing is saved unless you write a note and save it.
+- **Shadow roots contain UI styles.** The publisher can read the Sidebar's
+  displayed contents. Private views use the Backchannel HTTPS origin.
+- **Publisher frames receive public annotation data.** The script answers
+  messages from `https://backchnnl.app` in Reader's `backchannel-article`
+  frame. The frame can provide layout data, preview metadata, matching
+  public quote positions, and a selected passage for **Add note**.
+  Publisher links use browser navigation. Reader actions and shortcuts are
+  handled within Reader. The frame can suggest a passage for the note
+  composer, and only a Reader interaction can save it.
 - **The reader frames pages under a sandbox**, with no referrer and without
   permission to navigate the reader itself, so a page that tries to break out of
   its frame stays in it. A page read out instead is reduced by an allowlist to
@@ -360,7 +359,7 @@ with its address as `<page>`.
 | Hacker News (Collection) | `GET hn.algolia.com/api/v1/items/<id>` | the id of a comment you saved without its thread, to find that thread; at most five tries, only while Hacker News is on | No |
 | Lobsters (Collection) | `GET lobste.rs/c/<id>.json`, then `GET lobste.rs/s/<id>.json` | the id of a comment you saved without its thread, then its story's id, to find the article; at most five tries, only while Lobsters is on | No. Its session cookie, `lobster_trap`, is `SameSite=Lax`, which the browser withholds cross-site |
 | Lemmy (Collection) | `GET lemmy.world/api/v3/comment?id=<id>` | the id of a comment you saved without its thread, to find its post; at most five tries, only while Lemmy is on | No. Its session cookie, `jwt`, is `SameSite=Lax`, which the browser withholds cross-site |
-| Hacker News (watching) | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=<saved page>&numericFilters=created_at_i><when you saved it>` | the address of a page in your Collection, in two spellings, and when you saved it, to count the stories posted since; only while Hacker News is on | No, and no identifier of any kind |
+| Hacker News (Collection checks) | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=<saved page>` | the address of an eligible saved page in two spellings, without fragments, tracking parameters or save dates. Counts matching stories while Hacker News is on | No, and no identifier of any kind |
 | Bluesky (watching) | `GET constellation.microcosm.blue/links/count?target=<saved page>&collection=app.bsky.feed.post&path=.embed.external.uri` | the address of a page in your Collection, plus a `User-Agent` naming Backchannel and its version; only while Bluesky is on | No |
 | Reddit (watching) | `GET arctic-shift.photon-reddit.com/api/posts/search?limit=25&fields=id&url=<saved page>` | the address of a page in your Collection; only while Reddit is on and answering through the archive mirror | No identifier, no session |
 | Reddit (reader) | `GET www.reddit.com/api/info.json?id=t3_<id>`, or the archive mirror's `/api/posts/ids?ids=<id>` | the id of a post the reader listed, when you open its link and the search by address missed that post; only while Reddit is on | Direct requests depend on the browser and userscript manager, as in the Reddit row. Archive requests carry no Reddit session |

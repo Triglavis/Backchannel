@@ -766,9 +766,9 @@ test("an inferred topic stays hidden as its group shrinks and is editable from a
 	}
 });
 
-test("Sidebar Front Pages applies topic filters and restores links from Settings", async () => {
+test("Sidebar Front Pages applies topic filters and links to private Reader settings", async () => {
 	const app = await launchTopics({
-		appHost: new URL(guide.url).hostname,
+		topHosts: [new URL(guide.url).hostname],
 		stored: {
 			"HNewhere:settings": {
 				updateCheck: false, autoOpenSidebar: true, sourceRefreshMinutes: 0, sources: { hn: true, lemmy: true },
@@ -788,8 +788,15 @@ test("Sidebar Front Pages applies topic filters and restores links from Settings
 		assert.equal(await guideLink.count(), 0);
 
 		const settings = await openTopicFilters(page);
-		await settings.getByRole("button", { name: "Show again, Browser privacy", exact: true }).click();
-		assert.equal(await settings.getByRole("listbox", { name: "Hidden links" }).isVisible(), true);
+		assert.equal(await settings.getByRole("button", { name: "Show again, Browser privacy", exact: true }).count(), 0);
+		assert.equal(await settings.getByRole("listbox", { name: "Hidden links" }).count(), 0);
+		const [reader] = await Promise.all([
+			app.context.waitForEvent("page"),
+			settings.getByRole("link", { name: "Manage filters in Reader" }).click(),
+		]);
+		const readerSettings = reader.getByRole("dialog", { name: "Settings" });
+		await readerSettings.getByRole("button", { name: "Show again, Browser privacy", exact: true }).click();
+		assert.equal(await readerSettings.getByRole("listbox", { name: "Hidden links" }).isVisible(), true);
 		await settings.getByRole("button", { name: "Close settings" }).click();
 		await page.locator("#browse-tab-all").click();
 		await guideLink.waitFor();
@@ -1861,6 +1868,7 @@ test("reviewed standalone links and separately curated topics survive local regr
 
 test("right-clicking a link in a topic reports the link and the displayed assignment", async () => {
 	const token = "r".repeat(43);
+	const reportToken = "v1.fixture.report-proof";
 	const privateVariant = { ...unknown, url: "https://framed.example.com:9443/post/260?v=1" };
 	const fixture = { ...catalog, topics: [catalog.topics[0], { ...catalog.topics[1], aliases: ["Site tracking"] }] };
 	const app = await launchTopics({
@@ -1872,9 +1880,15 @@ test("right-clicking a link in a topic reports the link and the displayed assign
 		responses: [{ match: (url) => url === catalogURL, json: fixture }],
 	});
 	const submitted = [];
+	const mintRequests = [];
 	try {
 		const { page, context } = app;
 		page.setDefaultTimeout(5000);
+		await context.route("https://backchnnl.app/account/topic-report-token", async (route) => {
+			mintRequests.push(route.request().headers().authorization);
+			if (mintRequests.length === 1) return route.fulfill({ status: 404, json: { error: "not-found" } });
+			return route.fulfill({ json: { token: reportToken } });
+		});
 		await context.route(topicReportURL, async (route) => {
 			const request = route.request();
 			const headers = {
@@ -1923,8 +1937,9 @@ test("right-clicking a link in a topic reports the link and the displayed assign
 		await send.click();
 		await dialog.waitFor({ state: "hidden" });
 		await page.getByText("Link reported for topic review.", { exact: true }).waitFor();
-		assert.deepEqual(submitted, ["Browser privacy", "Browser extension APIs"].map((suggestedTopic) => ({
-			authorization: "Bearer " + token, method: "POST",
+		assert.deepEqual(mintRequests, ["Bearer " + token, "Bearer " + token]);
+		assert.deepEqual(submitted, ["Browser privacy", "Browser extension APIs"].map((suggestedTopic, i) => ({
+			authorization: "Bearer " + (i ? reportToken : token), method: "POST",
 			body: { url: guide.url, topic: "Extension permissions", suggestedTopic },
 		})));
 		await list.getByRole("link", { name: guide.title, exact: true }).waitFor();

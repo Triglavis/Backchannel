@@ -4,8 +4,14 @@ const activityInterval = 5 * 60 * 1000;
 export function matchAccountDeviceRoute(method, pathname) {
   if (method === 'GET' && pathname === '/account/devices') return { action: 'list' };
   if (method === 'PUT' && pathname === '/account/devices/current') return { action: 'link' };
+  if (method === 'POST' && pathname === '/account/devices/revoke/options') return { action: 'revoke-options' };
   const target = method === 'DELETE' && /^\/account\/devices\/([^/]+)$/.exec(pathname);
   return target ? { action: 'disconnect', id: target[1] } : null;
+}
+
+export function deviceRevocationTarget(value) {
+  if (value === 'others') return value;
+  return typeof value === 'string' && uuid.test(value) ? value.toLowerCase() : null;
 }
 
 async function readDeviceSession(db, { account, tokenHash }) {
@@ -64,9 +70,16 @@ async function listDevices(db, { account, tokenHash }, { reply, fail }) {
 }
 
 async function disconnectDevice(db, auth, targetId, { fail, noContent }) {
-  if (!uuid.test(targetId)) return fail('invalid-device', 400);
-  const id = targetId.toLowerCase();
+  const id = deviceRevocationTarget(targetId);
+  if (!id) return fail('invalid-device', 400);
   const now = Date.now();
+  if (id === 'others') {
+    await db.prepare(`
+      DELETE FROM sessions WHERE account_id = ? AND token_hash != ?
+        AND EXISTS (SELECT 1 FROM sessions WHERE token_hash = ? AND account_id = ? AND expires_at > ?)
+    `).bind(auth.account, auth.tokenHash, auth.tokenHash, auth.account, now).run();
+    return await readDeviceSession(db, auth) ? noContent() : fail('sign-in-required', 401);
+  }
   const removed = await db.prepare(`
     DELETE FROM sessions WHERE account_id = ? AND device_id = ? AND expires_at > ?
       AND EXISTS (

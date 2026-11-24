@@ -517,12 +517,11 @@ test("the Reddit tab identifies its purpose and closes before local comment rend
     assert(await waitFor(async () => await app.page.locator('#comments-content .top-level-comments').count() === 1, 15000), 'local rendering has started');
     assert(await waitFor(() => opened.every((page) => page.isClosed()), 2500), 'the Reddit tab closes before local rendering finishes');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count(), 0, 'the controlled rendering pause is still in effect');
-    const composer = app.page.locator('#comments-content .compose-box');
-    await composer.locator('.composer-text').fill('Draft while comments render');
-    assert(await composer.locator('.compose-send-note').isDisabled(), 'notes remain disabled during rendering');
-    assert(await composer.locator('.compose-send-comment').isDisabled(), 'comments remain disabled during rendering');
+    const write = app.page.getByRole('link', { name: 'Write in Reader' });
+    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count() === 1, 10000));
-    assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 10000), 'submission becomes available when rendering finishes');
+    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();

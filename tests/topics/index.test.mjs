@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
@@ -10,7 +11,14 @@ import worker from "../../topics/worker.mjs";
 const DAY = 86_400_000;
 const START = Date.parse("2026-11-20T12:00:00.000Z");
 const REFRESH_TOKEN = "test-refresh-token";
+const REVIEW_TOKEN = "fixture-review-token";
+const REPORT_SECRET = "fixture-topics-key";
 const migrations = new URL("../../topics/migrations/", import.meta.url);
+
+function reportProof(sub, exp, scope = "topic:report") {
+  const encoded = "v1." + Buffer.from(JSON.stringify({ aud: "backchannel-topics", scope, sub, exp })).toString("base64url");
+  return encoded + "." + createHmac("sha256", REPORT_SECRET).update(encoded).digest("base64url");
+}
 
 test("a refresh reunites split event coverage, preserves old addresses and accepts a new perspective", async (t) => {
   const pages = [...reinstatement, ...otherDevelopments.slice(0, 6)].map((title, i) => ({
@@ -138,7 +146,7 @@ async function service(t, options = {}) {
   const runtime = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: "export default { fetch: () => new Response() };",
-    d1Databases: { TOPICS_DB: "topics-test", ACCOUNTS_DB: "accounts-test" },
+    d1Databases: { TOPICS_DB: "topics-test" },
   }));
   t.after(() => runtime.dispose());
   const db = await runtime.getD1Database("TOPICS_DB");
@@ -146,14 +154,13 @@ async function service(t, options = {}) {
     const sql = await readFile(new URL(file, migrations), "utf8");
     await db.exec(sql.replaceAll("\n", " "));
   }
-  const accounts = await runtime.getD1Database("ACCOUNTS_DB");
-  const env = { TOPICS_DB: db, ACCOUNTS_DB: accounts, REFRESH_TOKEN, ...options };
+  const env = { TOPICS_DB: db, REFRESH_TOKEN, TOPIC_REVIEW_TOKEN: REVIEW_TOKEN, ...options };
   const request = (path = "/api/topics", init, context) => worker.fetch(new Request("https://topics.test" + path, init), env, context);
   const refresh = () => request("/internal/refresh", {
     method: "POST",
     headers: { Authorization: "Bearer " + REFRESH_TOKEN },
   });
-  return { db, accounts, request, refresh, scheduled: () => worker.scheduled({}, env) };
+  return { db, request, refresh, scheduled: () => worker.scheduled({}, env) };
 }
 
 function mockFeeds(t, getFeeds) {
@@ -1036,31 +1043,39 @@ test("public POSTs and unauthorized refreshes cannot write the index or run infe
   assert.deepEqual(await (await request()).json(), { version: 1, generatedAt: null, topics: [], pages: [] });
 });
 
+test("manual refresh credentials and editorial credentials grant their own permissions", async (t) => {
+  mockFeeds(t, () => ({}));
+  const { request, refresh } = await service(t);
+  const manual = { Authorization: "Bearer " + REFRESH_TOKEN };
+  const editorial = { Authorization: "Bearer " + REVIEW_TOKEN };
+  assert.equal((await request("/internal/topic-reports?pending=1", { headers: manual })).status, 401);
+  assert.equal((await request("/internal/topic-reports?pending=1", { headers: editorial })).status, 200);
+  assert.equal((await request("/internal/topic-reports", { method: "POST", headers: manual })).status, 401);
+  assert.equal((await request("/internal/refresh", { method: "POST", headers: editorial })).status, 404);
+  assert.equal((await request("/internal/publish-topics", { method: "POST", headers: manual })).status, 404);
+  assert.equal((await request("/internal/publish-topics", { method: "POST", headers: editorial })).status, 503);
+  assert.equal((await refresh()).status, 503);
+});
+
 test("link reports are private, authenticated, and counted once per account and link", async (t) => {
-  const { accounts, request } = await service(t, {
+  const now = Date.now();
+  const firstReporter = "1".repeat(32);
+  const secondReporter = "2".repeat(32);
+  const first = reportProof(firstReporter, now + 60_000);
+  const otherDevice = reportProof(firstReporter, now + 120_000);
+  const second = reportProof(secondReporter, now + 60_000);
+  const expired = reportProof(secondReporter, now - 1000);
+  const legacy = "a".repeat(43);
+  const { request } = await service(t, {
+    TOPIC_REPORT_TOKEN_SECRET: REPORT_SECRET,
+    ACCOUNTS: { fetch: async (request) => {
+      assert.equal(request.url, "https://backchnnl.app/account/topic-report-token");
+      assert.equal(request.method, "POST");
+      assert.equal(request.headers.get("Authorization"), "Bearer " + legacy);
+      return Response.json({ token: otherDevice });
+    } },
     TOPIC_REPORT_RATE_LIMIT: { limit: async () => ({ success: true }) },
   });
-  const schema = await readFile(new URL("../../account/migrations/0001_account.sql", import.meta.url), "utf8");
-  await accounts.batch(schema.split(";").map((part) => part.trim()).filter(Boolean).map((part) => accounts.prepare(part)));
-  const first = "a".repeat(43);
-  const otherDevice = "b".repeat(43);
-  const second = "c".repeat(43);
-  const expired = "d".repeat(43);
-  const now = Date.now();
-  const sessions = await Promise.all([
-    [first, "first-account", now + DAY],
-    [otherDevice, "first-account", now + DAY],
-    [second, "second-account", now + DAY],
-    [expired, "second-account", now - DAY],
-  ].map(async ([token, account, expiresAt]) => {
-    const hash = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))).toString("base64url");
-    return accounts.prepare("INSERT INTO sessions (token_hash, account_id, expires_at) VALUES (?, ?, ?)")
-      .bind(hash, account, expiresAt);
-  }));
-  await accounts.batch([
-    accounts.prepare("INSERT INTO accounts (id) VALUES ('first-account'), ('second-account')"),
-    ...sessions,
-  ]);
   const url = "https://example.org/a?edition=1";
   const origin = "https://backchnnl.app";
   const report = (token, payload, requestOrigin = origin) => request("/api/topic-reports", {
@@ -1073,28 +1088,87 @@ test("link reports are private, authenticated, and counted once per account and 
   assert.equal(preflight.headers.get("Access-Control-Allow-Origin"), origin);
   assert.equal((await report(null, { url })).status, 401);
   assert.equal((await report(expired, { url })).status, 401);
+  assert.equal((await report(reportProof(firstReporter, now + 60_000, "topic:report:delete"), { url })).status, 401);
   assert.equal((await report(first, { url }, "https://another.example")).status, 403);
   assert.equal((await report(first, { url: "https://someone:secret@example.org/a" })).status, 400);
   assert.equal((await report(first, { url, suggestedTopic: "a".repeat(121) })).status, 400);
   assert.equal((await report(first, { url, suggestedTopic: "a".repeat(4096) })).status, 413);
   assert.equal((await report(first, { url: url + "&utm_source=feed#heading", topic: "Web" })).status, 204);
   const correction = { url, topic: "Web", suggestedTopic: "Browser APIs" };
-  const responses = await Promise.all([report(otherDevice, correction), report(second, correction)]);
+  const responses = await Promise.all([report(legacy, correction), report(second, correction)]);
   assert.deepEqual(responses.map(({ status }) => status), [204, 204]);
   assert.equal((await request("/api/topic-reports")).status, 404);
   assert.equal((await request("/internal/topic-reports")).status, 404);
   const review = await (await request("/internal/topic-reports", {
-    headers: { Authorization: "Bearer " + REFRESH_TOKEN },
+    headers: { Authorization: "Bearer " + REVIEW_TOKEN },
   })).json();
   assert.deepEqual(review.reports.map(({ lastReportedAt, ...report }) => report), [{
-    url, title: null, topic: "Web", suggestedTopic: "Browser APIs", count: 2,
+    url: "https://example.org/a", title: null, topic: "Web", suggestedTopic: "Browser APIs", count: 2,
   }]);
   assert(review.reports[0].lastReportedAt >= now);
   const next = await (await request("/internal/topic-reports?offset=1", {
-    headers: { Authorization: "Bearer " + REFRESH_TOKEN },
+    headers: { Authorization: "Bearer " + REVIEW_TOKEN },
   })).json();
   assert.deepEqual(next, { reports: [], nextOffset: null });
   assert.deepEqual(await (await request()).json(), { version: 1, generatedAt: null, topics: [], pages: [] });
+});
+
+test("editors can dismiss a scrubbed report by its report ID and old reports expire", async (t) => {
+  let now = START;
+  t.mock.method(Date, "now", () => now);
+  mockFeeds(t, () => ({}));
+  const { request, scheduled } = await service(t, {
+    TOPIC_REPORT_TOKEN_SECRET: REPORT_SECRET,
+    TOPIC_REPORT_RATE_LIMIT: { limit: async () => ({ success: true }) },
+  });
+  const report = await request("/api/topic-reports", {
+    method: "POST", headers: {
+      Authorization: "Bearer " + reportProof("1".repeat(32), now + 60_000), "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url: "https://example.org/archive?edition=4" }),
+  });
+  assert.equal(report.status, 204);
+  const headers = { Authorization: "Bearer " + REVIEW_TOKEN, "Content-Type": "application/json" };
+  const review = async (suffix = "") => (await (await request("/internal/topic-reports" + suffix, { headers })).json()).reports;
+  const [pending] = await review("?pending=1");
+  assert.equal(pending.url, "https://example.org/archive");
+  assert.match(pending.reportPageId, /^[a-f0-9]{32}$/);
+  const dismissed = await request("/internal/topic-reports", {
+    method: "POST", headers,
+    body: JSON.stringify({ action: "dismiss", reportPageId: pending.reportPageId, requestId: crypto.randomUUID() }),
+  });
+  assert.equal(dismissed.status, 201);
+  assert.deepEqual(await review("?pending=1"), []);
+  assert.equal((await review()).length, 1);
+  now += 90 * DAY;
+  assert.deepEqual(await review(), []);
+  await assert.rejects(scheduled(), /All public sources unavailable/);
+  now = START;
+  assert.deepEqual(await review(), []);
+});
+
+test("account deletion removes its topic reports and expires prior reporting credentials", async (t) => {
+  const now = Date.now();
+  const subject = "1".repeat(32);
+  const { request } = await service(t, {
+    TOPIC_REPORT_TOKEN_SECRET: REPORT_SECRET,
+    TOPIC_REPORT_RATE_LIMIT: { limit: async () => ({ success: true }) },
+  });
+  const report = (token) => request("/api/topic-reports", {
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ url: "https://example.org/archive" }),
+  });
+  const purge = (token) => request("/internal/account-reports", { method: "DELETE", headers: { Authorization: "Bearer " + token } });
+  const prior = reportProof(subject, now + 60_000);
+  assert.equal((await report(prior)).status, 204);
+  assert.equal((await report(reportProof("2".repeat(32), now + 60_000))).status, 204);
+  assert.equal((await purge(prior)).status, 401);
+  const deletion = reportProof(subject, now + 60_000, "topic:report:delete");
+  assert.equal((await purge(deletion)).status, 204);
+  assert.equal((await report(prior)).status, 401);
+  assert.equal((await purge(deletion)).status, 204);
+  const review = await request("/internal/topic-reports", { headers: { Authorization: "Bearer " + REVIEW_TOKEN } });
+  assert.deepEqual((await review.json()).reports.map(({ count }) => count), [1]);
 });
 
 test("operator decisions resolve reports and survive a fresh automatic classification", async (t) => {
@@ -1109,7 +1183,7 @@ test("operator decisions resolve reports and survive a fresh automatic classific
   }));
   mockFeeds(t, () => ({ "hn.algolia.com": { hits: sources } }));
   const { db, request, refresh } = await service(t, { AI: fixtureAI() });
-  const headers = { Authorization: "Bearer " + REFRESH_TOKEN, "Content-Type": "application/json" };
+  const headers = { Authorization: "Bearer " + REVIEW_TOKEN, "Content-Type": "application/json" };
   const review = (query = "?pending=1") => request("/internal/topic-reports" + query, { headers });
   const decide = (body, authed = true) => request("/internal/topic-reports", {
     method: "POST", headers: authed ? headers : { "Content-Type": "application/json" },
@@ -1368,7 +1442,7 @@ function bridgeInference() {
   ] }] }], events: [] } };
 }
 
-async function articleFixture(t, { run = bridgeInference, sources = bridgeSources, publisherStatus = () => 200 } = {}) {
+async function articleFixture(t, { run = bridgeInference, sources = bridgeSources, publisherStatus = () => 200, env = {} } = {}) {
   let now = START;
   t.mock.method(Date, "now", () => now);
   const fetched = [];
@@ -1384,7 +1458,7 @@ async function articleFixture(t, { run = bridgeInference, sources = bridgeSource
       page.description + '"></head><body><article><p>' + page.description + '</p></article></body></html>',
     { headers: { "Content-Type": "text/html; charset=utf-8" } });
   });
-  const { db, request } = await service(t, { AI: { run } });
+  const { db, request } = await service(t, { AI: { run }, ...env });
   const topic = { id: "story:bridge-repairs", label: "River bridge repairs", kind: "story" };
   const path = "/api/topics/article?id=" + encodeURIComponent(topic.id);
   const index = { version: 1, generatedAt: new Date(now).toISOString(), topics: [topic],
@@ -1473,6 +1547,27 @@ test("only current published topic IDs can initiate article generation", async (
   assert.deepEqual((await repaired.json()).sources.map(({ url }) => url), [bridgeSources[0].url]);
   await db.prepare("DELETE FROM topics_index").run();
   assert.equal((await request(path)).status, 404);
+});
+
+test("a shared daily budget limits simultaneous cold articles and preserves warm articles", async (t) => {
+  const { request, path, index, publish, advance, fetched } = await articleFixture(t, {
+    env: { TOPIC_ARTICLE_DAILY_BUDGET: "1" },
+  });
+  const topic = { id: "story:bridge-deck", label: "River bridge deck repairs", kind: "story" };
+  index.topics.push(topic);
+  for (const page of index.pages) page.topicIds.push(topic.id);
+  await publish();
+  const paths = [path, "/api/topics/article?id=" + encodeURIComponent(topic.id)];
+  const responses = await Promise.all(paths.map((address) => request(address)));
+  assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 429]);
+  assert.equal(fetched.length, bridgeSources.length);
+  const limited = responses.findIndex(({ status }) => status === 429);
+  assert(Number(responses[limited].headers.get("retry-after")) > 0);
+  assert.equal((await request(paths[1 - limited])).status, 200);
+  assert.equal(fetched.length, bridgeSources.length);
+  advance(DAY);
+  assert.equal((await request(paths[limited])).status, 200);
+  assert.equal(fetched.length, bridgeSources.length * 2);
 });
 
 test("simultaneous topic article opens take one D1 lease and return a bounded pending response", { timeout: 15_000 }, async (t) => {
@@ -1887,7 +1982,7 @@ test("warm article requests can use the durable source selection without transfe
 test("a publication winning the final cache write cannot leak an article from just before a reviewed split", async (t) => {
   const { db, index, path, publish, request } = await articleFixture(t);
   let published = false;
-  const env = { AI: { run: bridgeInference }, TOPICS_DB: { prepare(sql) {
+  const env = { AI: { run: bridgeInference }, TOPICS_DB: { batch: (statements) => db.batch(statements), prepare(sql) {
     const statement = db.prepare(sql);
     if (!sql.startsWith("UPDATE topic_articles SET body")) return statement;
     return { bind(...params) {

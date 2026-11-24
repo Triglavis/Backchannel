@@ -28,6 +28,7 @@
 			"worker.js",
 			"account/worker.mjs",
 			"account/devices.mjs",
+			"account/topic-reports.mjs",
 			"account/package.json",
 			"account/package-lock.json"
 		]
@@ -49,8 +50,10 @@
 	],
 	"vars": {
 		"ACCOUNT_EMAIL_FROM": "accounts@backchnnl.app",
-		"ACCOUNT_EMAIL_HOURLY_LIMIT": "120"
+		"ACCOUNT_EMAIL_HOURLY_LIMIT": "120",
+		"ACCOUNT_EMAIL_ENROLLMENT_HOURLY_LIMIT": "90"
 	},
+	"services": [{ "binding": "TOPIC_REPORTS", "service": "backchannel-topics" }],
 	"d1_databases": [
 		{
 			"binding": "ACCOUNTS_DB",

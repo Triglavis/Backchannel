@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.19.1
+// @version      1.6.19.2
 // @license      GPL-3.0-or-later
 // @copyright    2026 Triglavis LLC
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -469,14 +469,14 @@
 	const START_PAGE_PATH = "/";
 	const START_PAGE_ORIGIN = "https://" + START_PAGE_HOST;
 	const APP_FRAME_NAME = "backchannel-article";
-	const APP_MESSAGE_VERSION = 1;
+	const APP_MESSAGE_VERSION = 2;
 
 	function isStartPageAddress(href) {
 		try {
 			const parsed = new URL(href);
 
 			return (
-				parsed.hostname === START_PAGE_HOST &&
+				parsed.origin === START_PAGE_ORIGIN &&
 				(parsed.pathname === START_PAGE_PATH ||
 					parsed.pathname.startsWith(START_PAGE_PATH + "/"))
 			);
@@ -1152,6 +1152,7 @@
 					addedAt: pick("addedAt", Math.min),
 					viewedAt: pick("viewedAt", Math.min),
 					lastViewedAt: pick("lastViewedAt", Math.max),
+					...(all.some(collectedPreviewOnOpen) && { previewOnOpen: true }),
 				}
 			: keep;
 		const merged = withAddresses(joined, addresses);
@@ -1721,6 +1722,14 @@
 		return { ...(description && { description }), ...(section && { section }) };
 	}
 
+	function pageLookAssetURL(value) {
+		const url = typeof value === "string" && value.length <= 4096 && readerURL(value);
+		if (url?.protocol !== "https:" || url.username || url.password || url.port || isHiddenSite(url.href) ||
+			/\.$|\.(?:localdomain|intranet|onion|arpa|home|corp)$|(?:^|\.)(?:nip\.io|sslip\.io|localtest\.me|lvh\.me)$/i.test(url.hostname)) return "";
+		url.hash = "";
+		return url.href;
+	}
+
 	function safeLook(look) {
 		if (!look || typeof look !== "object") {
 			return null;
@@ -1733,17 +1742,16 @@
 			!/[;{}<>\\]/.test(value) &&
 			!/\b(?:var|url|attr|env|image|image-set|cross-fade|element|paint|expression)\s*\(/i.test(value) &&
 			CSS.supports(property, value);
-		const address = (value) => (/^https?:\/\//i.test(value) ? value.replace(/^http:/i, "https:") : "");
 		const color = (value) => (supports("color", value) ? value : "");
 
 		return {
-			image: address(text(look.image)),
+			image: pageLookAssetURL(look.image),
 			bg: color(text(look.bg)),
 			text: color(text(look.text)),
 			font: supports("font-family", text(look.font)) ? text(look.font) : "",
 			weight: /^(normal|bold|[1-9]00)$/.test(text(look.weight)) ? text(look.weight) : "",
 			color: color(text(look.color)),
-			icon: address(text(look.icon)),
+			icon: pageLookAssetURL(look.icon),
 			site: plain(text(look.site)),
 			...lookMetadata(look),
 			at: Number(look.at) || 0,
@@ -1794,6 +1802,23 @@
 
 	function collectedPreviewOnOpen(entry) {
 		return entry?.previewOnOpen === true || entry?.unwatched === true;
+	}
+
+	function collectedDiscussionURL(entry) {
+		if (!entry?.url || collectedPreviewOnOpen(entry)) return "";
+
+		let url;
+		try {
+			url = new URL(entry.url);
+		} catch {
+			return "";
+		}
+		if (!["http:", "https:"].includes(url.protocol) || url.username || url.password ||
+			isHiddenSite(url.href) || [...url.searchParams.keys()].some((key) => !isTrackingParam(key))) return "";
+
+		url.hash = "";
+		url.search = "";
+		return url.href;
 	}
 
 	function collectedDue(entries, now, interval) {
@@ -2353,15 +2378,16 @@ ${links.join("\n")}
 	}
 
 	function collectionSettingsHTML(reader) {
+		if (!reader) return `<div data-app-section="collection"><a class="settings-button" href="${START_PAGE_ORIGIN}/#collection-settings" target="_blank" rel="noopener noreferrer">Open Collection settings in Reader</a></div>`;
 		return `
 <div data-app-section="collection">
-${reader ? `<section id="collection-import-settings" class="settings-group" aria-labelledby="collection-import-heading">
+<section id="collection-import-settings" class="settings-group" aria-labelledby="collection-import-heading">
 <h3 id="collection-import-heading" class="settings-subheading">Import</h3>
 <div class="appearance-row settings-action-row">
 <div class="appearance-row-hint">Import your bookmarks from other services</div>
 <button id="collection-import-open" class="settings-button" type="button">Choose file…</button>
 </div>
-</section>` : ""}
+</section>
 <section class="settings-group" aria-labelledby="collection-export-heading">
 <h3 id="collection-export-heading" class="settings-subheading">Export</h3>
 <div class="appearance-row settings-action-row">
@@ -2702,24 +2728,31 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 					requireSignIn();
 					return;
 				}
+				let reportToken;
+				try {
+					const issued = await accountRequest("/topic-report-token", { method: "POST", token });
+					reportToken = issued?.token;
+					if (typeof reportToken !== "string" || !reportToken.startsWith("v1.")) throw new Error("report-permission-unavailable");
+				} catch (error) {
+					if (error.status !== 404 || error.message !== "not-found") throw error;
+					reportToken = token;
+				}
 				const response = await fetch(SHARED_TOPIC_REPORT_URL, {
 					method: "POST",
-					headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+					headers: { "Content-Type": "application/json", Authorization: "Bearer " + reportToken },
 					body: JSON.stringify({ url, topic, suggestedTopic: suggestion.value.trim() }),
 					credentials: "omit", referrerPolicy: "strict-origin",
 					cache: "no-store", redirect: "error", signal: AbortSignal.timeout(12000),
 				});
+				if (response.status !== 204) throw Object.assign(new Error("report-unavailable"), { status: response.status });
 				if (!current()) return;
-				if (response.status === 401) requireSignIn();
-				else if (response.status === 429) status.textContent = "Too many reports. Try again in a minute.";
-				else if (response.status === 204) {
-					dialog.close();
-					showToast("Link reported for topic review.");
-				} else {
-					status.textContent = "Couldn’t send the report. Try again.";
-				}
-			} catch {
-				if (current()) status.textContent = "Couldn’t send the report. Try again.";
+				dialog.close();
+				showToast("Link reported for topic review.");
+			} catch (error) {
+				if (!current()) return;
+				if (error.status === 401) requireSignIn();
+				else if (error.status === 429) status.textContent = "Too many reports. Try again in a minute.";
+				else status.textContent = "Couldn’t send the report. Try again.";
 			} finally {
 				if (dialog.onclose === close) send.disabled = cancel.disabled = false;
 			}
@@ -3277,16 +3310,17 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 		button.textContent = button.closest(".browse-row-menu") ? label.charAt(0).toUpperCase() + label.slice(1) : label;
 	}
 
-	function paintSaveControls(root, entries, folderOf = () => "", folders = []) {
+	function paintSaveControls(root, entries, folderOf = () => "", folders = [], itemFor = null) {
 		const list = Array.isArray(entries) ? entries : [];
 
 		for (const button of root.querySelectorAll(`[data-item-action="save"]`)) {
-			const item = {
+			const item = itemFor ? itemFor(button) : {
 				key: button.dataset.saveKey,
 				url: button.dataset.saveUrl || "",
 				kind: button.dataset.saveKind || "discussion",
 			};
-			const folder = folderOf(button);
+			if (!item) continue;
+			const folder = folderOf(button, item);
 			const on = list.some((entry) => savedCovers(entry, item, folder, folders));
 
 			setActionLabel(button, on ? "unsave" : "save");
@@ -3295,6 +3329,35 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 	}
 
 	// #endregion hnewhere-test-export
+
+	const sidebarSaveControls = new WeakMap();
+
+	function saveControlItem(button) {
+		const data = button.dataset;
+		return {
+			key: data.saveKey,
+			url: data.saveUrl || "",
+			title: data.saveTitle || "",
+			site: data.saveSite || "",
+			kind: data.saveKind || "discussion",
+			context: data.saveContext || "",
+			by: data.saveBy || "",
+			time: Number(data.saveTime) || 0,
+			focus: data.saveFocus || "",
+			source: data.itemActionSource || "",
+			id: data.itemActionId || "",
+			parent: data.saveParent || "",
+			text: data.saveText || "",
+			row: Boolean(data.saveRow),
+		};
+	}
+
+	function registerSidebarSaveControls(root) {
+		if (appState) return;
+		for (const button of root.querySelectorAll('[data-item-action="save"]')) {
+			sidebarSaveControls.set(button, saveControlItem(button));
+		}
+	}
 
 	function openPageContext() {
 		const held = renderedFor === openPageKey() ? renderedDiscussions.map((story) => story?.articleURL || "") : [];
@@ -3320,17 +3383,10 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 		return { link: here, title: pageTitle(), site: hostLabel(here), addresses: [...own, ...discussedBy(own)] };
 	}
 
-	function saveContextFor(button, open = null) {
-		const thread = button?.closest?.(".app-topic-thread-detail");
+	function saveContextFor(button, item, open = null) {
+		const thread = appState && button.closest(".app-topic-thread-detail");
 		if (thread) return rowContext({ url: thread.dataset.articleUrl, title: thread.dataset.articleTitle });
-		if (button?.dataset.saveRow) {
-			return rowContext({
-				url: button.dataset.saveUrl || "",
-				title: button.dataset.saveTitle || "",
-				source: button.dataset.itemActionSource || "",
-				id: button.dataset.itemActionId || "",
-			});
-		}
+		if (item.row) return rowContext(item);
 
 		return open || openPageContext();
 	}
@@ -3417,12 +3473,12 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 		paintSaveControls(
 			root,
 			entries,
-			(button) => {
-				const context = saveContextFor(button, open);
-
+			(button, item) => {
+				const context = saveContextFor(button, item, open);
 				return folderKeyFor([context.link, ...context.addresses], folders);
 			},
 			folders,
+			appState ? saveControlItem : (button) => sidebarSaveControls.get(button),
 		);
 	}
 
@@ -3449,31 +3505,16 @@ ${reader ? `<section id="collection-import-settings" class="settings-group" aria
 	}
 
 	async function submitItemAction(button) {
-		const itemId = button.dataset.itemActionId;
-		const sourceID = button.dataset.itemActionSource;
-
-		if (!itemId || button.disabled) {
+		const control = appState ? saveControlItem(button) : sidebarSaveControls.get(button);
+		if (!control?.id || button.disabled) {
 			return;
 		}
 
 		button.disabled = true;
 
 		try {
-			const on = await toggleSaved({
-				key: button.dataset.saveKey,
-				url: button.dataset.saveUrl || "",
-				title: button.dataset.saveTitle || "",
-				site: button.dataset.saveSite || "",
-				kind: button.dataset.saveKind || "discussion",
-				context: button.dataset.saveContext || "",
-				by: button.dataset.saveBy || "",
-				time: Number(button.dataset.saveTime) || 0,
-				focus: button.dataset.saveFocus || "",
-				source: sourceID,
-				id: itemId,
-				parent: button.dataset.saveParent || "",
-				text: button.dataset.saveText || "",
-			}, saveContextFor(button));
+			const { row, ...item } = control;
+			const on = await toggleSaved(item, saveContextFor(button, control));
 
 			setActionLabel(button, on ? "unsave" : "save");
 			button.classList.toggle("item-action-on", on);
@@ -6464,17 +6505,13 @@ ${
 				return null;
 			}
 
-			const since = Math.floor((context.since || 0) / 1000);
-			const filter = encodeURIComponent("created_at_i>" + since);
 			let total = 0;
 			let answered = false;
 
 			for (const query of [url, target]) {
 				const result = await request(
 					"https://hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=" +
-						encodeURIComponent(query) +
-						"&numericFilters=" +
-						filter,
+						encodeURIComponent(query),
 				);
 
 				if (!result || typeof result.nbHits !== "number") {
@@ -6489,7 +6526,8 @@ ${
 				return null;
 			}
 
-			return { mark: total, changed: probeMarkChanged(context.mark, total) };
+			const mark = "total:" + total;
+			return { mark, changed: typeof context.mark === "string" && probeMarkChanged(context.mark, mark) };
 		},
 
 		async frontPage() {
@@ -9208,9 +9246,7 @@ ${
 			: { url: pageHref(), title: pageTitle() };
 	}
 
-	function noteDocumentRef(fingerprint = null) {
-		const { url } = noteDocumentSubject();
-
+	function noteDocumentRef(fingerprint = null, url = noteDocumentSubject().url) {
 		return fingerprint
 			? { kind: "pdf", id: String(fingerprint) }
 			: { kind: "url", id: normalizeURL(url) || url };
@@ -9446,14 +9482,21 @@ button {
 			exact,
 			...noteSelectionContext(range),
 			anchorable: normalizeSearchText(exact).text.length >= QUOTE_MIN_CHARS,
-			page: Number(element.closest(".page")?.dataset.pageNumber) || null,
+			page: notePageNumber(Number(element.closest(".page")?.dataset.pageNumber)),
 			left: rect.right,
 			top: rect.bottom,
 		};
 	}
+
+	function notePageNumber(value) {
+		return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value : null;
+	}
 	// #endregion hnewhere-test-export
 
 	async function openNoteComposer(chosen) {
+		if (!appState) return;
+		const context = openPageContext();
+		const target = { ...chosen, page: notePageNumber(chosen.page), ref: noteDocumentRefForPage(context.link), context };
 		closeNoteComposer();
 
 		const host = document.createElement("div");
@@ -9498,7 +9541,7 @@ button {
 
 		shadow.querySelector(".cancel").onclick = () => closeNoteComposer();
 		shadow.querySelector(".save").onclick = () => {
-			saveNoteFromComposer(chosen, field.value).catch(console.error);
+			saveNoteFromComposer(target, field.value).catch(console.error);
 		};
 		field.onkeydown = (event) => {
 			if (event.key === "Escape") {
@@ -9506,7 +9549,7 @@ button {
 			}
 
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-				saveNoteFromComposer(chosen, field.value).catch(console.error);
+				saveNoteFromComposer(target, field.value).catch(console.error);
 			}
 		};
 
@@ -9526,7 +9569,9 @@ button {
 			return;
 		}
 
-		const notes = await loadNotes();
+		const { context } = chosen;
+		const ref = await chosen.ref;
+		const notes = await loadNotes(ref);
 		const written = String(text).trim();
 
 		await saveNotes([
@@ -9542,13 +9587,13 @@ button {
 				prefix: chosen.prefix,
 				suffix: chosen.suffix,
 				page: chosen.page,
-				url: pageHref(),
+				url: context.link,
 			},
-		]);
+		], ref, context);
 
 		closeNoteComposer();
 		window.getSelection()?.removeAllRanges();
-		await reopenForNotes();
+		if (sameURL(context.link, pageHref())) await reopenForNotes();
 	}
 
 	// #region hnewhere-test-export
@@ -9849,7 +9894,8 @@ button {
 			return;
 		}
 
-		const ref = context ? { kind: "url", id: normalizeURL(context.link) || context.link } : noteDocumentRefForPage();
+		const here = context || openPageContext();
+		const ref = await noteDocumentRefForPage(here.link);
 		const notes = await loadNotes(ref);
 
 		await saveNotes([
@@ -9861,12 +9907,12 @@ button {
 						Date.now().toString(36) +
 						Math.floor(Math.random() * 1e6).toString(36),
 					created: Math.floor(Date.now() / 1000),
-					url: context?.link || pageHref(),
+					url: here.link,
 				},
 				parsed,
 				!context,
 			),
-		], ref, context);
+		], ref, here);
 		if (!context) await reopenForNotes();
 	}
 
@@ -9875,20 +9921,25 @@ button {
 			return;
 		}
 
-		const notes = await loadNotes();
+		const context = openPageContext();
+		const ref = await noteDocumentRefForPage(context.link);
+		const notes = await loadNotes(ref);
 
 		await saveNotes(
 			notes.map((note) =>
 				note.id === id ? editedNote(note, parsed) : note,
 			),
+			ref, context,
 		);
 		await reopenForNotes();
 	}
 
 	async function deleteNote(id) {
-		const notes = await loadNotes();
+		const context = openPageContext();
+		const ref = await noteDocumentRefForPage(context.link);
+		const notes = await loadNotes(ref);
 
-		await saveNotes(notes.filter((note) => note.id !== id));
+		await saveNotes(notes.filter((note) => note.id !== id), ref, context);
 		await reopenForNotes();
 	}
 
@@ -9933,6 +9984,7 @@ button {
 	}
 
 	async function refreshNotepadInPlace() {
+		if (!appState) return true;
 		if (!sidebarUI?.body) {
 			return false;
 		}
@@ -10026,7 +10078,8 @@ button {
 			z-index:2147483647;
 		`;
 		wrapper.appendChild(
-			pdfReaderButton("Add note", () => {
+			pdfReaderButton(appState || frameAgentActive ? "Add note" : "Add note in Reader", (event) => {
+				if (!event.isTrusted) return;
 				removeNoteAffordance();
 
 				if (frameAgentActive) {
@@ -10035,6 +10088,7 @@ button {
 						exact: chosen.exact,
 						prefix: chosen.prefix,
 						suffix: chosen.suffix,
+						page: chosen.page,
 						left: chosen.left,
 						top: chosen.top,
 					});
@@ -10042,7 +10096,8 @@ button {
 					return;
 				}
 
-				openNoteComposer(chosen).catch(console.error);
+				if (appState) openNoteComposer(chosen).catch(console.error);
+				else openSidebarArticleInReader({ note: { exact: chosen.exact, prefix: chosen.prefix, suffix: chosen.suffix, page: chosen.page } });
 			}),
 		);
 
@@ -10120,15 +10175,32 @@ button {
 	}
 	// #endregion hnewhere-test-export
 
-	function noteDocumentRefForPage() {
-		return noteDocumentRef(pdfViewerApp()?.pdfDocument?.fingerprints?.[0]);
+	function exactNoteDocumentURL(value) {
+		const url = readerURL(value);
+		if (!url) return "";
+		const fragment = new URLSearchParams(url.hash.slice(1));
+		if ([...fragment.keys()].every((key) => ["page", "zoom", "nameddest", "pagemode"].includes(key))) url.hash = "";
+		return url.href;
 	}
 
-	async function loadNotes(ref = noteDocumentRefForPage()) {
+	async function noteDocumentRefForPage(value = noteDocumentSubject().url) {
+		const fallback = noteDocumentRef(null, value);
+		const url = exactNoteDocumentURL(value);
+		if (!url || !appState) return fallback;
+		const fingerprint = ownPdfReader?.app?.pdfDocument?.fingerprints?.[0];
+		if (fingerprint && url === exactNoteDocumentURL(noteDocumentSubject().url)) return noteDocumentRef(fingerprint, value);
+		const index = notedDocuments(await load(NOTES_INDEX_KEY, []));
+		const ids = new Set(index.filter((entry) => entry.kind === "pdf" && typeof entry.id === "string" &&
+			entry.key === noteStorageKey({ kind: "pdf", id: entry.id }) && exactNoteDocumentURL(entry.url) === url).map(({ id }) => id));
+		return ids.size === 1 ? noteDocumentRef(ids.values().next().value, value) : fallback;
+	}
+
+	async function loadNotes(ref) {
+		ref ??= await noteDocumentRefForPage();
 		return keptNotes(await load(noteStorageKey(ref), null));
 	}
 
-	async function saveNotes(notes, ref = noteDocumentRefForPage(), context = null) {
+	async function saveNotes(notes, ref, context) {
 		const kept = notes.slice(-NOTES_PER_DOCUMENT);
 		let page = "";
 
@@ -10136,7 +10208,7 @@ button {
 
 		if (kept.length) {
 			try {
-				page = await fileSaved(context || openPageContext());
+				page = await fileSaved(context);
 			} catch (error) {
 				console.error(error);
 			}
@@ -10187,7 +10259,7 @@ button {
 
 	// #endregion hnewhere-test-export
 
-	async function rememberNotedDocument(ref, notes, page = "", context = null) {
+	async function rememberNotedDocument(ref, notes, page, context) {
 		const key = noteStorageKey(ref);
 		const stored = await load(NOTES_INDEX_KEY, []);
 		const list = Array.isArray(stored) ? stored : [];
@@ -10200,8 +10272,8 @@ button {
 					ref,
 					notes,
 					previous,
-					context ? ref : noteDocumentRefForPage(),
-					context ? { url: context.link, title: context.title, page } : { ...noteDocumentSubject(), page },
+					ref,
+					{ url: context.link, title: context.title, page },
 					Date.now(),
 				),
 			);
@@ -10682,7 +10754,7 @@ button {
 	const COLLECTED_CHECK_BATCH = 4;
 	const COLLECTED_CHECK_DELAY_MS = 5000;
 
-	async function probeCollected(entry, settings) {
+	async function probeCollected(entry, url, settings) {
 		const marks = { ...(entry.marks || {}) };
 		let changed = false;
 		let answered = false;
@@ -10695,9 +10767,8 @@ button {
 			let result = null;
 
 			try {
-				const response = await sourceReadJob(source.id, "probe", [normalizeURL(entry.url), marks[source.id], entry.addedAt], () => source.probe(entry.url, {
+				const response = await sourceReadJob(source.id, "probe", [normalizeURL(url), marks[source.id]], () => source.probe(url, {
 					mark: marks[source.id],
-					since: entry.addedAt,
 				}));
 				result = response.status === "ok" ? response.value : null;
 			} catch (error) {
@@ -10721,11 +10792,8 @@ button {
 		if (!interval) return false;
 		const entries = await loadCollected();
 		const due = collectedDue(entries, Date.now(), Math.max(COLLECTED_CHECK_INTERVAL_MS, interval))
-			.filter(({ url }) => {
-				if (!url || isHiddenSite(url)) return false;
-				const { username, password } = new URL(url);
-				return !username && !password;
-			})
+			.map((entry) => ({ entry, url: collectedDiscussionURL(entry) }))
+			.filter(({ url }) => url)
 			.slice(0, COLLECTED_CHECK_BATCH);
 
 		if (!due.length) {
@@ -10734,8 +10802,8 @@ button {
 
 		const patches = new Map();
 
-		for (const entry of due) {
-			const { marks, changed, answered } = await probeCollected(entry, settings);
+		for (const { entry, url } of due) {
+			const { marks, changed, answered } = await probeCollected(entry, url, settings);
 			const now = Date.now();
 			const patch = {
 				marks,
@@ -10746,7 +10814,7 @@ button {
 			patches.set(entry.key, { before: entry, patch });
 
 			if (changed) {
-				const found = await discoverAll([entry.url], settings);
+				const found = await discoverAll([url], settings);
 
 				if (found.length) {
 					patch.foundAt = now;
@@ -10760,7 +10828,8 @@ button {
 			if (!result) return entry;
 			const { before, patch } = result;
 			return entry.addedAt === before.addedAt && entry.url === before.url &&
-				entry.checkedAt === before.checkedAt && entry.importBatch === before.importBatch ? { ...entry, ...patch } : entry;
+				entry.checkedAt === before.checkedAt && entry.importBatch === before.importBatch &&
+				!collectedPreviewOnOpen(entry) ? { ...entry, ...patch } : entry;
 		}));
 
 		return freshCollectedCount(merged) > 0;
@@ -10778,12 +10847,13 @@ button {
 
 	async function seedCollectedMarks(key) {
 		const entry = (await loadCollected()).find((each) => each.key === key);
+		const url = collectedDiscussionURL(entry);
 
-		if (!entry || entry.checkedAt) {
+		if (!url || entry.checkedAt) {
 			return;
 		}
 
-		const { marks, answered } = await probeCollected(entry, await loadSettings());
+		const { marks, answered } = await probeCollected(entry, url, await loadSettings());
 
 		if (!answered) {
 			return;
@@ -10793,7 +10863,8 @@ button {
 
 		await mutateCollected((entries) =>
 			entries.map((each) =>
-				each.key === key && !each.checkedAt ? { ...each, marks, checkedAt: now } : each,
+				each.key === key && each.url === entry.url && !collectedPreviewOnOpen(each) &&
+				!each.checkedAt ? { ...each, marks, checkedAt: now } : each,
 			),
 		);
 	}
@@ -12229,7 +12300,7 @@ button {
 			return true;
 		}
 
-		const hostname = parsed.hostname.toLowerCase();
+		const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
 
 		if (isPrivateHostname(hostname)) {
 			return true;
@@ -13726,6 +13797,49 @@ html[data-backchannel-installed] .chin {
 
 	async function clearBridgePayload(nonce) {
 		await forget(BRIDGE_PAYLOAD_PREFIX + nonce);
+	}
+
+	function openSidebarArticleInReader({ note = null } = {}) {
+		const url = readerURL(pageHref());
+		if (!url || url.username || url.password || isHiddenSite(url.href)) return;
+		let popup;
+		try {
+			popup = window.open("about:blank", "_blank");
+			if (popup) popup.opener = null;
+		} catch {}
+		const nonce = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
+		stageBridgePayload(nonce, { kind: "reader-article", url: url.href, title: pageDocumentTitle().slice(0, 512), note })
+			.then(() => {
+				const destination = `${START_PAGE_ORIGIN}/#reader-article=${nonce}`;
+				if (popup && !popup.closed) popup.location.replace(destination);
+				else location.assign(destination);
+			})
+			.catch((error) => {
+				popup?.close();
+				showToast("Couldn’t open the article in Reader.");
+				console.error(error);
+			});
+	}
+
+	async function resumeSidebarArticleInReader() {
+		const nonce = /^#reader-article=([a-f0-9]{32})$/.exec(location.hash)?.[1];
+		if (!nonce) return;
+		history.replaceState(history.state, "", location.pathname + location.search);
+		const staged = await readBridgePayload(nonce);
+		if (staged?.kind !== "reader-article") return;
+		await clearBridgePayload(nonce);
+		const url = readerURL(staged.url);
+		if (!url || url.username || url.password || isHiddenSite(url.href) || Date.now() - staged.ts > 60000) return;
+		const opened = openAppStory({ url: url.href, title: staged.title });
+		if (!sameURL(pageHref(), url.href)) return;
+		if (staged.note && typeof staged.note.exact === "string") {
+			const exact = staged.note.exact.slice(0, 4000);
+			await openNoteComposer({ ...staged.note, exact,
+				anchorable: normalizeSearchText(exact).text.length >= QUOTE_MIN_CHARS, left: window.innerWidth / 2 - 160, top: 80 });
+		} else {
+			revealAppDiscussion();
+		}
+		await opened;
 	}
 
 	async function sweepBridgePayloads() {
@@ -16320,6 +16434,7 @@ html[data-backchannel-installed] .chin {
 	</div>
 	${readerRow && !isWriting ? `<button class="browse-more app-head-icon" type="button" aria-label="More" aria-haspopup="menu"${options.readerRow ? ' aria-expanded="false"' : ""}>${MORE_ICON}</button>` : ""}
 	`;
+		registerSidebarSaveControls(row);
 
 		const more = row.querySelector(".browse-more");
 
@@ -16555,21 +16670,7 @@ html[data-backchannel-installed] .chin {
 			return;
 		}
 
-		const [saved, noted, collected] = await Promise.all([
-			loadSavedItems(),
-			loadNotedIndex(),
-			loadCollected(),
-		]);
-		const state = collectionTabState(saved, noted, collected);
-		const badge = tab.querySelector(".rail-badge");
-
-		if (badge) {
-			badge.textContent = state.fresh ? compactCount(state.fresh) : "";
-		}
-
-		notedHasItems = state.has;
-		tab.classList.toggle("has-fresh", state.fresh > 0);
-		tab.title = state.fresh ? pluralize(state.fresh, "page") + " with something new" : "";
+		notedHasItems = true;
 
 		paintBrowseTab(
 			tab,
@@ -16579,26 +16680,6 @@ html[data-backchannel-installed] .chin {
 			"has-collection",
 		);
 
-		if (!notedHasItems && browseTab === "collection" && sidebarUI) {
-			if (frontPageAvailable) {
-				renderBrowseView(sidebarUI, { tab: "front" }).catch(console.error);
-			} else if (queueHasItems) {
-				renderBrowseView(sidebarUI, { tab: "queue" }).catch(console.error);
-			} else {
-				setBrowseMode(sidebarUI, false);
-			}
-		}
-	}
-
-	function documentKindsLabel(doc) {
-		return [
-			[doc.discussions.filter((entry) => entry.source).length, "discussion"],
-			[doc.quotes.length, "quote"],
-			[doc.notes.length, "note"],
-		]
-			.filter(([count]) => count > 0)
-			.map(([count, word]) => pluralize(count, word))
-			.join(" · ");
 	}
 
 	function documentStory(doc) {
@@ -16619,75 +16700,6 @@ html[data-backchannel-installed] .chin {
 			context: "",
 			descendants: 0,
 		};
-	}
-
-	function documentCard(doc, wall) {
-		const card = document.createElement("div");
-		const parts = [escapeHTML(doc.site), escapeHTML(documentKindsLabel(doc))];
-
-		card.className = "browse-card";
-		card.classList.toggle("is-fresh", Boolean(doc.fresh));
-
-		if (appState) {
-			card.classList.add("app-row");
-		}
-
-		card.dataset.documentKey = doc.key;
-		card.innerHTML = `
-<div class="browse-card-pic"></div>
-${doc.fresh ? `<span class="browse-card-stamp">NEW</span>` : ""}
-<button class="browse-card-more" type="button" aria-label="Actions for this page" aria-haspopup="menu" aria-expanded="false">${MORE_ICON}</button>
-<div class="browse-card-text">
-<div class="browse-card-title">${doc.url ? `<a class="browse-title-link" href="${escapeHTML(doc.url)}">${escapeHTML(doc.title)}</a>` : escapeHTML(doc.title)}</div>
-${doc.excerpt ? `<div class="browse-card-note"><span class="browse-quote">${escapeHTML(doc.excerpt)}</span></div>` : ""}
-${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(doc.found, "new comment"))}</div>` : ""}
-<div class="browse-card-meta"><span>${parts.filter(Boolean).join(", ")}</span></div>
-</div>`;
-
-		const open = card.querySelector(".browse-title-link");
-
-		if (open) {
-			open.onclick = (event) => openStoryFromRow(documentStory(doc), event);
-		}
-
-		const more = card.querySelector(".browse-card-more");
-
-		more.onclick = (event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			openCardMenu(more, doc, { keyboard: event.detail === 0 });
-		};
-
-		if (open) {
-			card.classList.add("is-openable");
-		}
-
-		if (open && !appState) {
-			const fromCard = (event) => !event.defaultPrevented && !event.target.closest?.(".browse-title-link, .browse-card-more");
-
-			card.onclick = (event) => {
-				if (!fromCard(event)) {
-					return;
-				}
-
-				if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-					openInNewTab(doc.url);
-					return;
-				}
-
-				openStoryFromRow(documentStory(doc), event);
-			};
-			card.onauxclick = (event) => {
-				if (event.button === 1 && fromCard(event)) {
-					openInNewTab(doc.url);
-				}
-			};
-		}
-
-		wall.appendChild(card);
-		applyCardLook(card, doc.look).catch(console.error);
-
-		return card;
 	}
 
 	let cardMenuOpener = null;
@@ -17424,7 +17436,7 @@ ${doc.fresh && doc.found ? `<div class="browse-card-new">${escapeHTML(pluralize(
 	}
 
 	async function loadOpenCollectedDocument() {
-		openCollectedDocument = await findCollectedDocument(collectedPageKeys());
+		openCollectedDocument = appState ? await findCollectedDocument(collectedPageKeys()) : null;
 
 		return openCollectedDocument;
 	}
@@ -17518,7 +17530,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 
 		collectionTagContext = { ui, stories, seenTimes, counted };
 
-		if (!body) {
+		if (!body || !appState) {
 			return;
 		}
 
@@ -18459,43 +18471,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		backfillCardLooks(visible).catch(console.error);
 	}
 
-	async function renderCollectionView(ui, list, isCurrent = () => true) {
-		const documents = await loadCollectionDocuments();
-
-		if (!isCurrent()) {
-			return;
-		}
-
-		list.replaceChildren();
-
-		if (!documents.length) {
-			const empty = document.createElement("div");
-
-			empty.className = "browse-empty";
-			empty.textContent = "Nothing saved yet. Save a page, a discussion or a comment, or write a note on any page, and it will be kept here.";
-			list.appendChild(empty);
-			return;
-		}
-
-		const wall = document.createElement("div");
-
-		wall.className = "bc-wall";
-
-		for (const doc of documents) {
-			documentCard(doc, wall);
-		}
-
-		list.appendChild(wall);
-
-		if (appState) {
-			decorateAppRows(wall);
-		}
-
-		backfillCardLooks(documents).catch(console.error);
-
-		refreshSaveControls().catch(console.error);
-	}
-
 	async function refreshQueueCount(root) {
 		if (appState) {
 			paintAppCounts().catch(console.error);
@@ -18507,15 +18482,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			return;
 		}
 
-		const entries = await loadQueue();
-		const unread = unreadQueueCount(entries);
-		const badge = tab.querySelector(".rail-badge");
-
-		if (badge) {
-			badge.textContent = unread ? compactCount(unread) : "";
-		}
-
-		queueHasItems = entries.length > 0;
+		queueHasItems = true;
 
 		paintBrowseTab(
 			tab,
@@ -18527,16 +18494,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		await refreshNotedCount(root);
 		await refreshBrowseAffordances(root);
-
-		if (!queueHasItems && browseTab === "queue" && sidebarUI) {
-			if (frontPageAvailable) {
-				renderBrowseView(sidebarUI, { tab: "front" }).catch(console.error);
-			} else if (notedHasItems) {
-				renderBrowseView(sidebarUI, { tab: "collection" }).catch(console.error);
-			} else {
-				setBrowseMode(sidebarUI, false);
-			}
-		}
 	}
 
 	let browsePage = 1;
@@ -18582,7 +18539,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 	async function refreshNextUp(root) {
 		const strip = root?.querySelector?.("#next-up");
 
-		if (!strip) {
+		if (!strip || !appState) {
 			return;
 		}
 
@@ -18648,6 +18605,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		body.appendChild(message);
 		if (!appState) {
+			body.appendChild(sidebarReaderArticleLink("Write in Reader"));
 			ui.syncStatus = { ...(ui.syncStatus || {}), onSync: (releaseRead) => syncDiscussions(ui, [], releaseRead) };
 			ui.syncAgeDismissed = true;
 			paintSidebarSyncButton(ui);
@@ -18669,6 +18627,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 			line.className = "no-discussion-keep";
 			line.innerHTML = keep;
+			registerSidebarSaveControls(line);
 			line.firstElementChild.title = "Save this page to your Collection and hear when a discussion starts";
 			body.appendChild(line);
 			refreshSaveControls().catch(console.error);
@@ -19215,10 +19174,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		const toggle = shadow.querySelector("#browse-home-search-toggle");
 
 		if (show) state.searchScroll = list.scrollTop;
-		else {
-			state.recentSearches = normalizeRecentSearches([input.value, ...(state.recentSearches || [])]);
-			rememberSearchQuery(input.value).catch(console.error);
-		}
 		state.searchOpen = show;
 		state.searchSequence = (state.searchSequence || 0) + 1;
 		shadow.querySelector("#browse-view").classList.toggle("is-searching", show);
@@ -19265,9 +19220,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 			entries.push({ group: "Articles", title: story.title, note: story.site || "", url: story.url, keys: `${story.title} ${story.site || ""}`, run: () => openStoryFromRow(story, new MouseEvent("click")) });
 		}
-		for (const item of state.searchListIndex || []) {
-			entries.push({ ...item, run: () => openStoryFromRow(item.story, new MouseEvent("click")) });
-		}
 		entries.push(...settingsSearchEntries(shadow, openAppSettingsSection));
 		return entries;
 	}
@@ -19276,10 +19228,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		if (!ui.browseHome.searchOpen) return;
 		const input = ui.shadow.querySelector("#browse-home-search");
 		renderSearchResults(ui.shadow.querySelector("#browse-home-search-results"), browseSearchEntries(ui), input.value, (entry) => {
-			if (entry.recentQuery) { input.value = entry.recentQuery; renderBrowseSearch(ui); input.focus({ preventScroll: true }); return; }
 			setBrowseSearchOpen(ui, false);
 			setTimeout(() => entry.run(), 0);
-		}, { recent: ui.browseHome.recentSearches, onClear: () => { ui.browseHome.recentSearches = []; renderBrowseSearch(ui); input.focus({ preventScroll: true }); clearRecentSearches().catch(console.error); } });
+		});
 	}
 
 	async function openBrowseSearch(ui) {
@@ -19291,10 +19242,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		}
 
 		state.searchRows = state.feedRows?.length ? state.feedRows : state.searchRows || [];
-		state.recentSearches = [];
 		setBrowseSearchOpen(ui, true);
 		const sequence = state.searchSequence;
-		const [queue, documents, hidden, settings, front, recent] = await Promise.all([loadQueue(), loadCollectionDocuments(), loadHiddenStoryKeys(), loadSettings(), state.feedRows?.length ? null : loadFrontPages(), loadRecentSearches()]);
+		const [hidden, settings, front] = await Promise.all([loadHiddenStoryKeys(), loadSettings(), state.feedRows?.length ? null : loadFrontPages()]);
 
 		if (!state.searchOpen || state.searchSequence !== sequence || ui !== sidebarUI) return;
 
@@ -19303,8 +19253,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		state.sourceIds = [...new Set(feeds.map((feed) => feed.source))];
 		state.topicIds = followedFrontPageInterests(settings);
 		state.searchRows = (front?.rows || state.feedRows || []).filter((row) => !isStoryHidden(row.story, hidden));
-		state.searchListIndex = searchListIndex(queue, documents);
-		state.recentSearches = recent;
 		renderBrowseSearch(ui);
 	}
 
@@ -19357,7 +19305,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		toggle.onclick = () => state.searchOpen ? setBrowseSearchOpen(ui, false) : openBrowseSearch(ui).catch(console.error);
 		search.oninput = () => renderBrowseSearch(ui);
-		search.addEventListener("keydown", (event) => { if (event.key === "Enter") rememberSearchQuery(search.value).catch(console.error); });
 		shadow.querySelector("#browse-home-search-close").onclick = () => setBrowseSearchOpen(ui, false);
 		shadow.querySelector("#browse-home-search-page").addEventListener("keydown", (event) => {
 			if (event.key !== "Escape") return;
@@ -19578,10 +19525,10 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		if (browseTab === "queue") {
 			setBrowseNote(ui, QUEUE_NOTE);
-			await renderQueueView(ui, list, isCurrent);
+			renderReaderPrivateLink(list, "Open the reading queue in Reader", "queue");
 		} else if (browseTab === "collection") {
 			setBrowseNote(ui, COLLECTION_NOTE);
-			await renderCollectionView(ui, list, isCurrent);
+			renderReaderPrivateLink(list, "Open Collection in Reader", "collection");
 		} else {
 			outcome = await renderFrontPageView(ui, list, options, isCurrent);
 		}
@@ -19592,6 +19539,16 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		}
 		scheduleFrontPageRefresh();
 		return outcome;
+	}
+
+	function renderReaderPrivateLink(list, label, hash) {
+		const link = document.createElement("a");
+		link.className = "settings-button";
+		link.href = `${START_PAGE_ORIGIN}/#${hash}`;
+		link.target = "_blank";
+		link.rel = "noopener noreferrer";
+		link.textContent = label;
+		list.replaceChildren(link);
 	}
 
 	async function revealSidebar() {
@@ -24214,8 +24171,9 @@ ${
           <li>Your settings, queue, Collection, votes, notes, hidden sites and the comments you have seen are saved in your userscript manager on this device.</li>
           <li>If you set up Account sync, Backchannel uploads an encrypted copy of your settings, reading queue, saved items and notes to Cloudflare. The service stores your passkey's public credential, session records, and browser and platform labels for linked devices. Backchannel stores your verified recovery email, uses it to label new passkeys, and sends verification and recovery codes through Cloudflare. Your recovery key stays on your devices.</li>
           <li>To find discussions, it asks each source you have turned on about the page you are on. Most are told its address; Lobsters and Mastodon's search are told only its domain. A link you open in the reader from Mastodon's front page is looked up on mastodon.social by its address. A source you have turned off is asked nothing.</li>
-          <li>It checks the pages in your Collection for new discussion, each at most once an hour, by sending their addresses to Hacker News, Bluesky's link index and, when Reddit answers through its archive, that archive. A page with new discussion is then looked up like the page you are on. Remove a page from Collection to stop checking it.</li>
-          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics Worker uses public publisher material for the brief. If a brief is empty, Reader may request previews directly from the linked publishers. Imported bookmarks marked for preview on open use saved metadata until you open the bookmark. Reader can load photos from the publishers cited in the article. Topics based only on your own links are assembled on your device. Reader can also look up a topic subject on Wikipedia and the image credits on Wikimedia Commons. Reader loads these images without a referrer. If you send a topic report while signed in, Backchannel stores the link, the displayed topic, any suggestion, and a hashed account identifier for internal review. The identifier keeps the same account from counting twice for a link.</li>
+          <li>Backchannel checks saved Collection links for new discussion through Hacker News, Bluesky's link index and the Reddit archive, when those sources are on. Background checks omit fragments, tracking parameters and save dates. Imported bookmarks, previously unwatched links and links with other query parameters are looked up when you open them. Remove a page from Collection to stop checking it.</li>
+          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics Worker uses public publisher material for the brief. If a brief is empty, Reader may request previews directly from the linked publishers. Imported bookmarks marked for preview on open use saved metadata until you open the bookmark. Topics based only on your own links are assembled on your device. Reader can look up a topic subject on Wikipedia and image credits on Wikimedia Commons. Reader loads photos from the hosts named by cited publishers and from Wikimedia without a referrer. Those hosts can see the request and any cookies sent by your browser.</li>
+          <li>When you submit a topic report, Reader gets a five-minute reporting credential from Backchannel Accounts. Older Reader and Account versions use your session for this request. Backchannel stores the link without its query or fragment, the displayed topic, your suggestion, and a hashed account identifier for internal review. Reports expire after 90 days and are queued for removal when you delete your account.</li>
           <li><strong>Reddit</strong>, <strong>Wikipedia</strong> and <strong>Hacker News</strong> can tell who you are. Signed in to one, its requests can arrive as your account. Signed out, Reddit and Wikipedia still send a device identifier.</li>
           <li>Voting and replying happen in a window on that source's own site, using the session you already have there.</li>
           <li>An article opened in the reader loads from the site that published it, with no referrer. If the page does not respond inside that frame, the script fetches it once, without cookies, to see whether it can be shown there and, if not, to show its text.</li>
@@ -24270,7 +24228,7 @@ ${
 <input id="setting-keep-sidebar-size" data-setting="keepSidebarSize" type="checkbox">
 <span>Keep the Sidebar the same size when a page is zoomed</span>
 </label>
-<div id="settings-blocked-section">
+${reader ? `<div id="settings-blocked-section">
 <div class="sources-subhead">Disabled sites</div>
 <div class="sources-subhint">Sites and pages where you've turned Backchannel off.</div>
 <div class="manage-table">
@@ -24278,7 +24236,7 @@ ${
 <div id="settings-blocked-list" class="manage-table-body" role="listbox" aria-label="Disabled sites" tabindex="0"></div>
 <div class="manage-table-tools"><button type="button" class="manage-table-add" aria-label="Disable Backchannel on a site or page" title="Disable Backchannel on a site or page">+</button><button type="button" class="manage-table-remove" aria-label="Turn Backchannel back on for the chosen site" title="Turn Backchannel back on for the chosen site" disabled>&minus;</button></div>
 </div>
-</div>
+</div>` : `<a class="settings-button" href="${START_PAGE_ORIGIN}/#sidebar-settings" target="_blank" rel="noopener noreferrer">Manage disabled sites in Reader</a>`}
 </div>
 
 <div class="settings-group" data-app-section="general">
@@ -24390,7 +24348,7 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 </div>
 </div>
 
-<div data-app-section="filters" id="settings-topic-filters">
+${reader ? `<div data-app-section="filters" id="settings-topic-filters">
 <div id="settings-topic-hint" class="settings-section-hint">Choose which topics and links to hide from Front Pages.</div>
 <h3 class="settings-subheading">Hidden topics</h3>
 <div id="settings-topic-field">
@@ -24411,7 +24369,7 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 <div class="manage-table-tools"><button type="button" class="manage-table-add" aria-label="Hide a link" title="Hide a link">+</button><button type="button" class="manage-table-remove" aria-label="Show the chosen link again" title="Show the chosen link again" disabled>&minus;</button></div>
 </div>
 </div>
-</div>
+</div>` : `<div data-app-section="filters"><a class="settings-button" href="${START_PAGE_ORIGIN}/#filters" target="_blank" rel="noopener noreferrer">Manage filters in Reader</a></div>`}
 
 <div data-app-section="shortcuts">
 <label class="settings-option settings-sidebar-head"><span class="settings-sidebar-title">Shortcuts</span><input id="setting-shortcuts-enabled" class="settings-switch" role="switch" type="checkbox" aria-label="Keyboard shortcuts" aria-describedby="settings-shortcuts-hint" checked></label>
@@ -24428,6 +24386,7 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 
 	function wireSettingsTopicFilters(shadow) {
 		const panel = shadow.getElementById("settings-topic-filters");
+		if (!panel) return { sync() {}, async refresh() {} };
 		const search = shadow.getElementById("settings-topic-search");
 		const tags = shadow.getElementById("settings-topic-list");
 		const results = shadow.getElementById("settings-topic-results");
@@ -24863,7 +24822,9 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 		const notesCount = shadow.querySelector("#settings-notes-count");
 		const bookmarksExport = shadow.querySelector("#settings-bookmarks-export");
 
-		if (bookmarksExport) bookmarksExport.onclick = () => exportBookmarks().catch(console.error);
+		if (bookmarksExport) bookmarksExport.onclick = (event) => {
+			if (event.isTrusted && appState) exportBookmarks().catch(console.error);
+		};
 
 		const refreshNotesCount = async () => {
 			if (!notesCount) {
@@ -24908,6 +24869,7 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 
 		if (notesExport) {
 			notesExport.onclick = (event) => {
+				if (!event.isTrusted || !appState) return;
 				event.preventDefault();
 				event.stopPropagation();
 
@@ -27487,7 +27449,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		shadow.addEventListener("click", (event) => {
 			const button = event.target?.closest?.("[data-item-action-id]");
 
-			if (button) {
+			if (button && (appMode || event.isTrusted)) {
 				event.preventDefault();
 				submitItemAction(button).catch(console.error);
 			}
@@ -27606,6 +27568,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 `;
 		const storyElement = wrapper.firstElementChild;
 		storyElement.dataset.storyId = storyID;
+		registerSidebarSaveControls(storyElement);
 
 		wrapLooseCommentText(storyElement.querySelector(".story-text"));
 
@@ -27896,6 +27859,14 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 	}
 
 	function mountComposeBox(ui, stories, settings, before, kept = null, { anticipateReplies = false } = {}) {
+		if (!appState) {
+			if (settings.notepad || stories.some((story) => getSource(story.source)?.capabilities.reply)) {
+				const link = sidebarReaderArticleLink("Write in Reader");
+				link.className = "settings-button";
+				ui.body.insertBefore(link, before);
+			}
+			return null;
+		}
 		const bar = ui.shadow.getElementById("app-discussion-compose");
 		if (kept) {
 			if (!bar) ui.body.insertBefore(kept._hnewhereDock.home(), before);
@@ -27937,6 +27908,20 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		syncComposeBox();
 		if (!bar) box._hnewhereDock = wireComposeDock(ui, box, composeDockLabel(canComment));
 		return box;
+	}
+
+	function sidebarReaderArticleLink(label) {
+		const link = document.createElement("a");
+		link.href = START_PAGE_ORIGIN + "/";
+		link.target = "_blank";
+		link.rel = "noopener noreferrer";
+		link.textContent = label;
+		link.onclick = (event) => {
+			if (!event.isTrusted || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+			event.preventDefault();
+			openSidebarArticleInReader();
+		};
+		return link;
 	}
 
 	function wireComposeBox(box, { compact, storyID, source, draftKey, commentTargets, noteTargets }) {
@@ -28286,7 +28271,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		composer,
 		{ source = "hn", storyID, parentId = null, draftKey = composerDraftKey({ storyID, parentId }), onPosted, onRestored, refresh } = {},
 	) {
-		if (!composer) {
+		if (!composer || !appState) {
 			return null;
 		}
 
@@ -29039,9 +29024,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				capabilities.reply
 					? `|
 
-      <a class="reply-link" href="#">
-      reply
-		</a>`
+	      ${appState ? `<a class="reply-link" href="#">reply</a>` : permalink ? `<a href="${escapeHTML(permalink)}" target="_blank" rel="noopener noreferrer">reply at source</a>` : ""}`
 					: ""
 			}
 
@@ -29066,7 +29049,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
         		${sanitizeHTML(comment.bodyHTML, { images: commentImagesPreference }) || ""}
        	</div>
        	${
-					capabilities.reply
+					appState && capabilities.reply
 						? `<div class="reply-composer collapsed">
        	${composerHTML({ label: "reply", placeholder: "Reply…" })}
        	</div>`
@@ -29076,6 +29059,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
       </div>
     `);
 
+		registerSidebarSaveControls(div);
 		if (activeCommentFilter?.type === "discussion" && !activeCommentFilter.keys.has(discussion.key) && !container.closest(".notepad-body")) {
 			div.classList.add("comment-filter-hidden");
 		}
@@ -29788,7 +29772,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 		await paintCollectionTag(ui, stories, seenTimes, { counted: false });
 
-		const notes = settings.notepad ? await loadNotes() : [];
+		const notes = appState && settings.notepad ? await loadNotes() : [];
 		const notesDiscussion = notesCollective(notes, pageAddress());
 
 		if (settings.notepad && notes.length) {
@@ -30299,6 +30283,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 }${stories.length > 1 && pageSave ? pageSave : ""}</div>
 `;
 
+		registerSidebarSaveControls(wrapper);
 		const disclosure = wrapper.querySelector(".page-header-disclosure");
 
 		if (!disclosure) {
@@ -42822,7 +42807,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		diagnosticNextSend.set(key, now + 60_000);
 		const elapsed = finishedAt - startedAt;
 		const duration = diagnosticDurationBuckets.find((limit) => elapsed <= limit) ?? diagnosticDurationBuckets.at(-1);
-		const version = /^\d{1,3}\.\d{1,3}\.\d{1,3}(?:-(?:alpha|beta|rc)(?:\.\d{1,2})?)?$/.test(SCRIPT_VERSION) ? SCRIPT_VERSION : "unknown";
+		const version = /^\d{1,3}(?:\.\d{1,3}){2,3}(?:-(?:alpha|beta|rc)(?:\.\d{1,2})?)?$/.test(SCRIPT_VERSION) ? SCRIPT_VERSION : "unknown";
 		await accountRequest("/diagnostics", { method: "POST", body: { operation, source, outcome, duration, version } }).catch(() => {});
 	}
 
@@ -42912,6 +42897,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	async function accountAuthenticate(mode, details, prepared) {
 		const create = mode === "register" || mode === "recover";
 		const challenge = prepared ?? await accountRequest("/" + mode + "/options", { method: "POST" });
+		if (challenge.keyProofVersion === 2) await requireAccountSigningSupport();
 		if (create) {
 			if (!challenge.attestation) {
 				const { body } = await accountPasskeyProof(challenge, true, { unlock: true });
@@ -42933,27 +42919,36 @@ ${SETTINGS_MODAL_PHONE_CSS}
 			const account = new TextDecoder().decode(accountUnbase64(challenge.options.user.id));
 			const recoveryKey = mode === "register" ? accountRecoveryKey() : details?.recoveryKey;
 			const envelope = await accountPasskeyEnvelope(account, passkey, { recoveryKey });
-			const syncKeyVerifier = await accountSyncKeyVerifier(recoveryKey);
+			const keyProof = challenge.keyProofVersion === 2
+				? await accountPublicKeyProof(recoveryKey, mode === "register" ? "backchannel-key-register" : "backchannel-key-replace", challenge.ceremony)
+				: { syncKeyVerifier: await accountSyncKeyVerifier(recoveryKey) };
 			const result = await accountRequest("/" + mode + "/verify", {
-				method: "POST", body: { ...challenge.attestation, assertion, envelope, syncKeyVerifier },
+				method: "POST", body: { ...challenge.attestation, assertion, envelope, ...keyProof },
 			});
 			return mode === "register" ? { signup: result, recoveryKey } : { signed: result, recoveryKey };
 		}
 
 		const { body, passkey } = await accountPasskeyProof(challenge, false, { unlock: true });
 		if (!passkey) throw new Error("passkey-sync-required");
+		const supportsSigning = await accountSigningSupported();
 		let proof;
 		try {
-			proof = await accountRequest("/login/verify", { method: "POST", body: { ...body, reportUnknownPasskey: true } });
+			proof = await accountRequest("/login/verify", {
+				method: "POST", body: { ...body, reportUnknownPasskey: true, ...(supportsSigning && { keyProofVersion: 2 }) },
+			});
 		} catch (error) {
 			if (error.message === "unknown-passkey") signalRemovedAccountPasskey(body.credential.id);
 			throw error;
 		}
-		const { account, unlock, envelope } = proof ?? {};
+		const { account, unlock, envelope, keyProofVersion } = proof ?? {};
 		if (typeof account !== "string" || !validAccountRecoveryKey(unlock)) throw new Error("passkey-sync-unavailable");
+		if (keyProofVersion === 2 && !supportsSigning) throw new Error("account-signing-unsupported");
 		const recoveryKey = await accountPasskeyEnvelope(account, passkey, { envelope });
-		const syncKeyVerifier = await accountSyncKeyVerifier(recoveryKey);
-		const signed = await accountRequest("/login/complete", { method: "POST", body: { unlock, syncKeyVerifier } });
+		const keyProof = keyProofVersion === 2
+			? { syncKeySignature: await accountSignProof(await accountSigningKey(recoveryKey), "backchannel-account-unlock", unlock) }
+			: { syncKeyVerifier: await accountSyncKeyVerifier(recoveryKey) };
+		if (keyProofVersion === 1 && supportsSigning) Object.assign(keyProof, await accountPublicKeyProof(recoveryKey, "backchannel-key-upgrade", unlock));
+		const signed = await accountRequest("/login/complete", { method: "POST", body: { unlock, ...keyProof } });
 		return { signed, recoveryKey };
 	}
 
@@ -42977,14 +42972,52 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		return accountBase64(new Uint8Array(proof));
 	}
 
+	async function accountSigningKey(recoveryKey, extractable = false) {
+		if (!validAccountRecoveryKey(recoveryKey)) throw new Error("invalid-recovery-key");
+		const seed = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("Backchannel account signing key v2:" + recoveryKey));
+		const pkcs8 = new Uint8Array(48);
+		pkcs8.set([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
+		pkcs8.set(new Uint8Array(seed), 16);
+		return crypto.subtle.importKey("pkcs8", pkcs8, "Ed25519", extractable, ["sign"]);
+	}
+
+	async function accountSignProof(key, purpose, ...fields) {
+		const message = new TextEncoder().encode(JSON.stringify([purpose, 2, ...fields]));
+		return accountBase64(new Uint8Array(await crypto.subtle.sign("Ed25519", key, message)));
+	}
+
+	async function accountPublicKeyProof(recoveryKey, purpose, challenge) {
+		const key = await accountSigningKey(recoveryKey, true);
+		const { x: syncKeyPublic } = await crypto.subtle.exportKey("jwk", key);
+		const syncKeySignature = await accountSignProof(key, purpose, challenge, syncKeyPublic);
+		return { syncKeyPublic, syncKeySignature };
+	}
+
+	let accountSigningSupport;
+
+	function accountSigningSupported() {
+		accountSigningSupport ??= accountPublicKeyProof("A".repeat(43), "backchannel-signing-check", "").then(
+			({ syncKeyPublic, syncKeySignature }) => validAccountRecoveryKey(syncKeyPublic) && syncKeySignature.length === 86,
+			() => false,
+		);
+		return accountSigningSupport;
+	}
+
+	async function requireAccountSigningSupport() {
+		if (!await accountSigningSupported()) throw new Error("account-signing-unsupported");
+	}
+
 	async function signAccountSnapshot(state, revision, restoreRevision, ciphertext) {
 		const encoder = new TextEncoder();
-		const [verifier, digest] = await Promise.all([
-			accountSyncKeyVerifier(state.recoveryKey),
-			crypto.subtle.digest("SHA-256", encoder.encode(state.token)),
-		]);
-		const key = await crypto.subtle.importKey("raw", accountUnbase64(verifier), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+		const digest = await crypto.subtle.digest("SHA-256", encoder.encode(state.token));
 		const tokenHash = accountBase64(new Uint8Array(digest));
+		if (state.keyProofVersion === 2) {
+			await requireAccountSigningSupport();
+			const key = await accountSigningKey(state.recoveryKey);
+			return accountSignProof(key, "backchannel-snapshot-write", state.account, tokenHash, revision, restoreRevision, ciphertext);
+		}
+		const verifier = await accountSyncKeyVerifier(state.recoveryKey);
+		const key = await crypto.subtle.importKey("raw", accountUnbase64(verifier), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 		const message = encoder.encode(JSON.stringify(["backchannel-snapshot-write", 1, state.account, tokenHash, revision, restoreRevision, ciphertext]));
 		return accountBase64(new Uint8Array(await crypto.subtle.sign("HMAC", key, message)));
 	}
@@ -43119,11 +43152,16 @@ ${SETTINGS_MODAL_PHONE_CSS}
 				let revision = snapshot.revision;
 				if (restore || !revision || !accountSnapshotsEqual(remote, document)) {
 					const ciphertext = await accountSeal(document, state, revision + 1);
-					const syncProof = await signAccountSnapshot(state, revision, restoreRevision, ciphertext);
-					await lease.check();
+					const write = async () => {
+						const syncProof = await signAccountSnapshot(state, revision, restoreRevision, ciphertext);
+						await lease.check();
+						return accountRequest("/snapshot", { method: "PUT", token: state.token, body: { ciphertext }, revision, syncProof, restoreRevision });
+					};
 					try {
-						const written = await accountRequest("/snapshot", {
-							method: "PUT", token: state.token, body: { ciphertext }, revision, syncProof, restoreRevision,
+						const written = await write().catch((error) => {
+							if (state.keyProofVersion === 2 || error.message !== "snapshot-proof-upgrade-required") throw error;
+							state.keyProofVersion = 2;
+							return write();
 						});
 						if (written?.revision !== revision + 1) throw new Error("invalid-snapshot");
 						revision = written.revision;
@@ -43380,6 +43418,7 @@ ${accountBackButton("account-manage-back")}
 <section id="account-devices-section" class="account-section" hidden>
 <h3 class="account-section-heading">Linked devices</h3>
 <ul id="account-device-list" class="account-device-list"></ul>
+<div id="account-revoke-other-sessions-row" class="account-actions" hidden><button type="button" id="account-revoke-other-sessions" class="settings-button" aria-describedby="account-status-devices">Sign out other sessions</button></div>
 <div id="account-status-devices"></div>
 </section>
 <section class="account-section" id="account-delete-section">
@@ -43416,6 +43455,7 @@ ${accountBackButton("account-manage-back")}
 			"incorrect-recovery-key": "That recovery key is incorrect. Check the key and try again.",
 			"passkey-sync-required": "This passkey provider can’t unlock sync. Use a passkey provider that supports encrypted sync.",
 			"passkey-sync-unavailable": "This passkey couldn’t unlock sync. Try again with the passkey you set up for Backchannel.",
+			"account-signing-unsupported": "Update your browser to use this Backchannel account.",
 			"retry-sign-in": "Sign-in could not finish. Try again.",
 			"signup-expired": "This sign-up expired. Verify your email to start again.",
 			"recovery-save-blocked": "Allow pop-ups to save your recovery key.",
@@ -43560,6 +43600,8 @@ ${accountBackButton("account-manage-back")}
 		let accountLoaded = false;
 		let available = false;
 		let emailAvailable = false;
+		let emailContinuation = false;
+		let deviceStepUp = false;
 		let busy = false;
 		let accountAvailabilityPending = false;
 		let expired = false;
@@ -43674,11 +43716,29 @@ ${accountBackButton("account-manage-back")}
 			accountLoaded = true;
 		}
 
+		async function revokeAccountSessions(target) {
+			const token = state.token;
+			let body;
+			if (deviceStepUp) {
+				const { ceremony, options } = await accountRequest("/devices/revoke/options", { method: "POST", token, body: { target } });
+				({ body } = await accountPasskeyProof({ ceremony, options: { ...options, allowCredentials: [] } }, false, { mediation: "required" }));
+			}
+			await accountRequest("/devices/" + encodeURIComponent(target), { method: "DELETE", token, body });
+			await refreshProfile(state, true);
+			return target === "others" ? "Other sessions signed out." : "Device signed out.";
+		}
+
 		function paintDevices(signedIn) {
 			const devices = profile?.account === state?.account ? profile?.devices : null;
 			find("devices-section").hidden = !signedIn || !Array.isArray(devices);
 			const list = find("device-list");
 			list.replaceChildren();
+			const revoke = find("revoke-other-sessions");
+			find("revoke-other-sessions-row").hidden = !deviceStepUp;
+			revoke.disabled = busy || !available;
+			revoke.onclick = (event) => {
+				if (event.isTrusted) run(() => revokeAccountSessions("others"), "Signing out other sessions…", "device:others");
+			};
 			if (!signedIn || !Array.isArray(devices)) return null;
 			let anchor = null;
 			for (const device of devices) {
@@ -43706,11 +43766,7 @@ ${accountBackButton("account-manage-back")}
 					disconnect.disabled = busy || !available;
 					disconnect.onclick = (event) => {
 						if (!event.isTrusted) return;
-						run(async () => {
-							await accountRequest("/devices/" + encodeURIComponent(device.id), { method: "DELETE", token: state.token });
-							await refreshProfile(state, true);
-							return "Device signed out.";
-						}, "Signing out device…", "device:" + device.id);
+						run(() => revokeAccountSessions(device.id), "Signing out device…", "device:" + device.id);
 					};
 					row.append(disconnect);
 				}
@@ -44096,7 +44152,7 @@ ${accountBackButton("account-manage-back")}
 			try {
 				sent = mode === "email"
 					? await confirmEmailChange(prepared, body)
-					: await accountRequest("/email/register/start", { method: "POST", body });
+					: await accountRequest("/email/register/start", { method: "POST", body: { ...body, ...(emailContinuation && { flow: "continue" }) } });
 			} catch (error) {
 				if (error.status === 429 && emailFlow?.address) setResendPolicy(error, emailFlow.remainingResends);
 				throw error;
@@ -44166,9 +44222,13 @@ ${accountBackButton("account-manage-back")}
 			if (passkey?.mode !== "login") return;
 			const recoveryKey = key.value.trim();
 			try {
-				const syncKeyVerifier = await accountSyncKeyVerifier(recoveryKey);
+				const signInCeremony = passkey.challenge.ceremony;
+				if (passkey.challenge.keyProofVersion === 2) await requireAccountSigningSupport();
+				const keyProof = passkey.challenge.keyProofVersion === 2
+					? { syncKeySignature: await accountSignProof(await accountSigningKey(recoveryKey), "backchannel-key-recovery", signInCeremony) }
+					: { syncKeyVerifier: await accountSyncKeyVerifier(recoveryKey) };
 				const challenge = await accountRequest("/recover/options", {
-					method: "POST", body: { signInCeremony: passkey.challenge.ceremony, syncKeyVerifier },
+					method: "POST", body: { signInCeremony, ...keyProof },
 				});
 				emailFlow.recoveryKey = recoveryKey;
 				emailFlow.recovering = false;
@@ -44617,6 +44677,8 @@ ${accountBackButton("account-manage-back")}
 				const capabilities = await accountRequest("/status").catch(() => null);
 				available = capabilities?.available === true;
 				emailAvailable = capabilities?.emailAvailable === true;
+				emailContinuation = capabilities?.emailContinuation === true;
+				deviceStepUp = capabilities?.deviceStepUp === true;
 				if (!available) return "Account sync is unavailable right now.";
 				const held = await GM.getValue(ACCOUNT_SYNC_KEY, null);
 				if (hasAccountSyncSession(held)) {
@@ -44880,6 +44942,7 @@ ${readingListShareHTML()}
 		loadAppShortcuts(shortcuts).catch(console.error);
 		renderAppDiscussionEmpty();
 		watchNoteSelection(await loadSettings());
+		resumeSidebarArticleInReader().catch(console.error);
 		await refreshAppSources();
 		if (linkedTopic && appState.topicArticleIntent === linkedTopic) {
 			const index = await loadSharedTopicIndex();
@@ -45705,6 +45768,11 @@ ${readingListShareHTML()}
 		const openSettingsHash = () => {
 			if (location.hash === "#privacy") openAppSettingsSection("general", "#settings-privacy");
 			if (location.hash === "#account-sync") openAppSettingsSection("account");
+			if (location.hash === "#collection-settings") openAppSettingsSection("collection");
+			if (location.hash === "#sidebar-settings") openAppSettingsSection("sidebar");
+			if (location.hash === "#filters") openAppSettingsSection("filters");
+			if (location.hash === "#collection") chooseAppView("collection");
+			if (location.hash === "#queue") chooseAppView("queue");
 		};
 		window.addEventListener("hashchange", openSettingsHash);
 		openSettingsHash();
@@ -47610,7 +47678,6 @@ ${readingListShareHTML()}
 
 		appShortcuts = await (started || readAppShortcuts());
 		paintAppShortcutTips();
-		postToFrame({ type: "shortcuts", shortcuts: appShortcuts });
 	}
 
 	function appKeyLabel(key) {
@@ -53436,7 +53503,7 @@ ${frontPageChooserHTML()}
 		const hello = () => {
 			try {
 				article.frame?.contentWindow?.postMessage(
-					{ bc: APP_MESSAGE_VERSION, type: "hello", shortcuts: appShortcuts },
+					{ bc: APP_MESSAGE_VERSION, type: "hello" },
 					"*",
 				);
 			} catch {
@@ -54257,38 +54324,21 @@ ${frontPageChooserHTML()}
 	}
 
 	function onAppFrameHi(article, data) {
-		const url = String(data.url || article.url);
-		const title = String(data.title || "").trim();
-		const before = pageAddress();
+		if (!sameURL(data.url, article.url)) return;
+		const preview = pageLookAssetURL(data.preview);
+		if (preview) noteAppPreview(article.url, preview);
 
-		setAppSubject({ url, canonical: String(data.canonical || ""), title: title || article.title });
-		noteAppPreview(article.url, data.preview);
-
-		if (data.look) {
-			article.look = data.look;
-			rememberLook(article.url, data.look).catch(console.error);
+		const look = safeLook(data.look);
+		if (look) {
+			article.look = look;
+			rememberLook(article.url, look).catch(console.error);
 		}
-
-		if (appState.open && !sameURL(pageAddress(), before)) {
-			appState.open.url = url;
-			refreshAppIdentity(article);
-		}
-	}
-
-	function refreshAppIdentity(article) {
-		if (appState?.article !== article || !appState.open) return;
-		const row = appState.open.row;
-		const refresh = () => appState?.article === article && appState.open?.row === row ? openAppDiscussion(row) : undefined;
-		const pending = usesRedditReadWindow() && redditReadBatch && !redditReadBatch.closing
-			? runRedditReadAction(refresh)
-			: Promise.resolve().then(refresh);
-		pending.catch(console.error);
 	}
 
 	function onAppMessage(event) {
 		const article = appState?.article;
 
-		if (!article?.frame || event.source !== article.frame.contentWindow) {
+		if (!article?.frame || event.source !== article.frame.contentWindow || event.origin !== readerURL(article.url)?.origin) {
 			return;
 		}
 
@@ -54303,15 +54353,10 @@ ${frontPageChooserHTML()}
 		if (data.type === "hi") {
 			const visible = Boolean(data.visible);
 			const changed = !article.reply || article.reply.visible !== visible;
-			const learned = article.origin !== event.origin;
 
 			article.origin = event.origin;
 			article.reply = { visible, image: Boolean(data.image) };
 			article.everReplied = true;
-
-			if (learned) {
-				postToFrame({ type: "shortcuts", shortcuts: appShortcuts });
-			}
 
 			if (visible) {
 				clearInterval(article.helloTimer);
@@ -54322,16 +54367,6 @@ ${frontPageChooserHTML()}
 			}
 
 			tickAppArticle(article);
-			return;
-		}
-
-		if (data.type === "key") {
-			runAppFrameKey(data);
-			return;
-		}
-
-		if (data.type === "open") {
-			openAppURL(String(data.url || ""));
 			return;
 		}
 
@@ -54353,7 +54388,7 @@ ${frontPageChooserHTML()}
 			return;
 		}
 
-		if (data.type === "note") {
+		if (data.type === "note" && article.mode === "frame-agent") {
 			openFrameNote(article, data).catch(console.error);
 			return;
 		}
@@ -54379,26 +54414,27 @@ ${frontPageChooserHTML()}
 		}
 
 		const settings = await loadSettings();
+		if (appState?.article !== article) return;
 
 		if (!settings.annotations) {
 			if (!activeCommentFilter || activeCommentFilter.type === "quote") clearCommentFilter({ animate: false });
 			return;
 		}
 
-		postToFrame({
-			type: "annotate",
-			comments: renderedComments.map(frameCommentPayload),
-			settings,
-		});
+		const comments = renderedComments
+			.filter((rendered) => !rendered.comment?.local && rendered.source !== "notes")
+			.map(frameCommentPayload);
+		if (comments.length) postToFrame({ type: "annotate", comments });
 	}
 
 	async function openFrameNote(article, data) {
+		if (noteComposer) return;
 		const settings = await loadSettings();
-		const exact = String(data.exact || "").replace(/\s+/g, " ").trim();
+		const exact = typeof data.exact === "string" ? data.exact.slice(0, 4000).replace(/\s+/g, " ").trim() : "";
 		const left = Number(data.left);
 		const top = Number(data.top);
 
-		if (!settings.notepad || !settings.noteOnSelection || !exact || !Number.isFinite(left) || !Number.isFinite(top)) {
+		if (noteComposer || appState?.article !== article || !settings.notepad || !settings.noteOnSelection || !exact || !Number.isFinite(left) || !Number.isFinite(top)) {
 			return;
 		}
 
@@ -54409,7 +54445,7 @@ ${frontPageChooserHTML()}
 			prefix: String(data.prefix || "").slice(-NOTE_CONTEXT_CHARS),
 			suffix: String(data.suffix || "").slice(0, NOTE_CONTEXT_CHARS),
 			anchorable: normalizeSearchText(exact).text.length >= QUOTE_MIN_CHARS,
-			page: null,
+			page: data.page,
 			left: box.left + left,
 			top: box.top + top,
 		});
@@ -54419,7 +54455,6 @@ ${frontPageChooserHTML()}
 		return {
 			id: rendered.id,
 			textHTML: rendered.textHTML || "",
-			local: Boolean(rendered.local),
 			author: rendered.author || "",
 			time: rendered.time || 0,
 		};
@@ -54682,7 +54717,7 @@ ${frontPageChooserHTML()}
 		close: closeAppTransients,
 	};
 
-	function appShortcutFor(event, mod, shortcuts = appShortcuts) {
+	function appShortcutFor(event, mod) {
 		if (sidebarUI?.shadow?.querySelector("#reddit-read-modal")) return null;
 		if (appNativeDialogOpen()) return null;
 		const key = appKeyName(event.key);
@@ -54690,7 +54725,7 @@ ${frontPageChooserHTML()}
 
 		return (
 			APP_SHORTCUTS.find((action) =>
-				shortcuts.bindings[action.id].some(
+				appShortcuts.bindings[action.id].some(
 					(binding) =>
 						binding.mod === mod &&
 						binding.key === key &&
@@ -54820,29 +54855,6 @@ ${frontPageChooserHTML()}
 	}
 
 	const APP_FRAME_KEPT_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "PageUp", "PageDown", "Home", "End", "Escape"]);
-
-	function runAppFrameKey(data) {
-		const key = typeof data.key === "string" ? data.key : "";
-
-		if (!appShortcuts.enabled || APP_FRAME_KEPT_KEYS.has(key)) {
-			return;
-		}
-
-		const pressed = {
-			key,
-			metaKey: data.metaKey === true,
-			ctrlKey: data.ctrlKey === true,
-			altKey: data.altKey === true,
-			shiftKey: data.shiftKey === true,
-			repeat: data.repeat === true,
-			preventDefault() {},
-		};
-		const action = appShortcutFor(pressed, true) || (appSurfaceOpen() ? null : appShortcutFor(pressed, false));
-
-		if (action) {
-			runAppShortcut(action, pressed);
-		}
-	}
 
 	function stepAppSelection(step) {
 		if (appState.bulk) return;
@@ -55021,7 +55033,6 @@ ${frontPageChooserHTML()}
 
 	let frameAgentActive = false;
 	let frameGreeted = false;
-	let frameShortcuts = null;
 
 	function postToApp(message) {
 		if (!frameGreeted) {
@@ -55099,10 +55110,6 @@ ${frontPageChooserHTML()}
 		}
 	}
 
-	function takeFrameShortcuts(shortcuts) {
-		frameShortcuts = shortcuts && typeof shortcuts === "object" ? appShortcutsFrom(shortcuts) : null;
-	}
-
 	function isFrameField(element) {
 		if (isAppEditable(element)) {
 			return true;
@@ -55118,42 +55125,8 @@ ${frontPageChooserHTML()}
 		);
 	}
 
-	function forwardFrameKey(event) {
-		if (!frameGreeted || !frameShortcuts?.enabled || event.defaultPrevented || event.isComposing) {
-			return;
-		}
-
-		if (APP_FRAME_KEPT_KEYS.has(event.key) || isFrameField(event.composedPath()[0])) {
-			return;
-		}
-
-		const action = appShortcutFor(event, true, frameShortcuts) || appShortcutFor(event, false, frameShortcuts);
-
-		if (!action || action.id === "sidebar") {
-			return;
-		}
-
-		event.preventDefault();
-		postToApp({
-			type: "key",
-			key: event.key,
-			metaKey: event.metaKey,
-			ctrlKey: event.ctrlKey,
-			altKey: event.altKey,
-			shiftKey: event.shiftKey,
-			repeat: event.repeat,
-		});
-	}
-
-	function forwardFrameKeyLast() {
-		window.removeEventListener("keydown", forwardFrameKey);
-		window.addEventListener("keydown", forwardFrameKey);
-	}
-
 	function installFrameAgent() {
 		frameAgentActive = true;
-		watchPullDown(window, () => postToApp({ type: "collapse" }));
-		watchFrameNoteSelection();
 
 		window.addEventListener("message", (event) => {
 			if (event.source !== window.parent || event.origin !== START_PAGE_ORIGIN) {
@@ -55167,24 +55140,20 @@ ${frontPageChooserHTML()}
 			}
 
 			if (data.type === "hello") {
+				if (!frameGreeted) {
+					watchPullDown(window, () => postToApp({ type: "collapse" }));
+					watchFrameNoteSelection();
+				}
 				frameGreeted = true;
-				takeFrameShortcuts(data.shortcuts);
 				postToApp({
 					type: "hi",
 					url: location.href,
-					canonical: canonicalHint(),
 					preview: document.querySelector('meta[property="og:image"], meta[name="twitter:image"]')?.getAttribute("content") || "",
 					look: pageLook(document),
-					title: pageTitle(),
 					visible: frameVisibility(),
 					image: /^image\//i.test(document.contentType || ""),
 				});
 				watchFrameSize();
-				return;
-			}
-
-			if (data.type === "shortcuts") {
-				takeFrameShortcuts(data.shortcuts);
 				return;
 			}
 
@@ -55214,8 +55183,6 @@ ${frontPageChooserHTML()}
 			},
 			true,
 		);
-
-		window.addEventListener("keydown", forwardFrameKeyLast, true);
 	}
 
 	let frameComments = [];
@@ -55228,7 +55195,6 @@ ${frontPageChooserHTML()}
 		return {
 			id: String(raw?.id || ""),
 			textHTML: String(raw?.textHTML || ""),
-			local: Boolean(raw?.local),
 			author: String(raw?.author || ""),
 			time: Number(raw?.time) || 0,
 			element: null,
@@ -55259,18 +55225,12 @@ ${frontPageChooserHTML()}
 	async function annotateFrame(data) {
 		clearFrameAnnotations();
 
-		const settings = data.settings && typeof data.settings === "object" ? data.settings : {};
-
-		if (!settings.annotations) {
-			return;
-		}
-
 		frameComments = (Array.isArray(data.comments) ? data.comments : []).map(frameComment);
 		activeDocumentSource = detectDocumentSource();
 
 		const index = buildArticleTextIndex();
 		const groups = buildAnnotationGroups(frameComments, index);
-		const controller = createAnnotationOverlay(groups, [], settings);
+		const controller = createAnnotationOverlay(groups, [], {});
 
 		annotationController = controller;
 		postToApp({ type: "annotated", groups: groups.map(serializeAnnotationGroup) });

@@ -575,7 +575,8 @@ const script = `
 
   function readDecision() {
     const decision = { action: action.value };
-    if (selectedReport) decision.reportUrl = selectedReport.url;
+    if (selectedReport?.reportPageId) decision.reportPageId = selectedReport.reportPageId;
+    else if (selectedReport) decision.reportUrl = selectedReport.url;
     if (["move", "remove"].includes(decision.action)) {
       decision.url = selectedReport?.url || linkURL.value.trim();
       if (!httpURL(decision.url)) throw new Error("Enter an HTTP or HTTPS link URL.");
@@ -622,8 +623,8 @@ const script = `
       active.retry = null;
       selectReport(null);
       status("decision-status", decision.action === "dismiss" ? "Report dismissed." : "Decision saved. It will appear after the next refresh.");
-      if (decision.reportUrl) {
-        reports = reports.filter(({ url }) => url !== decision.reportUrl);
+      if (decision.reportPageId || decision.reportUrl) {
+        reports = reports.filter((report) => decision.reportPageId ? report.reportPageId !== decision.reportPageId : report.url !== decision.reportUrl);
         nextReportOffset = 0;
         renderReports();
         status("reports-status", "Loading reports…");
@@ -639,7 +640,7 @@ const script = `
     } finally {
       if (session === active) {
         setBusy(false);
-        if (saved) $(decision.reportUrl ? "reports-heading" : "decision-heading").focus();
+        if (saved) $(decision.reportPageId || decision.reportUrl ? "reports-heading" : "decision-heading").focus();
         else if (document.activeElement === document.body) event.submitter?.focus();
       }
     }
@@ -651,7 +652,7 @@ const script = `
     setBusy(true);
     status("workspace-status", "Publishing topics…");
     try {
-      await request(active, "/internal/refresh", { operator: true, method: "POST" });
+      await request(active, "/internal/publish-topics", { operator: true, method: "POST" });
       if (session !== active) return;
       status("workspace-status", "Topics published.");
       await loadTopics(active);

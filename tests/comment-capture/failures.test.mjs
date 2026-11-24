@@ -204,11 +204,9 @@ test("the bird loader reports completed discussions while slower sources are pen
     });
     assert.deepEqual(art, [208, 208, 208, 208, 208, 208, 108], 'both promotional poses and the speech bubble are available without a fetch');
     assert((await app.page.locator('#comments-content .page-header-title').textContent()).length > 0, "the known article title appears immediately");
-    const composer = app.page.locator('#comments-content .compose-box');
-    assert.equal(await composer.count(), 1, "the real composer appears while discussions load");
-    await composer.locator('.composer-text').fill('A draft while loading');
-    assert(await composer.locator('.compose-send-note').isDisabled(), "note submission stays disabled while loading");
-    assert(await composer.locator('.compose-send-comment').isDisabled(), "comment submission stays disabled while loading");
+    const write = app.page.getByRole('link', { name: 'Write in Reader' });
+    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     const area = await app.page.locator('#comments').boundingBox();
     const skeleton = await loading.boundingBox();
     assert(skeleton.y + skeleton.height >= area.y + area.height - 40, "the loader extends to the bottom of the discussion viewport");
@@ -225,9 +223,8 @@ test("the bird loader reports completed discussions while slower sources are pen
     assert(await waitFor(async () => await loading.count() === 0, 15000), "the loader is removed after loading");
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-story-id="fixture0"]').count() === 140, 10000), "all comments render after loading");
     assert(await waitFor(async () => !/loading discussions|rendering comments|annotating link/i.test(await subtitle.textContent()), 30000), `the header stops reporting loading after rendering: ${await subtitle.textContent()}`);
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'A draft while loading', "the draft survives the transition to comments");
-    assert(!(await composer.locator('.compose-send-note').isDisabled()), "note submission is enabled once ready");
-    assert(!(await composer.locator('.compose-send-comment').isDisabled()), "comment submission is enabled once ready");
+    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();
