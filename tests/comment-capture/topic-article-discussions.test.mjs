@@ -14,7 +14,7 @@ const threadURL = (id) => "https://news.ycombinator.com/item?id=" + id;
 const hnItem = (id) => "https://hacker-news.firebaseio.com/v0/item/" + id + ".json";
 const address = "https://backchnnl.app/?topic=" + encodeURIComponent(topic.id);
 
-async function openTopic(t, { phone, viewport, brief = ["Inspectors published the harbor report."], extraSources = [], responses = [], signedIn = false, local = stories, threads = [], values = {}, enabled = {}, holdURL, topHosts } = {}) {
+async function openTopic(t, { phone, discussion = true, compose = false, viewport, brief = ["Inspectors published the harbor report."], extraSources = [], responses = [], signedIn = false, local = stories, threads = [], values = {}, enabled = {}, holdURL, topHosts } = {}) {
 	const sources = stories.map((story, i) => ({ id: "s" + i, title: story.title, url: story.url,
 		publisher: new URL(story.url).hostname, excerpt: story.title + ".", publishedAt: null, sharedAt: null,
 		discussions: [{ source: "hn", url: threadURL(story.id), title: story.title, comments: story.comments }] }));
@@ -25,7 +25,8 @@ async function openTopic(t, { phone, viewport, brief = ["Inspectors published th
 	const article = { version: 1, topic, generatedAt: new Date().toISOString(), method: "synthesis", sources,
 		sections: [{ heading: "What happened", paragraphs: brief.map((text) => ({ text, sourceIds: ["s0","s1"] })) }], timeline: [] };
 	const app = await launchApp({
-		...(phone && { viewport: viewport || { width: 360, height: 740 }, hasTouch: true }),
+		...(viewport || phone ? { viewport: viewport || { width: 360, height: 740 } } : {}),
+		hasTouch: Boolean(phone),
 		topHosts,
 		sharedStore: true,
 		settings: { sources: { hn: true, reddit: signedIn, x: signedIn, ...Object.fromEntries(threads.map(({ source }) => [source, true])), ...enabled },
@@ -54,12 +55,59 @@ async function openTopic(t, { phone, viewport, brief = ["Inspectors published th
 	}, holdURL);
 	await app.page.goto(address);
 	const aside = app.page.locator(".app-topic-discussions");
-	if (phone) await app.page.locator('#app[data-stage="article"]:not([data-moving]) .app-topic-article').waitFor();
+	if (phone) {
+		await app.page.locator('#app[data-stage="article"]:not([data-moving]) .app-topic-article').waitFor();
+		if (discussion) await openPhoneDiscussion(app.page, compose);
+	}
 	return { ...app, aside };
+}
+
+async function openPhoneDiscussion(page, compose = false) {
+	await page.locator('#app[data-stage="article"]:not([data-moving]) #app-bar-discussion').tap();
+	await page.locator('#app[data-stage="discussion"]:not([data-moving]) .app-topic-discussions').waitFor();
+	if (compose) await page.locator("#app-bar-compose").tap();
 }
 
 const feedList = (aside) => aside.getByRole("list", { name: "Comments across discussions" });
 const threadDetail = (aside) => aside.getByRole("region", { name: "Thread comments" });
+const inspectionSources = count => Array.from({length: count}, (_, i) => ({
+	id: "ref" + i, publisher: "Survey station " + i, title: "Measurements from station " + i,
+	url: "https://station" + i + ".example/harbor", discussions: [],
+}));
+
+test("the phone Discussion button opens Topic Article replies over the current reading position", async (t) => {
+	const {page, aside} = await openTopic(t, {phone: true, discussion: false, extraSources: inspectionSources(22)});
+	const toggle = page.locator("#app-bar-discussion");
+	assert(await toggle.isVisible());
+	assert.equal(await aside.isVisible(), false);
+	await page.locator(".app-topic-sources > ol > li").nth(12).evaluate(node => node.scrollIntoView({block: "start"}));
+	const articleTop = await page.evaluate(() => window.scrollY);
+	assert(articleTop > 0);
+	await toggle.tap();
+	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
+	assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+	await page.locator('#app[data-stage="discussion"]:not([data-moving])').waitFor();
+	assert(await aside.evaluate(node => getComputedStyle(node).position === "fixed" &&
+		Math.abs(node.getBoundingClientRect().bottom - window.innerHeight) < 1), "the discussion surface reaches the bottom of the viewport");
+	assert.equal(await page.locator('meta[name="theme-color"]').getAttribute("content"), "");
+	await toggle.tap();
+	await aside.waitFor({state: "hidden"});
+	assert.equal(await page.evaluate(() => window.scrollY), articleTop);
+});
+
+test("desktop Topic Articles and their discussions can scroll independently", async (t) => {
+	const {page, aside} = await openTopic(t, {viewport: {width: 1440, height: 630}, extraSources: inspectionSources(22)});
+	const heading = page.locator(".app-topic-article h1");
+	const replies = feedList(aside).getByRole("listitem");
+	await replies.nth(12).waitFor();
+	const before = (await heading.boundingBox()).y;
+	await replies.nth(12).evaluate(node => node.scrollIntoView({block: "center"}));
+	assert.equal((await heading.boundingBox()).y, before);
+	const reply = replies.nth(12);
+	const replyY = (await reply.boundingBox()).y;
+	await page.locator(".app-topic-sources > ol > li").nth(12).evaluate(node => node.scrollIntoView({block: "center"}));
+	assert.equal((await reply.boundingBox()).y, replyY);
+});
 
 async function sourceThread(page, url) {
 	const action = page.locator('.app-topic-sources [data-topic-thread="' + url + '"]').first();
@@ -94,7 +142,7 @@ for (const phone of [false, true]) {
 		assert.equal(new Set(keys).size, keys.length);
 		const anchor = locator.getByRole("button", { name: "Read thread on Hacker News" });
 		await anchor.focus();
-		const scroller = page.locator(".app-topic-article-scroll");
+		const scroller = aside.locator(".app-topic-discussion-scroll");
 		const position = await scroller.evaluate((node) => node.scrollTop);
 		await anchor.press("Enter");
 		const detail = threadDetail(aside);
@@ -115,6 +163,8 @@ for (const phone of [false, true]) {
 		await detail.waitFor({ state: "hidden" });
 		assert(await anchor.evaluate((node) => node.getRootNode().activeElement === node));
 		if (phone) {
+			await page.locator("#app-bar-back").tap();
+			await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
 			await page.locator("#app-bar-back").tap();
 			await page.locator('#app[data-stage="list"] [data-shared-topic="' + topic.id + '"]').waitFor();
 		}
@@ -191,14 +241,14 @@ test("the same conversation reported by two outlets supplies each reply once", a
 });
 
 for (const phone of [false, true]) test(`the ${phone ? "phone" : "desktop"} topic composer stays at the bottom while reading replies`, async (t) => {
-	const { page, aside } = await openTopic(t, { phone, viewport: { width: 320, height: 590 } });
-	const scroller = page.locator(".app-topic-article-scroll");
+	const { page, aside } = await openTopic(t, { phone, compose: true, viewport: phone ? { width: 320, height: 590 } : undefined });
+	const scroller = aside.locator(".app-topic-discussion-scroll");
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
 	const reply = feedList(aside).getByRole("listitem").nth(10);
 	await reply.waitFor();
 	const position = () => field.evaluate((node) => {
 		const footer = node.closest(".app-compose-bar");
-		const scroller = node.closest(".app-topic-article-scroll").getBoundingClientRect();
+		const scroller = node.closest(".app-topic-discussion-scroll").getBoundingClientRect();
 		return { bottom: footer.getBoundingClientRect().bottom, viewport: Math.min(innerHeight, scroller.bottom),
 			footerAfterReplies: Boolean(footer.previousElementSibling), width: node.clientWidth };
 	});
@@ -220,7 +270,7 @@ for (const phone of [false, true]) test(`the ${phone ? "phone" : "desktop"} topi
 		"the discussion choices open above the field " + JSON.stringify({ menuBox, fieldBox }));
 });
 
-test("a delayed comment page stays in view when phone scrolling has just crossed into the article sources", async (t) => {
+test("a delayed comment page arrives in the phone discussion after leaving and reopening it", async (t) => {
 	const ids = Array.from({ length: 60 }, (_, i) => 8600100 + i);
 	const extraSources = Array.from({ length: 16 }, (_, i) => ({ id: "ref" + i, publisher: "Survey station " + i,
 		title: "Measurements from station " + i, url: "https://station" + i + ".example/harbor", discussions: [] }));
@@ -234,12 +284,13 @@ test("a delayed comment page stays in view when phone scrolling has just crossed
 	assert(await waitFor(async () => await items.count() === 24));
 	await items.last().evaluate((node) => node.scrollIntoView({ block: "end" }));
 	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
-	await items.last().evaluate((node) => window.scrollBy(0, node.getBoundingClientRect().bottom + 60));
-	assert((await items.last().boundingBox()).y < 0);
+	await page.locator("#app-bar-discussion").tap();
+	await aside.waitFor({state: "hidden"});
 	await page.evaluate(() => window.__releaseTopicResponse());
+	await openPhoneDiscussion(page);
 	assert(await waitFor(async () => await items.count() >= 48));
-	const firstNew = await items.nth(24).boundingBox();
-	assert(firstNew.y < 640 && firstNew.y + firstNew.height > 0, "the next reply is visible at the old end of the feed: " + firstNew.y);
+	await items.nth(24).scrollIntoViewIfNeeded();
+	assert((await items.nth(24).boundingBox()).y < 640);
 });
 
 test("scrolling continues through available replies while another discussion is still loading", async (t) => {
@@ -281,6 +332,7 @@ test("phone Back closes a discussion before leaving a public topic with no local
 	await detail.getByText(/Comment 1 on Operators/).waitFor();
 	await page.locator("#app-bar-back").tap();
 	await detail.waitFor({ state: "hidden" });
+	await page.locator("#app-bar-back").tap();
 	await page.locator('#app[data-stage="article"] .app-topic-article').waitFor();
 	assert.equal(page.url(), address);
 	await page.locator("#app-bar-back").tap();
@@ -831,12 +883,13 @@ test("a sparse topic checks a bounded group of public posts and continues when t
 		return { match: (url) => new URL(url).searchParams.get("uri") === uri,
 			json: { thread: { post: asPost(uri, thread.title), replies: i === 8 ? [{ post: asPost(uri + "reply", "A reply to the ninth known thread.") }] : [] } } };
 	});
-	const { aside, requests } = await openTopic(t, { phone: true, viewport: { width: 320, height: 320 }, brief: harborBrief, threads, enabled: { hn: false }, responses });
+	const { page, aside, requests } = await openTopic(t, { phone: true, viewport: { width: 320, height: 320 }, brief: harborBrief, threads, enabled: { hn: false }, responses });
 	const sent = () => requests.filter(({ url }) => url.includes("app.bsky.feed.getPostThread"));
 	await aside.getByText("No replies found in the discussions checked.", { exact: true }).waitFor();
 	assert.equal(sent().length, 8);
 	assert.equal(await aside.locator(".app-topic-comment-body").count(), 0);
-	await aside.getByText("No replies found in the discussions checked.", { exact: true }).evaluate((el) => el.scrollIntoView({ block: "center" }));
+	await page.mouse.move(120, 174);
+	await page.mouse.wheel(0, 180);
 	await feedList(aside).getByText("A reply to the ninth known thread.", { exact: true }).waitFor();
 	assert(sent().length > 8 && sent().length <= 10);
 });
@@ -854,7 +907,9 @@ test("a visible empty feed waits for another scroll before checking more sparse 
 	const { page, aside, requests } = await openTopic(t, { phone: true, viewport: { width: 320, height: 320 }, brief: harborBrief, threads, enabled: { hn: false }, responses });
 	const checked = () => requests.filter(({ url }) => url.includes("app.bsky.feed.getPostThread")).length;
 	const status = aside.getByText("No replies found in the discussions checked.", { exact: true });
-	await status.evaluate((node) => node.scrollIntoView({ block: "center" }));
+	await status.waitFor();
+	await page.mouse.move(120, 174);
+	await page.mouse.wheel(0, 180);
 	assert(await waitFor(() => checked() >= 16));
 	assert.equal(await waitFor(() => checked() > 16, 600), false, "an unmoving page does not scan every empty discussion");
 	for (const expected of [24, 27]) {
@@ -993,11 +1048,11 @@ for (const [width, withoutPopover, paper] of [[1280, false, "paper"], [320, fals
 		if (withoutPopover) {
 			await page.addInitScript(() => { delete HTMLElement.prototype.showPopover; });
 			await page.reload();
+			await openPhoneDiscussion(page);
 		}
 		await page.setViewportSize({ width, height: width === 320 ? 450 : 600 });
 		await feedList(aside).getByText(/Comment 1 on Inspectors/).waitFor();
 		const sources = asideSources(aside);
-		if (width === 320) await sources.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().top - 48));
 		await sources.click();
 		const menu = aside.getByRole("group", { name: "Filter discussions by source" });
 		if (withoutPopover) assert(await page.locator("#app-bar-back").isHidden(), "the floating Back button yields to the open menu");
@@ -1022,7 +1077,7 @@ for (const [width, withoutPopover, paper] of [[1280, false, "paper"], [320, fals
 		const last = menu.getByRole("checkbox").last();
 		await menu.evaluate((el) => { el.scrollTop = el.scrollHeight; });
 		const geometry = await menu.evaluate((el) => {
-			const pane = el.closest(".app-reader-scroll").getBoundingClientRect();
+			const pane = el.closest(".app-topic-discussion-scroll").getBoundingClientRect();
 			const box = el.getBoundingClientRect(), last = [...el.querySelectorAll("input")].at(-1).getBoundingClientRect();
 			const hit = el.getRootNode().elementFromPoint(last.x + last.width / 2, last.y + last.height / 2);
 			let edgesReachable = true;
@@ -1058,8 +1113,8 @@ test("scrolling a phone topic toolbar out of view dismisses its Sources menu", a
 	await toggle.click();
 	const menu = aside.getByRole("group", { name: "Filter discussions by source" });
 	await menu.waitFor();
-	await toggle.evaluate((el) => window.scrollBy(0, el.getBoundingClientRect().bottom + 100));
-	assert(await waitFor(() => toggle.evaluate((el) => el.getBoundingClientRect().bottom <= 0)));
+	await toggle.evaluate((el) => el.closest(".app-topic-discussion-scroll").scrollBy(0, 160));
+	assert(await waitFor(() => toggle.evaluate((el) => el.getBoundingClientRect().bottom <= el.closest(".app-topic-discussion-scroll").getBoundingClientRect().top)));
 	await menu.waitFor({ state: "hidden" });
 	assert.equal(await toggle.getAttribute("aria-expanded"), "false");
 });
@@ -1218,6 +1273,7 @@ test("topic sorting uses comment dates and the saved per-discussion unread times
 	assert.equal(store.get("HNewhere:settings").commentSort, "newest");
 	assert.equal(store.get("HNewhere:settings").newCommentsFirst, true);
 	await page.reload();
+	await openPhoneDiscussion(page);
 	await feedList(aside).getByText("Updated clearance").waitFor();
 	await sort.click();
 	assert.equal(await unread.getAttribute("aria-checked"), "true");
@@ -1410,7 +1466,7 @@ test("the mixed topic message bar sends the written comment to the chosen empty 
 });
 
 test("a topic draft survives an immediate reload after opening and leaving a thread", async (t) => {
-	const { aside, page, errors } = await openTopic(t, { phone: true, viewport: { width: 320, height: 480 } });
+	const { aside, page, errors } = await openTopic(t, { phone: true, compose: true, viewport: { width: 320, height: 480 } });
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	const draft = aside.getByRole("textbox", { name: /Add a comment/ });
 	const text = "Keep this before the next save timer";
@@ -1433,18 +1489,20 @@ test("a topic draft survives an immediate reload after opening and leaving a thr
 	}, text);
 	assert(entered);
 	await page.reload();
+	await openPhoneDiscussion(page, true);
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	assert(await waitFor(async () => (await draft.inputValue()) === text, 1500));
 	const edit = "Keep the latest change while the field still has focus";
 	await draft.fill(edit);
 	await page.reload();
+	await openPhoneDiscussion(page, true);
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	assert(await waitFor(async () => (await draft.inputValue()) === edit, 1500));
 	assert.deepEqual(errors, []);
 });
 
 test("the mixed topic message bar keeps its draft and saves a note to the selected article", async (t) => {
-	const { aside, page, store, errors } = await openTopic(t, { phone: true });
+	const { aside, page, store, errors } = await openTopic(t, { phone: true, compose: true });
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
 	assert(await field.isVisible(), "the phone feed offers the message bar");
@@ -1455,6 +1513,7 @@ test("the mixed topic message bar keeps its draft and saves a note to the select
 	assert.equal(await field.inputValue(), "A local note about the operator interviews");
 	assert(await waitFor(() => [...store.values()].includes("A local note about the operator interviews")));
 	await page.reload();
+	await openPhoneDiscussion(page, true);
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	assert(await waitFor(async () => (await field.inputValue()) === "A local note about the operator interviews"));
 	const save = aside.getByRole("button", { name: "Keep a note" });
@@ -1473,7 +1532,7 @@ test("the mixed topic message bar keeps its draft and saves a note to the select
 });
 
 test("the phone message bar keeps its app-sized typography, Aa colors and draft", async (t) => {
-	const { aside, page, store, errors } = await openTopic(t, { phone: true, values: { "HNewhere:reader_font": "georgia" } });
+	const { aside, page, store, errors } = await openTopic(t, { phone: true, compose: true, values: { "HNewhere:reader_font": "georgia" } });
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
 	const send = aside.getByRole("button", { name: "Add a comment", exact: true });

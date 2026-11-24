@@ -213,7 +213,8 @@ for(const width of [390])test(`${width}px Reader retains its bottom-right mobile
     const like=app.page.locator('#app-bar-like');
     await like.waitFor();
     await app.page.locator('#app-bar-view').waitFor();
-    const controls = ['#app-bar-save', '#app-bar-like', '#app-bar-view', '#app-bar-open', '#app-bar-discussion'];
+    assert.equal(await app.page.locator('#app-bar-open').count(), 0);
+    const controls = ['#app-bar-save', '#app-bar-like', '#app-bar-view', '#app-bar-discussion'];
     const boxes = await assertToolbarOrder(app.page, app.page.locator('#app-bar'), controls, 'y');
     for(const box of boxes)assert(Math.abs(box.x+box.width/2-(boxes[0].x+boxes[0].width/2))<1,'controls share a vertical center line');
     const bounds=await app.page.locator(width===390?'#app':'#app-article').boundingBox();
@@ -222,6 +223,29 @@ for(const width of [390])test(`${width}px Reader retains its bottom-right mobile
     await vote.waitForURL(target=>target.hostname==='news.ycombinator.com'&&new URLSearchParams(target.hash.slice(1)).get('action')==='up');
     assert.equal(new URLSearchParams(new URL(vote.url()).hash.slice(1)).get('item'),String(story.id));
     await vote.close();
+    await app.page.locator('#app-bar-view').click();
+    const original = app.page.getByRole('link', {name: 'Open the original page'});
+    assert.equal(await original.getAttribute('target'), '_blank');
+    assert.equal(await original.getAttribute('href'), story.url);
+    await app.page.locator('#app-bar-view').click();
+    await app.page.locator('#app-bar-discussion').click();
+    const compose = app.page.getByRole('button', {name: 'Comment and note composer'});
+    const field = app.page.locator('#app-discussion-compose textarea');
+    assert.equal(await field.isVisible(), false);
+    await compose.click();
+    await field.waitFor();
+    assert.equal(await compose.getAttribute('aria-expanded'), 'true');
+    const metrics = await field.evaluate(node => ({
+      input: parseFloat(getComputedStyle(node).fontSize),
+      placeholder: parseFloat(getComputedStyle(node, '::placeholder').fontSize),
+      padding: parseFloat(getComputedStyle(node).paddingBlockStart),
+    }));
+    assert(metrics.input >= 16 && metrics.placeholder < metrics.input && metrics.padding > 3);
+    await field.fill('Keep the draft between openings');
+    await compose.click();
+    assert.equal(await field.isVisible(), false);
+    await compose.click();
+    assert.equal(await field.inputValue(), 'Keep the draft between openings');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
 });

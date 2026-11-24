@@ -25,9 +25,11 @@ use to detect updates, so every release bumps it.
 
 ### Changed
 
-- The Topic Article message bar floats at the bottom of Discussions. Its field,
-  Sort, Sources and their menus use the regular Discussion typography and size
-  with the selected Aa paper colors.
+- The Topic Article brief and Discussions scroll independently on desktop. On
+  phones, the Discussion button opens comments over the article and preserves
+  the reading position. The right-hand controls open the comment and note
+  composer, and Aa offers the original page. The Discussion controls use the
+  regular Discussion typography with the selected Aa paper colors.
 - Collection uses the regular link list with previews and a filter menu.
   Interests in Settings › Sources can include a Headlines feed.
 - Collection replaces the separate Watch controls for saved links.

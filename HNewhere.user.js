@@ -12843,6 +12843,13 @@ html[data-backchannel-installed] .chin {
 	background:var(--backchannel-chrome);
 }
 
+@media (max-width:700px) {
+	html[data-backchannel-installed]:has([data-hnewhere-app]),
+	html[data-backchannel-installed]:has([data-hnewhere-app]) :is(body, .bezel, .screen) {
+		background:var(--backchannel-reader-canvas, var(--backchannel-chrome));
+	}
+}
+
 @media (min-width: 701px) {
 	html[data-backchannel-installed]:has([data-hnewhere-app]) .chin {
 		height:calc(30px + env(safe-area-inset-bottom, 0px));
@@ -12918,6 +12925,7 @@ html[data-backchannel-installed] .chin {
 			localStorage.setItem(PAGE_CHROME_KEY, JSON.stringify({ theme: themePreference, ...pageChromeColors(host) }));
 		} catch {
 		}
+		paintAppPhoneCanvas();
 	}
 
 	const themeAppliers = new Set();
@@ -24097,7 +24105,7 @@ ${
 			menu.style.maxHeight = "";
 			const button = toggle.getBoundingClientRect();
 			const pane = root.closest("[data-app-section]")?.getBoundingClientRect();
-			const scroll = root.closest(".app-settings-content")?.getBoundingClientRect();
+			const scroll = root.closest(".app-settings-content, .app-topic-discussion-scroll")?.getBoundingClientRect();
 			const below = Math.min(window.innerHeight, pane?.bottom ?? Infinity, scroll?.bottom ?? Infinity) - button.bottom - 8;
 			const above = button.top - Math.max(0, pane?.top ?? 0, scroll?.top ?? 0) - 8;
 			const up = below < menu.getBoundingClientRect().height && above > below;
@@ -39536,26 +39544,38 @@ ${SETTINGS_MODAL_CSS}
 	.app-topic-discussions :is(.app-topic-comment-action,.app-topic-comment-context,.app-topic-thread-back,.item-action-link) { min-height:40px; }
 	.app-topic-reply .composer-text { font-size:16px; }
 }
+
+@media (min-width:701px) {
+	.app-topic-article-scroll { overflow:hidden; }
+	.app-topic-article.bc-reader {
+		display:grid;
+		grid-template-rows:minmax(0, 3fr) minmax(0, 2fr);
+		height:100%;
+		max-width:76em;
+		padding-block:0;
+	}
+	.app-topic-reading, .app-topic-discussion-scroll { min-height:0; overflow:auto; overscroll-behavior:contain; }
+	.app-topic-reading { padding:56px 8px 64px; }
+	.app-topic-discussions { display:flex; flex-direction:column; min-height:0; margin:0; padding:0; }
+	.app-topic-discussion-scroll { box-sizing:border-box; display:flex; flex:1; flex-direction:column; padding:8px 4px; }
+}
 @container topic-article (min-width:720px) and (min-width:45em) {
-	.app-topic-article.bc-reader:has(> .app-topic-discussions) {
+	.app-topic-article.bc-reader {
 		--topic-brief-min:20em;
 		--topic-discussion-min:16em;
 		--topic-gutter:24px;
-		display:grid;
 		grid-template-columns:minmax(0, 1fr) calc(var(--topic-discussion-min) + (100% - var(--topic-brief-min) - var(--topic-discussion-min) - var(--topic-gutter)) * var(--topic-discussion-share));
-		grid-template-rows:auto 1fr;
+		grid-template-rows:minmax(0, 1fr);
 		column-gap:var(--topic-gutter);
-		align-items:start;
-		max-width:76em;
 	}
-	.app-topic-narrative { grid-column:1; grid-row:1; min-width:var(--topic-brief-min); }
+	.app-topic-reading { min-width:var(--topic-brief-min); }
 	.app-topic-narrative > *, .app-topic-sources { max-width:42em; }
-	.app-topic-sources { grid-column:1; grid-row:2; }
-	.app-topic-discussions { grid-column:2; grid-row:1 / span 2; position:relative; display:flex; flex-direction:column; align-self:stretch; min-width:var(--topic-discussion-min); margin:0; padding:.18em 0 0; border:0; }
+	.app-topic-discussions { position:relative; min-width:var(--topic-discussion-min); border:0; }
+	.app-topic-discussion-scroll { padding-top:56px; }
 	.app-topic-divider { display:block; position:absolute; inset-block:0; inset-inline-end:100%; width:var(--topic-gutter); cursor:col-resize; touch-action:none; user-select:none; }
 	.app-topic-divider::before, .app-topic-divider::after { content:""; position:absolute; inset-inline-start:50%; transform:translateX(-50%); background:var(--reader-rule); }
 	.app-topic-divider::before { inset-block:0; width:1px; }
-	.app-topic-divider::after { top:.45em; width:3px; height:24px; border-radius:2px; background:var(--topic-secondary); }
+	.app-topic-divider::after { top:calc(56px + .45em); width:3px; height:24px; border-radius:2px; background:var(--topic-secondary); }
 	.app-topic-divider:is(:hover, :focus-visible, :active)::after { background:var(--reader-link); }
 	.app-topic-divider:focus-visible { outline:2px solid var(--reader-link); outline-offset:-3px; }
 }
@@ -39590,11 +39610,14 @@ ${SETTINGS_MODAL_CSS}
 	.app-topic-source-dialog[data-anchored] { inset:var(--topic-dialog-y) auto auto var(--topic-dialog-x); margin:0; }
 }
 @media (max-width:700px) {
+	.app-topic-article-scroll { container-type:normal; }
 	.app-topic-article.bc-reader { padding-top:24px; }
-	.app-topic-discussions .app-compose-bar { bottom:calc(60px + max(env(safe-area-inset-bottom, 0px), var(--app-keyboard, 0px))); }
+	.app-topic-discussions { box-sizing:border-box; margin:0; padding:0; border:0; background:var(--reader-page); }
+	.app-topic-discussion-scroll { height:100%; box-sizing:border-box; overflow:auto; overscroll-behavior:contain; padding:8px 14px; }
+	.app-topic-discussions .app-compose-bar { position:absolute; inset-inline:10px; bottom:max(8px, var(--app-safe-bottom)); margin:0; padding:0; }
 	.app-topic-cite::after { content:""; position:absolute; inset:-4px -1px; }
 }
-@container topic-article (max-width:380px) {
+@media (max-width:380px) {
 	.app-topic-article .bc-reader-title { font-size:2em; }
 }
 
@@ -40715,9 +40738,18 @@ ${READER_LIST_CSS}
 }
 
 @media (max-width:700px) {
+	.app-compose-bar .compose-field {
+		padding:4px 5px;
+	}
+
 	.app-compose-bar .composer-text {
+		padding:5px 9px;
 		font-size:16px;
 		line-height:19px;
+	}
+
+	.app-compose-bar .composer-text::placeholder {
+		font-size:13px;
 	}
 }
 
@@ -40860,6 +40892,7 @@ ${READER_LIST_CSS}
 #app-bar-save[aria-pressed="true"],
 #app-bar-like[aria-pressed="true"],
 #app-bar-discussion[aria-pressed="true"],
+#app-bar-compose[aria-expanded="true"],
 #app-bar-view[aria-expanded="true"],
 #app #app-article .app-article-disc:is(.item-action-on, [aria-expanded="true"]) {
 	background:var(--rail-bg);
@@ -41211,6 +41244,7 @@ header .item-action-link {
 
 @media (max-width: 700px) {
 	#app {
+		--app-safe-bottom:env(safe-area-inset-bottom, 0px);
 		grid-template-columns:minmax(0, 1fr);
 		grid-template-rows:minmax(0, 1fr) auto;
 	}
@@ -41345,7 +41379,9 @@ header .item-action-link {
 	#app:not([data-stage="list"]) #app-rail,
 	#app:not([data-stage="list"]) #app-list,
 	#app[data-stage="list"] #app-article,
-	#app:not([data-stage="discussion"]) #panel.app-docked {
+	#app:not([data-stage="discussion"]) #panel.app-docked,
+	#app[data-topic-article] #panel.app-docked,
+	#app:not([data-stage="discussion"]) .app-topic-discussions {
 		display:none;
 	}
 
@@ -41355,8 +41391,10 @@ header .item-action-link {
 		height:auto;
 	}
 
-	#app[data-stage="discussion"] #panel.app-docked,
-	#panel.app-docked.is-lowering {
+	#app:not([data-topic-article])[data-stage="discussion"] #panel.app-docked,
+	#panel.app-docked.is-lowering,
+	#app[data-stage="discussion"] .app-topic-discussions,
+	#app .app-topic-discussions.is-lowering {
 		display:flex !important;
 		position:fixed;
 		top:calc(72px + env(safe-area-inset-top, 0px));
@@ -41371,6 +41409,18 @@ header .item-action-link {
 		border-radius:18px 18px 0 0;
 		box-shadow:0 -10px 32px rgba(0,0,0,.24), 0 -1px 0 rgba(0,0,0,.06);
 	}
+
+	#app-discussion-compose {
+		position:absolute;
+		inset-inline:10px;
+		bottom:max(8px, var(--app-safe-bottom));
+		padding:0;
+		border:0;
+		background:transparent;
+	}
+
+	#app-discussion-compose .compose-field { box-shadow:0 3px 12px #0002; }
+	#app:not([data-compose-open]) :is(#app-discussion-compose, .app-topic-discussions .app-compose-bar) { display:none; }
 
 	.app-article-body {
 		flex:0 0 auto;
@@ -41491,19 +41541,20 @@ header .item-action-link {
 
 	#app:not([data-stage="list"]) .app-reader-scroll,
 	#app[data-moving="article"] .app-reader-scroll {
+		box-sizing:border-box;
+		min-height:100lvh;
 		padding-top:calc(12px + env(safe-area-inset-top, 0px));
 	}
 
-	#app[data-stage="discussion"] #panel.app-docked #comments {
-		padding-bottom:calc(88px + env(safe-area-inset-bottom, 0px));
+	#app[data-stage="discussion"] :is(#panel.app-docked #comments, .app-topic-discussion-scroll) {
+		padding-bottom:calc(112px + var(--app-safe-bottom) + var(--app-compose-height, 0px));
 	}
 
 	#app[data-stage="discussion"] :is(#app-bar, #app-bar-back) {
-		bottom:calc(var(--app-keyboard, 0px) + max(calc(16px + env(safe-area-inset-bottom, 0px)), calc(var(--app-compose-height, 0px) + 8px)));
+		bottom:calc(var(--app-keyboard, 0px) + max(16px, var(--app-safe-bottom) + 8px) + var(--app-compose-height, 0px));
 	}
 
-	#app[data-stage="discussion"]:has(#panel :is(.source-menu, .compose-targets):not(.hidden)) :is(#app-bar, #app-bar-back),
-#app[data-stage="article"]:has(.app-topic-controls .source-menu:not([popover], .hidden), .app-topic-discussions .compose-targets:not(.hidden)) :is(#app-bar, #app-bar-back) {
+	#app[data-stage="discussion"]:has(#panel :is(.source-menu, .compose-targets):not(.hidden), .app-topic-controls .source-menu:not([popover], .hidden), .app-topic-discussions .compose-targets:not(.hidden)) :is(#app-bar, #app-bar-back) {
 		visibility:hidden;
 	}
 
@@ -44703,7 +44754,7 @@ ${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon)).joi
 <span id="app-mobile-votes" hidden></span>
 <button id="app-bar-like" class="app-stack-button" type="button" aria-pressed="false" aria-label="Like" hidden>${APP_ICON('<path d="M2 7.2h2.6V14H2.5a.5.5 0 0 1-.5-.5z"/><path d="M5.8 14V6.7l2.5-4.4a1.2 1.2 0 0 1 2.2.9L10 6h3a1.4 1.4 0 0 1 1.37 1.7l-1 4.7A2 2 0 0 1 11.4 14z"/>')}</button>
 <button id="app-bar-view" class="app-stack-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden><span class="app-view-glyph"><span class="app-view-big">A</span><span class="app-view-small">a</span></span></button>
-<button id="app-bar-open" class="app-stack-button" type="button" aria-label="Open the original page" hidden>${APP_ICON('<path d="M9 2h5v5h-1.7V4.9L7.7 9.5 6.5 8.3l4.6-4.6H9z"/><path d="M3.5 4H7v1.7H4.7v5.6h5.6V9H12v3.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-8a.5.5 0 0 1 .5-.5z"/>')}</button>
+<button id="app-bar-compose" class="app-stack-button" type="button" aria-label="Comment and note composer" aria-expanded="false" title="Comment and note composer" hidden>${APP_ICON('<path d="M3 2h6v1.5H3.5v9h9V7H14v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="m12.3 1.7 2 2-6.7 6.7-2.5.5.5-2.5z"/>')}</button>
 <button id="app-bar-discussion" class="app-stack-button" type="button" aria-pressed="false" aria-label="Discussion">${APP_ICON('<path d="M2.5 2h11a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1H6.2L3 14.4a.4.4 0 0 1-.66-.3V11.5h.16a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/>')}<span class="rail-badge"></span></button>
 </div>
 <section id="app-list" aria-label="Articles">
@@ -44869,8 +44920,7 @@ ${readingListShareHTML()}
 			if (appState.activeListTopic) openAppTopicArticle(appState.activeListTopic);
 		};
 		const composeBar = shadow.getElementById("app-discussion-compose");
-		const app = shadow.getElementById("app");
-		new ResizeObserver(() => app.style.setProperty("--app-compose-height", `${composeBar.offsetHeight}px`)).observe(composeBar);
+		new MutationObserver(paintAppPhoneComposer).observe(composeBar, { childList: true });
 
 		shadow.querySelector("#app-rail").addEventListener("click", (event) => {
 			const button = event.target?.closest?.("[data-app-view]");
@@ -45242,13 +45292,16 @@ ${readingListShareHTML()}
 			reapplyThemes();
 
 			const stage = appRoot.dataset.stage || "list";
+			const topicId = appState.topicArticle?.group.id;
 
 			if (!appIsPhone() && stage !== "list") {
-				phoneStage = { stage, key: appState?.open?.key };
+				phoneStage = { stage, topicId, key: appState.open?.key };
 				appRoot.dataset.stage = "list";
 			}
 
-			const restore = appIsPhone() && phoneStage?.key && appState?.open?.key === phoneStage.key && appState.article ? phoneStage.stage : "";
+			let restore = "";
+			if (appIsPhone() && topicId) restore = phoneStage?.topicId === topicId ? phoneStage.stage : "article";
+			else if (appIsPhone() && phoneStage?.key && appState.open?.key === phoneStage.key && appState.article) restore = phoneStage.stage;
 
 			if (appIsPhone()) {
 				phoneStage = null;
@@ -45466,7 +45519,7 @@ ${readingListShareHTML()}
 		original.onauxclick = (event) => { if (event.button === 1) original.onclick(); };
 
 		shadow.querySelector("#app-bar-back").onclick = () => {
-			if (appState.topicArticle) returnFromAppTopicArticle();
+			if (appState.topicArticle) lowerAppSheet();
 			else setAppStage("list");
 		};
 		shadow.getElementById("app-rail-welcome").onclick = () => {
@@ -45480,6 +45533,7 @@ ${readingListShareHTML()}
 			}
 		};
 		shadow.querySelector("#app-bar-view").onclick = () => setAppViewMenuOpen(shadow.querySelector("#app-view-menu").hidden);
+		shadow.querySelector("#app-bar-compose").onclick = () => setAppPhoneComposer(!appRoot.hasAttribute("data-compose-open"));
 		const rowMenu = shadow.getElementById("app-row-menu");
 		rowMenu.oncontextmenu = (event) => event.preventDefault();
 		const closeRowMenuOutside = (event) => {
@@ -45493,7 +45547,6 @@ ${readingListShareHTML()}
 		shadow.addEventListener("pointerdown", closeRowMenuOutside);
 		shadow.addEventListener("touchstart", closeRowMenuOutside, { passive: true });
 		shadow.addEventListener("click", closeRowMenuOutside, true);
-		shadow.querySelector("#app-bar-open").onclick = () => shadow.querySelector("#app-article-open").click();
 		shadow.querySelector("#app-bar-save").onclick = () => shadow.querySelector('#app-article-actions [data-item-action="save"]')?.click();
 		shadow.querySelector("#app-bar-like").onclick = () => appMobileVote(shadow)?.click();
 		shadow.querySelector("#app-next-link").onclick = () => {
@@ -45560,13 +45613,15 @@ ${readingListShareHTML()}
 
 		const noteKeyboard = () => {
 			const view = window.visualViewport;
-			const covered = view ? Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop)) : 0;
+			const editing = appRoot.dataset.stage === "discussion" && isAppEditable(shadow.activeElement);
+			const covered = view && editing ? Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop)) : 0;
 
 			appRoot.style.setProperty("--app-keyboard", `${covered}px`);
 		};
 
 		window.visualViewport?.addEventListener("resize", noteKeyboard);
 		window.visualViewport?.addEventListener("scroll", noteKeyboard);
+		shadow.addEventListener("focusout", () => queueMicrotask(noteKeyboard));
 
 		watchPullDown(window, () => {
 			if (appIsPhone()) {
@@ -46986,11 +47041,15 @@ ${readingListShareHTML()}
 		return stage === "discussion" ? "article" : stage;
 	}
 
+	function appDiscussionScroll(shadow) {
+		return appState.topicArticle ? shadow.querySelector(".app-topic-discussion-scroll") : shadow.getElementById("comments");
+	}
+
 	function noteAppStageScroll(stage) {
 		appState.scrolls[appDocumentStage(stage)] = window.scrollY;
 
 		if (stage === "discussion") {
-			appState.scrolls.discussion = appState.ui.shadow.querySelector("#comments")?.scrollTop || 0;
+			appState.scrolls.discussion = appDiscussionScroll(appState.ui.shadow)?.scrollTop || 0;
 		}
 	}
 
@@ -47000,7 +47059,7 @@ ${readingListShareHTML()}
 		}
 
 		if (stage === "discussion") {
-			const comments = appState.ui.shadow.querySelector("#comments");
+			const comments = appDiscussionScroll(appState.ui.shadow);
 
 			if (comments) {
 				comments.scrollTop = appState.scrolls.discussion || 0;
@@ -47015,11 +47074,33 @@ ${readingListShareHTML()}
 		document.documentElement.style.overflowY = appIsPhone() && stage === "discussion" ? "hidden" : "";
 	}
 
+	function paintAppPhoneCanvas() {
+		const shadow = appState?.ui.shadow;
+		if (!shadow) return;
+		const phone = appIsPhone();
+		const stage = shadow.getElementById("app").dataset.stage;
+		let surface;
+		if (phone && stage !== "list") {
+			const body = shadow.getElementById("app-article-body");
+			if (stage === "discussion" && !appState.topicArticle) surface = getComputedStyle(shadow.getElementById("panel")).backgroundColor;
+			else if (body.dataset.mode === "reader") surface = shadow.host.style.getPropertyValue("--reader-page");
+			else surface = getComputedStyle(body.parentElement).backgroundColor;
+		}
+		const root = document.documentElement;
+		if (surface && surface !== "rgba(0, 0, 0, 0)") root.style.setProperty("--backchannel-reader-canvas", surface);
+		else root.style.removeProperty("--backchannel-reader-canvas");
+		const tint = document.querySelector('meta[name="theme-color"]');
+		if (tint) {
+			const color = phone ? "" : root.style.getPropertyValue("--backchannel-chrome");
+			if (tint.content !== color) tint.content = color;
+		}
+	}
+
 	function moveAppStage(was, stage) {
 		const shadow = appState.ui.shadow;
 		const app = shadow.querySelector("#app");
 		const article = shadow.querySelector("#app-article");
-		const panel = shadow.querySelector("#panel");
+		const panel = appState.topicArticle ? shadow.getElementById("app-topic-discussions") : shadow.getElementById("panel");
 		const chrome = [shadow.querySelector("#app-bar"), shadow.querySelector("#app-bar-back")];
 		const timing = (up) => ({ duration: up ? 320 : 260, easing: "cubic-bezier(.32,.72,0,1)", fill: "both" });
 		const frames = (up, far) => (up ? [{ transform: `translateY(${far})` }, { transform: "translateY(0)" }] : [{ transform: "translateY(0)" }, { transform: `translateY(${far})` }]);
@@ -47043,25 +47124,31 @@ ${readingListShareHTML()}
 		};
 
 		const raiseSheet = () => {
-			const comments = shadow.querySelector("#comments");
+			const comments = appDiscussionScroll(shadow);
 
 			if (comments) {
 				comments.scrollTop = appState.scrolls.discussion || 0;
 			}
 
-			return settle([panel.animate(frames(true, "100%"), timing(true))]);
+			return settle(panel ? [panel.animate(frames(true, "100%"), timing(true))] : []);
 		};
 
 		if (was === "article" && stage === "discussion") {
+			app.dataset.moving = "discussion";
 			app.dataset.stage = "discussion";
 			paintAppChrome();
-			raiseSheet().then(finish);
+			raiseSheet().then(() => {
+				delete app.dataset.moving;
+				finish();
+			});
 			return;
 		}
 
 		if (was === "discussion" && stage === "article") {
-			settle([panel.animate(frames(false, "100%"), timing(false))]).then(() => {
+			app.dataset.moving = "discussion";
+			settle(panel ? [panel.animate(frames(false, "100%"), timing(false))] : []).then(() => {
 				app.dataset.stage = "article";
+				delete app.dataset.moving;
 				paintAppChrome();
 				finish();
 			});
@@ -47107,15 +47194,15 @@ ${readingListShareHTML()}
 		window.scrollTo(0, appState.scrolls.list || 0);
 		app.style.setProperty("--app-move-top", `${Math.round(window.scrollY)}px`);
 
-		const pieces = [article, ...chrome, ...(was === "discussion" ? [panel] : [])];
+		const pieces = [article, ...chrome, ...(was === "discussion" && panel ? [panel] : [])];
 
 		if (was === "discussion") {
-			panel.classList.add("is-lowering");
+			panel?.classList.add("is-lowering");
 		}
 
 		settle(pieces.map((piece) => piece.animate(frames(false, piece === article ? "100%" : "100vh"), timing(false)))).then(() => {
 			delete app.dataset.moving;
-			panel.classList.remove("is-lowering");
+			panel?.classList.remove("is-lowering");
 			article.scrollTop = 0;
 			paintAppChrome();
 			window.scrollTo(0, appState.scrolls.list || 0);
@@ -47149,6 +47236,47 @@ ${readingListShareHTML()}
 		return holder.querySelector(".vote-button:is(.vote-button-up, .vote-button-neutral)");
 	}
 
+	function appPhoneComposer(shadow) {
+		const panel = appState.topicArticle?.discussionPanel;
+		const bar = !appState.topicArticle ? shadow.getElementById("app-discussion-compose") :
+			panel?.selected ? panel.detail?.querySelector(".app-compose-bar") : panel?.compose?.holder;
+		return bar?.firstElementChild && !bar.hidden ? bar : null;
+	}
+
+	function paintAppPhoneComposer() {
+		const state = appState;
+		if (!state) return;
+		const { shadow } = state.ui;
+		const app = shadow.getElementById("app");
+		const toggle = shadow.getElementById("app-bar-compose");
+		const bar = appIsPhone() && app.dataset.stage === "discussion" ? appPhoneComposer(shadow) : null;
+		if (bar !== state.phoneComposeBar) {
+			state.phoneComposeObserver?.disconnect();
+			state.phoneComposeBar = bar;
+			if (bar) {
+				state.phoneComposeObserver ||= new ResizeObserver(() => paintAppPhoneComposer());
+				state.phoneComposeObserver.observe(bar);
+			}
+		}
+		toggle.hidden = !bar;
+		if (!bar) app.removeAttribute("data-compose-open");
+		toggle.setAttribute("aria-expanded", String(app.hasAttribute("data-compose-open")));
+		if (bar) toggle.setAttribute("aria-controls", bar.id);
+		else toggle.removeAttribute("aria-controls");
+		app.style.setProperty("--app-compose-height", `${bar?.offsetHeight || 0}px`);
+	}
+
+	function setAppPhoneComposer(open) {
+		const { shadow } = appState.ui;
+		const app = shadow.getElementById("app");
+		const bar = appPhoneComposer(shadow);
+		if (!bar) return;
+		app.toggleAttribute("data-compose-open", open);
+		if (open) bar.querySelector(".composer-text")?.focus({ preventScroll: true });
+		else closeComposeTargets(bar.firstElementChild);
+		paintAppPhoneComposer();
+	}
+
 	function paintAppBarActions() {
 		const shadow = appState?.ui.shadow;
 		const save = shadow?.querySelector("#app-bar-save");
@@ -47168,8 +47296,7 @@ ${readingListShareHTML()}
 		like.hidden = !vote;
 		like.setAttribute("aria-pressed", String(Boolean(vote?.classList.contains("vote-button-active"))));
 		like.setAttribute("aria-label", vote?.title || "Like");
-		shadow.querySelector("#app-bar-open").hidden = shadow.querySelector("#app-article-open").hidden;
-		shadow.querySelector("#app-bar-view").hidden = shadow.querySelector("#app-view-toggle").hidden || (appIsPhone() && shadow.querySelector("#app-article-body")?.dataset.mode !== "reader");
+		shadow.querySelector("#app-bar-view").hidden = shadow.querySelector("#app-view-toggle").hidden;
 
 		const bar = shadow.querySelector("#app-bar");
 
@@ -47229,7 +47356,10 @@ ${readingListShareHTML()}
 	function lowerAppSheet() {
 		const stage = appState?.ui.shadow.querySelector("#app")?.dataset.stage || "list";
 
-		if (appState.topicArticle && stage !== "list") return returnFromAppTopicArticle();
+		if (appState.topicArticle && stage !== "list") {
+			if (closeAppTopicDiscussion(appState.topicArticle)) return;
+			if (stage === "article") return returnFromAppTopicArticle();
+		}
 		if (stage === "discussion") {
 			setAppStage("article");
 		} else if (stage === "article") {
@@ -47250,6 +47380,8 @@ ${readingListShareHTML()}
 		const stage = shadow.querySelector("#app").dataset.stage || "list";
 		const total = appState.openTotal;
 		const discussion = shadow.querySelector("#app-bar-discussion");
+		shadow.getElementById("app").toggleAttribute("data-topic-article", Boolean(appState.topicArticle));
+		discussion.setAttribute("aria-controls", appState.topicArticle ? "app-topic-discussions" : "panel");
 
 		if (stage !== "article") {
 			delete shadow.querySelector("#app").dataset.scrolling;
@@ -47292,6 +47424,8 @@ ${readingListShareHTML()}
 			toggle.querySelector(".rail-badge").textContent = total ? compactCount(total) : "";
 		}
 		paintAppBarActions();
+		paintAppPhoneComposer();
+		paintAppPhoneCanvas();
 		paintAppNext();
 		const rail = shadow.querySelector("#app-rail");
 
@@ -50247,7 +50381,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		};
 		divider.onpointerdown = (event) => {
 			if (!event.isPrimary || event.button !== 0) return;
-			const brief = aside.parentElement.querySelector(".app-topic-narrative");
+			const brief = aside.parentElement.querySelector(".app-topic-reading");
 			const room = [brief, aside].reduce((sum, pane) => sum + pane.getBoundingClientRect().width - parseFloat(getComputedStyle(pane).minWidth), 0);
 			if (room <= 0) return;
 			drag = { id: event.pointerId, x: event.clientX, split: appState.topicDiscussionSplit, room };
@@ -50280,7 +50414,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		heading.id = "app-topic-discussions-heading";
 		aside.setAttribute("aria-labelledby", heading.id);
 		header.append(heading, appTopicArticleNode("div", "app-topic-controls"));
-		aside.append(appTopicDiscussionDivider(aside), header, appTopicArticleNode("div", "app-topic-feed"));
+		const scroll = appTopicArticleNode("div", "app-topic-discussion-scroll");
+		scroll.append(header, appTopicArticleNode("div", "app-topic-feed"));
+		aside.append(appTopicDiscussionDivider(aside), scroll);
 		return aside;
 	}
 
@@ -50300,13 +50436,16 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const sourceURL = sameTopic && (oldDialog?.dataset.url || (focus?.matches("[data-topic-citation]") && focus.value));
 		const passage = oldDialog?.querySelector("blockquote")?.textContent || focus?.dataset.topicPassage;
 		const fromList = oldDialog ? oldDialog.hasAttribute("data-source-list") : Boolean(focus?.closest(".app-topic-sources"));
-		const scrollTop = sameTopic ? previous.parentElement.scrollTop : 0;
+		const discussion = sameTopic && previous.querySelector(".app-topic-discussions");
+		const discussionScroll = discussion && discussion.querySelector(".app-topic-discussion-scroll");
+		const discussionTop = discussionScroll?.scrollTop || 0;
 		oldDialog?.close();
 		const scroller = appTopicArticleNode("div", "app-reader-scroll app-topic-article-scroll");
 		const story = appTopicArticleNode("article", "bc-reader app-topic-article");
 		story.dataset.topicId = article.topic.id;
 		story.style.setProperty("--topic-discussion-share", String(appState.topicDiscussionSplit / 100));
 		story.setAttribute("aria-labelledby", "app-topic-article-heading");
+		const reading = appTopicArticleNode("div", "app-topic-reading");
 		const narrative = appTopicArticleNode("div", "app-topic-narrative");
 		const head = appTopicArticleNode("header", "bc-reader-head");
 		const title = appTopicArticleNode("h1", "bc-reader-title", article.topic.label);
@@ -50359,9 +50498,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			narrative.append(status);
 		}
 		if (article.timeline.length) narrative.append(appTopicArticleTimeline(article.timeline, references));
-		story.append(narrative);
-		story.append((sameTopic && previous.querySelector(".app-topic-discussions")) || appTopicArticleDiscussions());
-		if (references.size) story.append(appTopicArticleSources(references, onOpenDiscussion, openThreads));
+		reading.append(narrative);
+		if (references.size) reading.append(appTopicArticleSources(references, onOpenDiscussion, openThreads));
+		story.append(reading, discussion || appTopicArticleDiscussions());
 		const inspect = (button) => {
 			const ref = references.get(button?.dataset.topicCitation);
 			if (ref) return inspectAppTopicSource(story, ref.source, ref.number, references.size, button);
@@ -50369,7 +50508,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		story.onclick = (event) => inspect(event.target.closest("button[data-topic-citation]"));
 		scroller.append(story);
 		body.replaceChildren(scroller);
-		scroller.scrollTop = scrollTop;
+		if (discussionScroll) discussionScroll.scrollTop = discussionTop;
 		let replacement;
 		if (sourceURL) {
 			const key = sharedTopicURLKey(sourceURL);
@@ -50758,7 +50897,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			return;
 		}
 		reading.painted = signature;
-		const scrollTop = body.querySelector(".app-reader-scroll")?.scrollTop || 0;
+		const scrollTop = body.querySelector(".app-topic-reading")?.scrollTop || 0;
 		const scroller = paintAppTopicArticle(body, article, {
 			pending,
 			failedPhotos: reading.failedPhotos ||= new Set(),
@@ -50771,12 +50910,12 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (!sources) {
 				sources = appTopicArticleNode("section", "app-topic-sources");
 				sources.append(appTopicArticleNode("h2", "", "Sources"));
-				scroller.querySelector("article").append(sources);
+				scroller.querySelector(".app-topic-reading").append(sources);
 			}
 			sources.append(control);
 		}
-		syncAppTopicDiscussions(reading, scroller, article);
-		scroller.scrollTop = scrollTop;
+		syncAppTopicDiscussions(reading, scroller.querySelector(".app-topic-discussion-scroll"), article);
+		scroller.querySelector(".app-topic-reading").scrollTop = scrollTop;
 		if (reading.focusHeading) {
 			const heading = body.querySelector("h1");
 			heading.tabIndex = -1;
@@ -50852,7 +50991,6 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const body = shadow.getElementById("app-article-body");
 		body.dataset.mode = "empty";
 		body.append(appTopicArticleNode("div", "app-article-note", "Pick an article to read it here, with what people said about it beside it."));
-		shadow.getElementById("app-bar-discussion").hidden = false;
 		paintAppArticleHead("", "");
 		paintReaderMenu();
 		paintAppChrome();
@@ -50892,7 +51030,6 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			shadow.getElementById("app-article-coverage").hidden = true;
 			shadow.getElementById("app").classList.remove("has-story", "discussion-entering");
 			shadow.getElementById("app-toggle-discussion").disabled = true;
-			shadow.getElementById("app-bar-discussion").hidden = true;
 			state.topicArticle = { group, standalone, addressId, publicId: null, revision: 0, focusHeading: appIsPhone() || standalone };
 			for (const id of [group.id, ...(group.equivalentIds || [])]) state.visitedTopics.add(id);
 			const card = shadow.querySelector('.app-topic-row[data-shared-topic="' + CSS.escape(group.id) + '"]');
@@ -50907,6 +51044,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			paintAppArticleHead("", "");
 			paintReaderMenu();
 			state.scrolls.article = 0;
+			state.scrolls.discussion = 0;
 		}
 		refreshAppTopicArticle(state.topicArticle, group).catch(console.error);
 		if (appIsPhone()) setAppStage("article");
@@ -52023,6 +52161,7 @@ ${frontPageChooserHTML()}
 	function appTopicComposer(reading, entry = null) {
 		const panel = reading.discussionPanel;
 		const holder = appTopicArticleNode("div", "app-compose-bar " + (entry ? "app-topic-thread-composer" : "app-topic-feed-compose"));
+		holder.id = entry ? "app-topic-thread-compose" : "app-topic-feed-compose";
 		const entries = () => entry ? [entry] : appTopicFilteredThreads(panel);
 		const canReply = ({ discussion }) => Boolean(getSource(discussion.source)?.capabilities.reply);
 		const commentTargets = () => entries().filter(canReply).map((target) => ({
@@ -52076,9 +52215,9 @@ ${frontPageChooserHTML()}
 		const advance = (gesture) => {
 			if (end.hidden || panel.selected || panel.controller.signal.aborted) return;
 			const tail = panel.list.lastElementChild;
-			if (!gesture && tail === lastTail && lastFilter === panel.filter) return;
+			if (!gesture && (!tail || tail === lastTail && lastFilter === panel.filter)) return;
 			const box = end.getBoundingClientRect(), room = panel.scroller.getBoundingClientRect();
-			if (!box.width || box.top > Math.min(innerHeight, room.bottom) + 96 || box.bottom < Math.max(0, room.top) - 96) return;
+			if (!box.width || box.top > room.bottom + 96 || box.bottom < room.top - 96) return;
 			lastTail = tail;
 			lastFilter = panel.filter;
 			panel.pageFrom ||= tail;
@@ -52091,24 +52230,22 @@ ${frontPageChooserHTML()}
 			const entry = entries.at(-1);
 			if (entry.isIntersecting) advance(false);
 			else if (entry.boundingClientRect.width) lastTail = undefined;
-		}, { rootMargin: "0px 0px 96px", scrollMargin: "0px 0px 96px" });
+		}, { root: panel.scroller, rootMargin: "0px 0px 96px" });
 		observer.observe(end);
 		const { signal } = panel.controller;
 		signal.addEventListener("abort", () => observer.disconnect(), { once: true });
 		const root = feed.getRootNode();
 		let lastTop = 0;
-		const followScroll = (event) => {
-			if (event.target !== panel.scroller && event.target !== document) return;
-			const top = appIsPhone() ? window.scrollY : panel.scroller.scrollTop;
+		const followScroll = () => {
+			const top = panel.scroller.scrollTop;
 			if (top > lastTop) advance(true);
 			lastTop = top;
 		};
-		root.addEventListener("scroll", followScroll, { capture: true, passive: true, signal });
-		window.addEventListener("scroll", followScroll, { passive: true, signal });
-		feed.addEventListener("wheel", (event) => { if (event.deltaY > 0) advance(true); }, { passive: true, signal });
+		panel.scroller.addEventListener("scroll", followScroll, { passive: true, signal });
+		panel.scroller.addEventListener("wheel", (event) => { if (event.deltaY > 0) advance(true); }, { passive: true, signal });
 		let touchY;
-		feed.addEventListener("touchstart", (event) => { touchY = event.touches[0]?.clientY; }, { passive: true, signal });
-		feed.addEventListener("touchmove", (event) => {
+		panel.scroller.addEventListener("touchstart", (event) => { touchY = event.touches[0]?.clientY; }, { passive: true, signal });
+		panel.scroller.addEventListener("touchmove", (event) => {
 			if (event.touches[0]?.clientY < touchY - 12) { touchY = null; advance(true); }
 		}, { passive: true, signal });
 		root.addEventListener("keydown", (event) => {
@@ -52146,6 +52283,7 @@ ${frontPageChooserHTML()}
 		}
 		if (panel.list.parentElement !== feed) feed.append(panel.list, panel.status, panel.retry, panel.end, panel.compose.holder);
 		panel.compose.update();
+		paintAppPhoneComposer();
 		const focus = feed.getRootNode().activeElement;
 		let page = rows.slice(0, panel.target);
 		if (rows.length > panel.target && panel.pageKeys?.size) {
@@ -52161,13 +52299,12 @@ ${frontPageChooserHTML()}
 			return panel.nodes.get(key);
 		});
 		if (visible.length !== panel.list.children.length || visible.some((item, i) => panel.list.children[i] !== item)) {
-			const scroll = appIsPhone() ? document.scrollingElement : panel.scroller;
+			const scroll = panel.scroller;
 			const top = Math.max(0, panel.scroller.getBoundingClientRect().top);
 			const box = panel.list.getBoundingClientRect();
 			const pageArrived = panel.pageFrom && visible.length > panel.list.children.length;
 			let nextReply;
-			if (pageArrived && !panel.selected && !focus?.closest(".app-topic-sources") && box.bottom <= top && box.bottom >= top - innerHeight &&
-				!panel.scroller.querySelector(".app-topic-divider")?.getClientRects().length) {
+			if (pageArrived && !panel.selected && box.bottom <= top && box.bottom >= top - scroll.clientHeight) {
 				const after = visible.indexOf(panel.pageFrom) + 1;
 				nextReply = visible.slice(after).find((node) => !panel.list.contains(node)) ||
 					visible.find((node) => !panel.list.contains(node));
@@ -52369,6 +52506,7 @@ ${frontPageChooserHTML()}
 		const feed = panel.scroller.querySelector(".app-topic-feed");
 		feed.hidden = true;
 		feed.after(region);
+		paintAppPhoneComposer();
 		refreshSaveControls().catch(console.error);
 		const key = entry.discussion.key;
 		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted && panel.entries.has(entry.thread.url);
@@ -52676,9 +52814,10 @@ ${frontPageChooserHTML()}
 		panel.origin = panel.results.get(entry.discussion.key)?.data?.comments.find(({ comment }) => comment.key === anchor?.dataset.commentKey) || null;
 		panel.focusComment = null;
 		panel.selected = thread.url;
+		if (appIsPhone()) setAppStage("discussion");
 		const back = paintAppTopicDetail(reading, entry);
 		back.focus({ preventScroll: true });
-		if (anchor?.isConnected) back.scrollIntoView({ block: "nearest" });
+		if (anchor?.isConnected) panel.scroller.scrollTop = 0;
 		return true;
 	}
 
@@ -52704,11 +52843,11 @@ ${frontPageChooserHTML()}
 				anchor = controls.find((item) => item.dataset.topicDiscussion === key && item.dataset.commentKey === originalKey) ||
 					controls.find((item) => item.dataset.topicDiscussion === key) || controls[0];
 			} else {
-				anchor = [...panel.scroller.querySelectorAll("[data-topic-thread]")].find((item) => item.dataset.topicThread === url && item.getClientRects().length);
+				anchor = [...panel.scroller.closest("article").querySelectorAll("[data-topic-thread]")].find((item) => item.dataset.topicThread === url && item.getClientRects().length);
 			}
 		}
 		if (!anchor) {
-			anchor = panel.scroller.querySelector(".app-topic-discussions h2");
+			anchor = panel.scroller.querySelector("h2");
 			if (anchor) anchor.tabIndex = -1;
 		}
 		anchor?.focus({ preventScroll: true });
@@ -53398,6 +53537,7 @@ ${frontPageChooserHTML()}
 		pane.dataset.mode = mode;
 		paintReaderMenu();
 		paintAppBarActions();
+		paintAppPhoneCanvas();
 
 		if (mode !== "reader" && appIsPhone()) {
 			setAppViewMenuOpen(false);
@@ -53606,7 +53746,10 @@ ${frontPageChooserHTML()}
 
 		host.style.setProperty("--reader-face", READER_FONTS[face] || READER_FONTS.charter);
 		appReaderElement()?.setAttribute("data-face", face);
-		if (host === appState?.ui.shadow.host) paintAppDiscussionTheme();
+		if (host === appState?.ui.shadow.host) {
+			paintAppDiscussionTheme();
+			paintAppPhoneCanvas();
+		}
 	}
 
 	function readerDateText(value) {
@@ -54495,7 +54638,11 @@ ${frontPageChooserHTML()}
 		const topicMenu = shadow.querySelector('.app-topic-controls :is(.settings-select-toggle, .source-menu-anchor > button)[aria-expanded="true"]');
 		if (topicMenu) return () => topicMenu.click();
 		if (appState.bulk) return () => endAppSelection({ refocus: true });
-		if (appState.topicArticle) return returnFromAppTopicArticle;
+		if (shadow.getElementById("app").hasAttribute("data-compose-open")) return () => {
+			setAppPhoneComposer(false);
+			shadow.getElementById("app-bar-compose").focus({ preventScroll: true });
+		};
+		if (appState.topicArticle && !appIsPhone()) return returnFromAppTopicArticle;
 
 		return appIsPhone() && shadow.querySelector("#app").dataset.stage !== "list" ? lowerAppSheet : null;
 	}
@@ -54525,7 +54672,7 @@ ${frontPageChooserHTML()}
 		"open-original": () => {
 			const url = appState.open?.url;
 
-			return url && appShortcutControl(appUsesFloatingControls() ? "#app-bar-open" : "#app-view-toggle")
+			return url && appViewMenuToggle(appState.ui.shadow)?.getClientRects().length
 				? () => {
 						rememberAppArrival(url).catch(console.error);
 						window.open(url, "_blank", "noopener");

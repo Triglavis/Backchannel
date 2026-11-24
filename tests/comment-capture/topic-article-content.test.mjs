@@ -211,9 +211,14 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 			assert.match(await originals.innerText(), /Published Nov 18, 2026.*Shared Nov 19, 2026/);
 			assert.match(await originals.innerText(), /Shared Nov 20, 2026/);
 			const discussion = article.getByRole("complementary", { name: "Discussions", exact: true });
+			if (width <= 700) await page.locator("#app-bar-discussion").click();
 			await discussion.getByRole("list", { name: "Comments across discussions" }).getByText(/Comment 1 on Control room handover/).waitFor();
 			assert.equal(await discussion.getByRole("link", { name: busiest.title, exact: true }).count(), 0);
 			assert.equal(await discussion.getByRole("link", { name: /What changes for operators/ }).count(), 0);
+			if (width <= 700) {
+				await page.locator("#app-bar-discussion").click();
+				await discussion.waitFor({state: "hidden"});
+			}
 			const source = originals.locator(":scope > li").first();
 			const sourceThreads = source.locator("details");
 			assert.equal(await sourceThreads.getAttribute("open"), null);
@@ -230,8 +235,8 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 				const discussion = el.querySelector(".app-topic-discussions").getBoundingClientRect();
 				const sources = el.querySelector(".app-topic-sources").getBoundingClientRect();
 				return wide ? discussion.left >= narrative.right && discussion.top < narrative.bottom && sources.top >= narrative.bottom :
-					discussion.top >= narrative.bottom && sources.top >= discussion.bottom;
-			}, width > 700), "the wide layout has a right column and the compact layout flows from brief to discussions to sources");
+					discussion.height === 0 && sources.top >= narrative.bottom;
+			}, width > 700), "the wide layout has a right column and the phone brief flows directly to its sources");
 			assert.deepEqual(await article.evaluate((el) => {
 				const host = el.getRootNode().host;
 				const before = getComputedStyle(el).fontSize;
