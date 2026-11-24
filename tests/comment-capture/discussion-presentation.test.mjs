@@ -312,8 +312,9 @@ test('Sidebar shows the remaining discussion details when an empty source is omi
   try{
     await app.page.goto(url);
     await settled(app);
+    const details=app.page.locator('#comments-content .submission-detail[data-discussion-key="hn:9001"]');
+    assert(await waitFor(()=>details.isVisible()),'the source post details stay visible without an extra filter selection');
     assert.equal(await app.page.locator('#comments-content .source-menu [data-discussion-key="lemmy:71"]').count(),0);
-    assert.equal(await app.page.locator('#comments-content .submission-detail[data-discussion-key="hn:9001"]').isVisible(),true,'the source post details stay visible without an extra filter selection');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
 });
