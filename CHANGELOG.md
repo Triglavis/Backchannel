@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
-## [Unreleased] — planned 1.6.19.1
+## [1.6.19.1] — 2026-11-24
 
 ### Added
 
@@ -2914,7 +2914,8 @@ Releases before 1.4.7 are recorded in the
 commit history. Entries for 1.4.7 through 1.5.3 are summarized from their release
 commits rather than written at the time.
 
-[Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.19...HEAD
+[Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.19.1...HEAD
+[1.6.19.1]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.19...v1.6.19.1
 [1.6.19]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.18.5...v1.6.19
 [1.6.1]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/twalichiewicz/Backchannel/compare/v1.5.8...v1.6.0
