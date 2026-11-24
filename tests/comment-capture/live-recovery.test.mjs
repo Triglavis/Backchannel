@@ -311,11 +311,10 @@ for (const scenario of ['normal', 'delayed', 'expired']) test(`concurrent Reader
       assert(await waitFor(() => opened.length > 0, 5000));
       await article.locator('#browse-home-sync').click();
     }
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    assert.equal(opened.length, 1, 'concurrent refreshes must not open separate Reddit tabs');
-    assert(await waitFor(() => opened.every((page) => page.isClosed()), 30000), 'the shared refresh closes its tab');
+    assert(await waitFor(() => opened.length > 0 && opened.every((page) => page.isClosed()), 30000), 'the shared refresh opens and closes its tab');
     assert(await waitFor(async () => /A freshly synced shared comment/.test(await article.locator('#comments-content').textContent()), 15000), 'Sidebar receives the refreshed comment');
     assert(await waitFor(async () => /A freshly synced shared comment/.test(await app.page.locator('#comments-content').textContent()), 15000), 'Reader receives the refreshed comment');
+    assert.equal(opened.length, 1, 'concurrent refreshes must not open separate Reddit tabs');
     assert.equal(requests.filter((path) => path.includes('/comments/')).length, 1, 'the two views share the same Reddit discussion request');
     assert(await waitFor(() => app.store.get('HNewhere:reddit_shared_refresh')?.state === 'done', 10000));
     assert(await waitFor(async () => await app.page.locator('#app-list-sync').getAttribute('aria-busy') !== 'true', 10000), 'the first Sync has finished');
