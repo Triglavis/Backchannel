@@ -228,15 +228,16 @@ test('diagnostics consent follows the signed-in account across devices', {timeou
   const diagnosticsKey = 'HNewhere:account_diagnostics:' + account;
   const first = await launchApp({sharedStore:true, values:{[storage]:session, 'HNewhere:share_diagnostics':Date.now()-1000}});
   const second = await launchApp({sharedStore:true, values:{[storage]:session}, viewport:{width:390,height:844}, hasTouch:true});
-  const managePrivacy = async app => {
-    const panel = await settings(app);
+  const managePrivacy = async (app, revision) => {
+    const panel = await settings(app, appURL, {
+      beforeOpen: async () => assert(await waitFor(() => app.store.get(storage)?.revision === revision), 'startup sync finishes before opening Account'),
+    });
     await panel.getByRole('button',{name:'Manage account',exact:true}).click();
     return panel.getByRole('checkbox',{name:'Share diagnostics',exact:true});
   };
   try {
     await Promise.all([mockAccount(first,remote).start,mockAccount(second,remote).start]);
-    const firstChoice = await managePrivacy(first);
-    assert(await waitFor(() => first.store.get(storage)?.revision === 1));
+    const firstChoice = await managePrivacy(first, 1);
     const back = first.page.locator('#account-manage-back');
     assert(await waitFor(async () => !(await back.isDisabled()) && !(await firstChoice.isDisabled())));
     assert.equal(await firstChoice.isChecked(),false,'alpha consent was limited to the old device');
@@ -261,7 +262,7 @@ test('diagnostics consent follows the signed-in account across devices', {timeou
     await first.page.evaluate(() => window.resumeDiagnosticsRefresh());
     assert(await waitFor(() => first.store.get(storage)?.revision === 2));
     assert(await firstChoice.isChecked());
-    const secondChoice = await managePrivacy(second);
+    const secondChoice = await managePrivacy(second, 2);
     assert(await waitFor(() => secondChoice.isChecked()),'the second device receives consent');
     await secondChoice.uncheck();
     assert(await waitFor(() => second.store.get(storage)?.revision === 3));
