@@ -190,6 +190,36 @@ test("the same conversation reported by two outlets supplies each reply once", a
 	assert.equal(await aside.getByText("Updated harbor report discussion", { exact: true }).count(), 0);
 });
 
+for (const phone of [false, true]) test(`the ${phone ? "phone" : "desktop"} topic composer stays at the bottom while reading replies`, async (t) => {
+	const { page, aside } = await openTopic(t, { phone, viewport: { width: 320, height: 590 } });
+	const scroller = page.locator(".app-topic-article-scroll");
+	const field = aside.getByRole("textbox", { name: /Add a comment/ });
+	const reply = feedList(aside).getByRole("listitem").nth(10);
+	await reply.waitFor();
+	const position = () => field.evaluate((node) => {
+		const footer = node.closest(".app-compose-bar");
+		const scroller = node.closest(".app-topic-article-scroll").getBoundingClientRect();
+		return { bottom: footer.getBoundingClientRect().bottom, viewport: Math.min(innerHeight, scroller.bottom),
+			footerAfterReplies: Boolean(footer.previousElementSibling), width: node.clientWidth };
+	});
+	for (const index of [2, 10]) {
+		await feedList(aside).getByRole("listitem").nth(index).evaluate((node) => node.scrollIntoView({ block: "center" }));
+		assert(await waitFor(async () => {
+			const { bottom, viewport, footerAfterReplies, width } = await position();
+			return footerAfterReplies && viewport - bottom >= 0 && viewport - bottom < 90 && width > 180;
+		}), "the shared field is reachable at the bottom of the discussion");
+	}
+	if (!phone) assert(await scroller.evaluate((node) => node.scrollTop > 0));
+	await field.fill("What did the port operators decide?");
+	await aside.getByRole("button", { name: "Add a comment", exact: true }).click();
+	const menu = aside.getByRole("group", { name: "Choose a discussion" });
+	await menu.waitFor();
+	const menuBox = await menu.boundingBox();
+	const fieldBox = await field.boundingBox();
+	assert(menuBox.y >= 0 && menuBox.y + menuBox.height <= fieldBox.y + 1,
+		"the discussion choices open above the field " + JSON.stringify({ menuBox, fieldBox }));
+});
+
 test("a delayed comment page stays in view when phone scrolling has just crossed into the article sources", async (t) => {
 	const ids = Array.from({ length: 60 }, (_, i) => 8600100 + i);
 	const extraSources = Array.from({ length: 16 }, (_, i) => ({ id: "ref" + i, publisher: "Survey station " + i,
@@ -1442,7 +1472,7 @@ test("the mixed topic message bar keeps its draft and saves a note to the select
 	assert.deepEqual(errors, []);
 });
 
-test("the phone message bar follows Aa and keeps its draft as the available destinations change", async (t) => {
+test("the phone message bar keeps its app-sized typography, Aa colors and draft", async (t) => {
 	const { aside, page, store, errors } = await openTopic(t, { phone: true });
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
@@ -1457,6 +1487,11 @@ test("the phone message bar follows Aa and keeps its draft as the available dest
 	]) {
 		await appearance.tap();
 		await page.locator('[data-reader-page="' + paper + '"]').tap();
+		if (paper === "night") {
+			await page.locator('[data-reader-font="georgia"]').tap();
+			await page.locator("#app-zoom-in").tap();
+			await page.locator("#app-zoom-in").tap();
+		}
 		await appearance.tap();
 		const style = await field.evaluate((node) => {
 			const box = node.closest(".compose-box");
@@ -1471,9 +1506,9 @@ test("the phone message bar follows Aa and keeps its draft as the available dest
 			};
 		});
 		assert.deepEqual([style.paper, style.ink, style.arrow, style.glyph], [background, ink, link, background]);
-		assert.equal(style.face, style.articleFace);
+		assert.notEqual(style.face, style.articleFace);
 		assert.equal(style.placeholder, style.secondary);
-		assert(style.size >= 16);
+		assert.equal(style.size, 16);
 		await send.tap();
 		assert.equal(await destination.evaluate((node) => getComputedStyle(node).backgroundColor), background);
 		assert.equal(await destination.getByRole("button").first().evaluate((node) => getComputedStyle(node).color), ink);

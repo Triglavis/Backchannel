@@ -111,11 +111,10 @@ for (const colorScheme of ['light', 'dark']) {
   });
 }
 
-test('chin outlines fit the chin surface and each glyph is vertically centered',{timeout:15000},async()=>{
+test('borderless chin buttons keep each glyph vertically centered',{timeout:15000},async()=>{
   const app=await ready();
   try{
     const measurements=await app.page.locator('#app-chin').evaluate(async chin=>{
-      const ordinaryBorder=getComputedStyle(chin.getRootNode().getElementById('app-list-sync')).borderTopColor;
       return Promise.all([...chin.querySelectorAll('.app-head-icon')].map(async button=>{
         const svg=button.querySelector('svg');
         const mask=getComputedStyle(button,'::after');
@@ -149,15 +148,13 @@ test('chin outlines fit the chin surface and each glyph is vertically centered',
           label:button.getAttribute('aria-label')||button.dataset.itemAction,
           offset:icon.top+icon.height*weightedY/ink/size-top-height/2,
           border:style.borderTopWidth,
-          customColor:style.borderTopColor!==ordinaryBorder,
         };
       }));
     });
     assert.equal(measurements.length,3);
-    for(const {label,offset,border,customColor} of measurements){
+    for(const {label,offset,border} of measurements){
       assert(Math.abs(offset)<.3,`${label} glyph center is ${offset.toFixed(2)}px from the center of its button`);
-      assert.equal(border,'1px');
-      assert(customColor,`${label} uses the chin outline color`);
+      assert.equal(border,'0px');
     }
   }finally{await app.browser.close()}
 });

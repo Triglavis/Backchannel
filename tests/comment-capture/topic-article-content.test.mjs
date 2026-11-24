@@ -59,7 +59,7 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	["auto", "light", "night", "dark", "rgb(18, 18, 18)", "rgb(30, 30, 30)"],
 	["dark", "light", "sepia", "light", "rgb(244, 236, 216)", "rgb(235, 224, 198)"],
 	["light", "dark", "gray", "dark", "rgb(74, 74, 76)", "rgb(60, 60, 62)"],
-]) test(`topic Sort and Sources follow Aa ${paper} with ${theme} app appearance`, async (t) => {
+]) test(`topic Sort and Sources keep app typography with Aa ${paper} and ${theme} app appearance`, async (t) => {
 	const { browser, page, errors } = await openReader({ theme, colorScheme: system });
 	t.after(() => browser.close());
 	const address = "https://backchnnl.app/?topic=" + encodeURIComponent(topic.id);
@@ -73,6 +73,7 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	const list = page.locator("#app-list");
 	const appColor = await style(list, "backgroundColor");
 	const originalSize = parseFloat(await style(sort, "fontSize"));
+	const uiFace = await style(page.locator("#app"), "fontFamily");
 	await sources.click();
 	if (theme === "auto") {
 		await page.emulateMedia({ colorScheme: "dark" });
@@ -102,8 +103,9 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	assert.equal(await style(sort, "borderTopColor"), rule);
 	assert.equal(await style(sort.locator("[aria-hidden]"), "color"), ink);
 	assert.equal(await style(article.locator(".page-sort-label"), "color"), secondary);
-	assert.equal(await style(sort, "fontFamily"), face);
-	assert(parseFloat(await style(sort, "fontSize")) > originalSize);
+	assert.notEqual(face, uiFace);
+	assert.equal(await style(sort, "fontFamily"), uiFace);
+	assert.equal(parseFloat(await style(sort, "fontSize")), originalSize);
 	assert.equal(await style(sources, "color"), secondary);
 
 	await sort.press("ArrowDown");
@@ -113,7 +115,8 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	assert.equal(await style(options, "borderTopColor"), rule);
 	assert.equal(await style(options.getByRole("separator"), "borderTopColor"), rule);
 	assert.equal(await style(selected, "color", "::before"), ink);
-	assert.equal(await style(selected, "fontFamily"), face);
+	assert.notEqual(await style(selected, "fontFamily"), face);
+	assert.equal(await style(selected, "fontSize"), "12px");
 	assert.equal(await style(selected, "outlineColor"), accent);
 	assert.notEqual(await style(selected, "backgroundColor"), await style(options.getByRole("menuitemradio", { checked: false }).first(), "backgroundColor"));
 	await selected.press("Escape");
@@ -128,11 +131,11 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	assert.equal(await style(article.locator(".app-drop-arrow"), "borderLeftColor"), rule);
 	assert.equal(await style(sources, "color"), accent);
 	assert.equal(await style(menu.locator(".choice-label").first(), "color"), ink);
-	assert.equal(await style(menu.locator(".choice-label").first(), "fontFamily"), face);
+	assert.equal(await style(menu.locator(".choice-label").first(), "fontFamily"), uiFace);
 	assert.equal(await style(menu.locator(".app-discussion-summary"), "color"), secondary);
 	assert.equal(await style(menu.locator(".discussion-thread-link").first(), "color"), accent);
 	const group = menu.getByRole("button", { name: /Hacker News discussions/ });
-	assert.equal(await style(group, "fontFamily"), face);
+	assert.equal(await style(group, "fontFamily"), uiFace);
 	assert.equal(await style(group, "borderRightColor", "::after"), secondary);
 	assert.equal(await style(all, "backgroundColor"), accent);
 	assert.equal(await style(all, "borderLeftColor", "::after"), background);

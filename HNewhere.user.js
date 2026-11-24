@@ -24195,7 +24195,7 @@ ${
 	function settingsPrivacyHTML() {
 		return `<div id="settings-privacy" class="settings-group settings-privacy" data-app-section="general">
 <div class="sources-subhead">Privacy</div>
-<div class="settings-privacy-body"><p class="privacy-meta">Triglavis LLC &middot; backchnnl.app &middot; Last updated 20 November 2026</p>
+<div class="settings-privacy-body"><p class="privacy-meta">Triglavis LLC &middot; backchnnl.app &middot; Last updated 24 November 2026</p>
 
         <h3>What this site collects</h3>
         <p>The promotional page uses no cookies, analytics, tracking pixels or third-party scripts. <strong>Cloudflare</strong> hosts Backchannel, handles network requests, and records operational logs.</p>
@@ -24207,7 +24207,7 @@ ${
           <li>If you set up Account sync, Backchannel uploads an encrypted copy of your settings, reading queue, saved items and notes to Cloudflare. The service stores your passkey's public credential, session records, and browser and platform labels for linked devices. Backchannel stores your verified recovery email, uses it to label new passkeys, and sends verification and recovery codes through Cloudflare. Your recovery key stays on your devices.</li>
           <li>To find discussions, it asks each source you have turned on about the page you are on. Most are told its address; Lobsters and Mastodon's search are told only its domain. A link you open in the reader from Mastodon's front page is looked up on mastodon.social by its address. A source you have turned off is asked nothing.</li>
           <li>It checks the pages in your Collection for new discussion, each at most once an hour, by sending their addresses to Hacker News, Bluesky's link index and, when Reddit answers through its archive, that archive. A page with new discussion is then looked up like the page you are on. Remove a page from Collection to stop checking it.</li>
-          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics Worker uses public publisher material for the brief. Reader can load photos from the publishers cited in the article. Topics based only on your own links are assembled on your device. Reader can also look up a topic subject on Wikipedia and the image credits on Wikimedia Commons. Reader loads these images without a referrer. If you send a topic report while signed in, Backchannel stores the link, the displayed topic, any suggestion, and a hashed account identifier for internal review. The identifier keeps the same account from counting twice for a link.</li>
+          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics Worker uses public publisher material for the brief. If a brief is empty, Reader may request previews directly from the linked publishers. Imported bookmarks marked for preview on open use saved metadata until you open the bookmark. Reader can load photos from the publishers cited in the article. Topics based only on your own links are assembled on your device. Reader can also look up a topic subject on Wikipedia and the image credits on Wikimedia Commons. Reader loads these images without a referrer. If you send a topic report while signed in, Backchannel stores the link, the displayed topic, any suggestion, and a hashed account identifier for internal review. The identifier keeps the same account from counting twice for a link.</li>
           <li><strong>Reddit</strong>, <strong>Wikipedia</strong> and <strong>Hacker News</strong> can tell who you are. Signed in to one, its requests can arrive as your account. Signed out, Reddit and Wikipedia still send a device identifier.</li>
           <li>Voting and replying happen in a window on that source's own site, using the session you already have there.</li>
           <li>An article opened in the reader loads from the site that published it, with no referrer. If the page does not respond inside that frame, the script fetches it once, without cookies, to see whether it can be shown there and, if not, to show its text.</li>
@@ -38276,6 +38276,7 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	overscroll-behavior:none;
 	--rail-column:50px;
 	--app-split:.6;
+	--app-ui-font:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
 	display:grid;
 	grid-template-columns:var(--rail-column) min(var(--app-list-width, 300px), calc(100% - var(--rail-column) - 201px)) minmax(0, 1fr);
 	grid-template-rows:minmax(0, 1fr);
@@ -38285,7 +38286,7 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	border-radius:12px;
 	background:var(--rail-bg);
 	color:var(--text);
-	font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+	font-family:var(--app-ui-font);
 	font-size:13px;
 	line-height:1.4;
 	-webkit-text-size-adjust:100%;
@@ -38407,7 +38408,7 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 		display:inline-flex;
 		align-items:center;
 		justify-content:center;
-		border-color:color-mix(in srgb, var(--surface-border) 56%, transparent);
+		border:0;
 		background:color-mix(in srgb, var(--rail-fg) 6%, transparent);
 		box-shadow:none;
 		color:var(--rail-fg);
@@ -39465,12 +39466,8 @@ ${SETTINGS_MODAL_CSS}
 	min-height:36px; margin-bottom:.45em; border-bottom:1px solid var(--reader-rule);
 }
 .app-topic-discussion-head h2 { margin:0; }
-.app-topic-controls { display:flex; align-items:center; gap:2px; margin-inline-start:auto; font:.75em/1.4 var(--reader-face); }
-.app-topic-controls .app-discussion-sort .page-sort { font-size:calc(10em / 12); }
-.app-topic-controls .settings-select-menu { font-size:1.2em; }
-.app-topic-controls .dropdown .dropdown-item { font-family:inherit; font-size:inherit; }
-.app-topic-controls .app-discussion-meta :is(.source-menu, .source-menu-option, .app-sources-title) { font-size:inherit; }
-.app-topic-controls .app-discussion-meta :is(.choice-head, .choice-sub-head, .settings-option-hint) { font-size:calc(11em / 12); }
+.app-topic-discussion-head:has(.source-menu:not(.hidden), .settings-select-toggle[aria-expanded="true"]) { z-index:4; }
+.app-topic-controls { display:flex; align-items:center; gap:2px; margin-inline-start:auto; font:12px/1.4 var(--app-ui-font); }
 .app-topic-controls .discussion-thread-link { color:var(--reader-link); }
 .app-topic-controls .app-sources-head { align-items:center; justify-content:space-between; }
 .app-topic-controls .choice-label { white-space:normal; }
@@ -39487,20 +39484,28 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-feed-more { padding:.35em .9em; border:1px solid var(--reader-rule); border-radius:999px; background:transparent; color:var(--reader-link); font:600 .75em/1.5 var(--topic-sans); cursor:pointer; }
 .app-topic-feed-more:hover { background:var(--topic-tint); }
 .app-topic-discussions .app-compose-bar {
-	margin:.6em 0;
-	font:normal .82em/1.45 var(--reader-face);
+	position:sticky;
+	z-index:3;
+	bottom:8px;
+	flex:none;
+	margin:auto 0 0;
+	padding-top:8px;
+	font:13px/1.4 var(--app-ui-font);
 	--send-note-stage:var(--topic-secondary);
 	--send-note-peak:var(--reader-ink);
 	--send-ink-stage:color-mix(in srgb, var(--accent-ink) 68%, transparent);
 	--send-ink-peak:var(--accent-ink);
 }
-.app-topic-discussions .app-compose-bar .composer-text { min-width:0; font:inherit; }
+.app-topic-feed, .app-topic-thread-detail { display:flex; flex:1 0 auto; flex-direction:column; }
+.app-topic-thread-detail > :is(.app-topic-thread-back, .app-topic-clear-focus) { align-self:flex-start; }
+.app-topic-discussions .app-compose-bar .compose-field { box-shadow:0 3px 12px #0002; }
+.app-topic-discussions .app-compose-bar .composer-text { min-width:0; }
 .app-topic-discussions .composer-text::placeholder { color:var(--topic-secondary); opacity:1; }
-.app-topic-discussions .app-compose-bar :is(.composer-help-toggle, .compose-target) { font-family:inherit; }
 .app-topic-discussions .compose-field:focus-within { box-shadow:0 0 0 2px color-mix(in srgb, var(--reader-link) 18%, transparent); }
-.app-topic-discussions .app-topic-feed-compose .compose-targets { top:calc(100% + 6px); bottom:auto; }
-.app-topic-discussions .compose-targets { width:max-content; max-width:min(270px, 76vw); }
+.app-topic-discussions .compose-send-row:has(.compose-targets:not(.hidden)) { position:static; }
+.app-topic-discussions .compose-targets { width:max-content; max-width:min(270px, 100%); }
 .app-topic-discussions .compose-target .choice-label { white-space:normal; }
+.app-topic-discussions .choice-count { flex:none; white-space:nowrap; }
 .app-topic-comments { margin:0; padding:0; list-style:none; }
 .app-topic-comments > li { padding:.68em 0; }
 .app-topic-feed-comment + .app-topic-feed-comment { border-top:1px solid var(--reader-rule); }
@@ -39528,10 +39533,8 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-reply .composer-status { color:var(--topic-secondary); }
 .app-topic-discussions [hidden] { display:none !important; }
 @media (pointer:coarse) {
-	.app-topic-controls :is(.source-menu-option,.dropdown-item), .app-topic-discussions :is(.app-topic-comment-action,.app-topic-comment-context,.app-topic-thread-back,.item-action-link) { min-height:40px; }
-	.app-topic-discussions .composer-text { font-size:16px; }
-	.app-topic-discussions .app-compose-bar .composer-text { font-size:max(16px, 1em); }
-	.app-topic-discussions :is(.compose-send, .compose-target) { min-height:32px; min-width:32px; }
+	.app-topic-discussions :is(.app-topic-comment-action,.app-topic-comment-context,.app-topic-thread-back,.item-action-link) { min-height:40px; }
+	.app-topic-reply .composer-text { font-size:16px; }
 }
 @container topic-article (min-width:720px) and (min-width:45em) {
 	.app-topic-article.bc-reader:has(> .app-topic-discussions) {
@@ -39548,7 +39551,7 @@ ${SETTINGS_MODAL_CSS}
 	.app-topic-narrative { grid-column:1; grid-row:1; min-width:var(--topic-brief-min); }
 	.app-topic-narrative > *, .app-topic-sources { max-width:42em; }
 	.app-topic-sources { grid-column:1; grid-row:2; }
-	.app-topic-discussions { grid-column:2; grid-row:1 / span 2; position:relative; align-self:stretch; min-width:var(--topic-discussion-min); margin:0; padding:.18em 0 0; border:0; }
+	.app-topic-discussions { grid-column:2; grid-row:1 / span 2; position:relative; display:flex; flex-direction:column; align-self:stretch; min-width:var(--topic-discussion-min); margin:0; padding:.18em 0 0; border:0; }
 	.app-topic-divider { display:block; position:absolute; inset-block:0; inset-inline-end:100%; width:var(--topic-gutter); cursor:col-resize; touch-action:none; user-select:none; }
 	.app-topic-divider::before, .app-topic-divider::after { content:""; position:absolute; inset-inline-start:50%; transform:translateX(-50%); background:var(--reader-rule); }
 	.app-topic-divider::before { inset-block:0; width:1px; }
@@ -39588,6 +39591,7 @@ ${SETTINGS_MODAL_CSS}
 }
 @media (max-width:700px) {
 	.app-topic-article.bc-reader { padding-top:24px; }
+	.app-topic-discussions .app-compose-bar { bottom:calc(60px + max(env(safe-area-inset-bottom, 0px), var(--app-keyboard, 0px))); }
 	.app-topic-cite::after { content:""; position:absolute; inset:-4px -1px; }
 }
 @container topic-article (max-width:380px) {
@@ -39863,6 +39867,19 @@ ${SETTINGS_MODAL_CSS}
 
 #app-list-body .app-row:not(.is-unread) .browse-title-link {
 	color:var(--muted);
+}
+
+#app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-title-link, .browse-more:where(:not(:disabled))) {
+	color:var(--text);
+}
+
+#app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-site, .browse-sources-total, .reader-collection-new, .browse-rank),
+.app-topic-row[aria-current] .app-topic-meta {
+	color:color-mix(in srgb, var(--text) 82%, var(--meta));
+}
+
+#app-list-body .app-topic-row[aria-current] .app-topic-name {
+	color:var(--text);
 }
 
 #app-list-body .browse-card.app-row .browse-title-link {
@@ -41486,7 +41503,7 @@ header .item-action-link {
 	}
 
 	#app[data-stage="discussion"]:has(#panel :is(.source-menu, .compose-targets):not(.hidden)) :is(#app-bar, #app-bar-back),
-	#app[data-stage="article"]:has(.app-topic-controls .source-menu:not([popover], .hidden)) :is(#app-bar, #app-bar-back) {
+#app[data-stage="article"]:has(.app-topic-controls .source-menu:not([popover], .hidden), .app-topic-discussions .compose-targets:not(.hidden)) :is(#app-bar, #app-bar-back) {
 		visibility:hidden;
 	}
 
@@ -52127,7 +52144,7 @@ ${frontPageChooserHTML()}
 			panel.end = appTopicFeedEnd(reading, feed);
 			panel.compose = appTopicComposer(reading);
 		}
-		if (panel.list.parentElement !== feed) feed.append(panel.compose.holder, panel.list, panel.status, panel.retry, panel.end);
+		if (panel.list.parentElement !== feed) feed.append(panel.list, panel.status, panel.retry, panel.end, panel.compose.holder);
 		panel.compose.update();
 		const focus = feed.getRootNode().activeElement;
 		let page = rows.slice(0, panel.target);

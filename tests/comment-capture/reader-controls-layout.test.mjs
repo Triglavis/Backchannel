@@ -101,6 +101,36 @@ for (const [width, heading] of [[1600, '#app-list > .app-pane-head'], [390, '#ap
   });
 }
 
+for (const colorScheme of ['light', 'dark']) test(`the open list row keeps text and its menu legible in ${colorScheme} mode`, async t => {
+  const { browser, page } = await launchApp({ colorScheme, settings: { updateCheck: false, sources: { hn: true } } });
+  t.after(() => browser.close());
+  await page.goto('https://backchnnl.app/');
+  const row = page.locator('#app-list-body .browse-row').first();
+  await row.locator('.browse-title-link').click();
+  assert(await waitFor(() => row.evaluate(node => node.classList.contains('is-open'))));
+  await page.mouse.move(0, 0);
+  const contrast = await row.evaluate(node => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d');
+    const luminance = (rgb) => [...rgb.slice(0, 3)].map(value => value / 255)
+      .reduce((sum, value, i) => sum + [0.2126, 0.7152, 0.0722][i] *
+        (value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4), 0);
+    const paint = (color) => { context.fillStyle = color; context.fillRect(0, 0, 1, 1); };
+    paint(getComputedStyle(node.closest('#app-list')).getPropertyValue('--surface'));
+    paint(getComputedStyle(node).backgroundColor);
+    const background = luminance(context.getImageData(0, 0, 1, 1).data);
+    return ['.browse-title-link', '.browse-site', '.browse-more'].map(selector => {
+      const color = getComputedStyle(node.querySelector(selector)).color;
+      context.clearRect(0, 0, 1, 1);
+      paint(color);
+      const foreground = luminance(context.getImageData(0, 0, 1, 1).data);
+      return (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05);
+    });
+  });
+  assert(contrast.every(value => value >= 4.5), `contrast for the title, metadata and menu is ${contrast.join(', ')}`);
+});
+
 test('wide Reader keeps its real article actions together in the chin',{timeout:20000},async()=>{
   const app=await launchApp({sharedStore:true,viewport:{width:1600,height:950},votable:{[STORIES[0].id]:'updown'},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{

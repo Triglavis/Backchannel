@@ -8,7 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
-## [Unreleased] — planned 1.6.19
+## [Unreleased] — planned 1.6.19.1
+
+### Added
+
+- Settings › Collection imports browser bookmark HTML with a preview and undo.
+  Export bookmarks and download notes from the same settings section.
+- By topic groups links about the same development. Topic Articles show a cited
+  brief, available images and a timeline alongside comments from the original
+  discussions. Best ranks replies across sources, and scrolling loads more.
+- Search finds topics across Reader views. Settings › Filters lets you hide
+  topics and restore hidden links. Report incorrect topic lets signed-in
+  readers suggest a correction for a link.
+- Shift-click or use Select links to act on multiple rows and copy a reading
+  list as Markdown.
+
+### Changed
+
+- The Topic Article message bar floats at the bottom of Discussions. Its field,
+  Sort, Sources and their menus use the regular Discussion typography and size
+  with the selected Aa paper colors.
+- Collection uses the regular link list with previews and a filter menu.
+  Interests in Settings › Sources can include a Headlines feed.
+- Collection replaces the separate Watch controls for saved links.
+
+### Fixed
+
+- Topic Articles with an empty shared brief can show cited publisher excerpts
+  or labeled shared link previews. Imported bookmarks marked for preview on
+  open use saved metadata until you open the link.
+- Open link rows keep their titles, metadata and menu icons legible in light
+  and dark mode. The chin buttons are borderless with a filled selected state.
+- Removing an item from Queue updates the list immediately. Reading an item on
+  a phone clears it from Unread, including when another source reposts it.
+- Reader remembers passkey updates across reloads and sends new details when
+  the account email changes.
+
+## [1.6.19] — 2026-11-19
 
 ### Added
 
@@ -2876,7 +2912,8 @@ Releases before 1.4.7 are recorded in the
 commit history. Entries for 1.4.7 through 1.5.3 are summarized from their release
 commits rather than written at the time.
 
-[Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.18.5...HEAD
+[Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.19...HEAD
+[1.6.19]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.18.5...v1.6.19
 [1.6.1]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/twalichiewicz/Backchannel/compare/v1.5.8...v1.6.0
 [1.5.8]: https://github.com/twalichiewicz/Backchannel/compare/v1.5.7...v1.5.8
