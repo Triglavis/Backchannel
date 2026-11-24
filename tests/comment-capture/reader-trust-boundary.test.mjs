@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { launchApp, STORIES, waitFor } from "./harness.mjs";
 
@@ -52,6 +54,79 @@ test("The Sidebar leaves private drafts and exports in Reader", async () => {
 		await app.page.getByRole("button", { name: "Collection", exact: true }).click();
 		assert.equal(await app.page.getByRole("button", { name: "Download JSON" }).count(), 0);
 		assert.equal(await app.page.getByRole("link", { name: "Open Collection settings in Reader" }).getAttribute("href"), "https://backchnnl.app/#collection-settings");
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("The Sidebar composer is docked and transfers typed text only to Reader", async () => {
+	const app = await launchApp({
+		topHosts: [new URL(article.url).hostname], sharedStore: true,
+		settings: { autoOpenSidebar: true, updateCheck: false, sources: { hn: true } },
+	});
+	try {
+		await app.page.addInitScript(() => {
+			window.sidebarMessages = [];
+			window.addEventListener("message", (event) => window.sidebarMessages.push(JSON.stringify(event.data)));
+		});
+		await app.page.goto(article.url);
+		const bar = app.page.locator("#sidebar-discussion-compose");
+		const iframe = bar.locator("iframe");
+		const editor = iframe.contentFrame();
+		const draft = "Private draft typed in the docked Sidebar";
+		await iframe.waitFor();
+		const actions = editor.locator(".composer-actions");
+		const input = editor.getByRole("textbox");
+		assert(await bar.evaluate((node) => {
+			const panel = node.closest("#panel").getBoundingClientRect();
+			const box = node.getBoundingClientRect();
+			return Math.abs(panel.bottom - box.bottom) <= 1 && box.height < 80 && node.querySelector("iframe").contentDocument === null;
+		}));
+		await input.focus();
+		assert.equal(await actions.isVisible(), false, "the empty composer only shows its text field");
+		await input.fill(draft);
+		assert(await actions.isVisible(), "typing reveals the writing actions");
+		await input.fill("");
+		assert.equal(await actions.isVisible(), false, "clearing the draft collapses the actions again");
+		await input.fill(draft);
+		assert.equal(await app.page.locator(".composer-text").count(), 0);
+		const popup = app.context.waitForEvent("page");
+		await editor.getByRole("button", { name: "Keep a note" }).click();
+		const reader = await popup;
+		await reader.waitForURL("https://backchnnl.app/**");
+		const readerBar = reader.locator("#app-discussion-compose");
+		const field = readerBar.locator(".composer-text");
+		assert(await waitFor(async () => await field.inputValue() === draft));
+		assert(!await app.page.evaluate((value) => window.sidebarMessages.some((message) => message?.includes(value)), draft));
+		const note = readerBar.getByRole("button", { name: "Keep a note" });
+		await note.click();
+		assert(await waitFor(() => app.store.get(`HNewhere:notes:url:${articleKey}`)?.notes?.some(({ text }) => text === draft)));
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("The Sidebar composer has a compact Reader handoff on a page with strict CSP", async () => {
+	const source = await readFile(new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const hash = createHash("sha256").update(source).digest("base64");
+	const app = await launchApp({
+		source, topHosts: [new URL(article.url).hostname], sharedStore: true,
+		settings: { autoOpenSidebar: true, updateCheck: false, sources: { hn: true } },
+		pages: { [article.url]: {
+			html: "<title>Article with strict CSP</title><article><p>The publisher applies a script policy.</p></article>",
+			headers: { "content-security-policy": `script-src 'sha256-${hash}'` },
+		} },
+	});
+	try {
+		await app.page.goto(article.url);
+		const bar = app.page.locator("#sidebar-discussion-compose");
+		const launcher = bar.locator(".sidebar-compose-launcher");
+		await launcher.waitFor({ timeout: 6000 });
+		assert((await bar.boundingBox()).height < 60);
+		const [reader] = await Promise.all([app.context.waitForEvent("page"), launcher.click()]);
+		await reader.waitForURL("https://backchnnl.app/**");
+		await reader.locator("#app-discussion-compose .composer-text").waitFor();
+		assert.equal(await app.page.locator(".composer-text").count(), 0);
 	} finally {
 		await app.browser.close();
 	}

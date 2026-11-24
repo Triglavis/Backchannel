@@ -552,9 +552,9 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps its writing c
     if (!sidebar) await app.page.locator('#app-list-body .browse-title-link', { hasText: story.title }).first().click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .top-level-comments').count() === 1 && await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     const composer = app.page.locator('#panel .compose-box');
-    const write = app.page.getByRole('link', { name: 'Write in Reader' });
+    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
     if (sidebar) {
-      await write.waitFor();
+      await write.fill('Draft in an empty discussion');
       assert.equal(await composer.count(), 0);
     } else {
       await composer.locator('.composer-text').fill('Draft in an empty discussion');
@@ -565,7 +565,7 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps its writing c
     assert(await waitFor(async () => await button.getAttribute('aria-busy') !== 'true', 15000));
     if (sidebar) {
       assert.equal(await composer.count(), 0);
-      assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+      assert.equal(await write.inputValue(), 'Draft in an empty discussion');
     } else {
       assert(await composer.evaluate((element) => element === window.__emptyDiscussionComposer), 'the composer is not rebuilt');
       assert.equal(await composer.locator('.composer-text').inputValue(), 'Draft in an empty discussion');

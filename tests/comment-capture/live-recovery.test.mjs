@@ -517,11 +517,11 @@ test("the Reddit tab identifies its purpose and closes before local comment rend
     assert(await waitFor(async () => await app.page.locator('#comments-content .top-level-comments').count() === 1, 15000), 'local rendering has started');
     assert(await waitFor(() => opened.every((page) => page.isClosed()), 2500), 'the Reddit tab closes before local rendering finishes');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count(), 0, 'the controlled rendering pause is still in effect');
-    const write = app.page.getByRole('link', { name: 'Write in Reader' });
-    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
+    await write.waitFor();
     assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count() === 1, 10000));
-    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    assert(await write.isVisible());
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();

@@ -89,9 +89,11 @@ Worth stating plainly, because the permissions are broad by necessity:
   run while that view is visible. Manual pauses automatic feed and Collection
   checks; opening an article or pressing Sync can still request source data.
 
-- **Private reading surfaces open in Reader.** The Sidebar opens notes, drafts,
-  queue, Collection and exports on Backchannel's HTTPS origin. Reader keeps
-  note text and drafts in its own document when displaying a publisher page.
+- **Private reading surfaces use a separate document.** The Sidebar composer
+  accepts text in a sandboxed frame and transfers it directly to Reader on
+  Backchannel's HTTPS origin. Existing drafts, notes, queue, Collection and
+  exports open in Reader. Reader also keeps notes and drafts in its own
+  document when displaying a publisher page.
 
 - **It checks saved Collection links for new discussion.** A check sends the
   page's address to enabled sources that support checks. Those sources are

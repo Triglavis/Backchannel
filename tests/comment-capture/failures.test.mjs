@@ -204,8 +204,8 @@ test("the bird loader reports completed discussions while slower sources are pen
     });
     assert.deepEqual(art, [208, 208, 208, 208, 208, 208, 108], 'both promotional poses and the speech bubble are available without a fetch');
     assert((await app.page.locator('#comments-content .page-header-title').textContent()).length > 0, "the known article title appears immediately");
-    const write = app.page.getByRole('link', { name: 'Write in Reader' });
-    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
+    await write.waitFor();
     assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     const area = await app.page.locator('#comments').boundingBox();
     const skeleton = await loading.boundingBox();
@@ -223,7 +223,7 @@ test("the bird loader reports completed discussions while slower sources are pen
     assert(await waitFor(async () => await loading.count() === 0, 15000), "the loader is removed after loading");
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-story-id="fixture0"]').count() === 140, 10000), "all comments render after loading");
     assert(await waitFor(async () => !/loading discussions|rendering comments|annotating link/i.test(await subtitle.textContent()), 30000), `the header stops reporting loading after rendering: ${await subtitle.textContent()}`);
-    assert.equal(await write.getAttribute('href'), 'https://backchnnl.app/');
+    assert(await write.isVisible());
     assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     assert.deepEqual(app.errors, []);
   } finally {
