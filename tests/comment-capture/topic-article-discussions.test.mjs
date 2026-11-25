@@ -216,7 +216,7 @@ test("scrolling one busy topic thread reaches its final comment without duplicat
 	assert.deepEqual(errors, []);
 });
 
-test("a new batch of highly rated threads can rise in Best while every comment already reached stays in the feed", async (t) => {
+test("new batches in Best follow the comments already reached", async (t) => {
 	const threads = Array.from({ length: 16 }, (_, i) => ({ source: "lemmy", url: "https://lemmy.world/post/" + (15200 + i),
 		title: "Dock " + i, comments: 40 - i, sourceIndex: i % 2 }));
 	const responses = threads.map((_, i) => ({
@@ -231,19 +231,27 @@ test("a new batch of highly rated threads can rise in Best while every comment a
 	const { aside, requests } = await openTopic(t, { threads, responses, enabled: { hn: false } });
 	const items = feedList(aside).getByRole("listitem");
 	const keys = () => items.evaluateAll((nodes) => nodes.map((node) => node.dataset.commentKey));
-	await items.filter({ hasText: "Report 910070" }).waitFor();
+	const reads = () => requests.filter(({ url }) => url.includes("/comment/list?")).length;
+	assert(await waitFor(async () => await items.count() === 24));
 	const first = await keys();
-	assert.equal(first.length, 24);
 	await items.last().evaluate((node) => node.scrollIntoView({ block: "start" }));
-	assert(await waitFor(() => requests.some(({ url }) => new URL(url).searchParams.get("post_id") === "15208")));
+	assert(await waitFor(() => reads() > 8));
 	await items.first().evaluate((node) => node.scrollIntoView({ block: "start" }));
-	await items.filter({ hasText: "Report 910150" }).waitFor();
+	assert(await waitFor(async () => await items.count() === 48), "one scroll asks for one more page");
 	const second = await keys();
-	assert.equal(second[0], "lemmy:910150");
-	assert.equal(second.length, 48, "one scroll asks for one more page");
 	assert.equal(new Set(second).size, second.length);
-	assert(first.every((key) => second.includes(key)), "scrolling retains the full previous page");
-	assert.equal(requests.filter(({ url }) => url.includes("/comment/list?")).length, threads.length);
+	assert.deepEqual(second.slice(0, first.length), first, "scrolling keeps the full previous page in place");
+	assert(await waitFor(() => reads() === threads.length));
+	let reached = second;
+	const total = responses.reduce((sum, { json }) => sum + json.comments.length, 0);
+	while (reached.length < total) {
+		await items.last().evaluate((node) => node.scrollIntoView({ block: "start" }));
+		assert(await waitFor(async () => await items.count() > reached.length));
+		const page = await keys();
+		assert.deepEqual(page.slice(0, reached.length), reached);
+		reached = page;
+	}
+	assert.equal(new Set(reached).size, total);
 });
 
 test("the same conversation reported by two outlets supplies each reply once", async (t) => {
@@ -334,9 +342,10 @@ test("a slow conversation lets earlier comments appear and cannot overwrite an o
 	const detail = threadDetail(aside);
 	await threadContent(detail).getByText(/Comment 1 on Inspectors/).waitFor();
 	await page.evaluate(() => window.__releaseTopicResponse());
-	await aside.locator(".app-topic-feed .app-topic-comment-body").filter({ hasText: /Comment 1 on Operators/ }).waitFor({ state: "attached" });
 	assert(await threadContent(detail).getByText(/Comment 1 on Inspectors/).isVisible());
 	await detail.getByRole("button", { name: "Show all comments" }).click();
+	const items = list.getByRole("listitem");
+	if (!(await list.getByText(/Comment 1 on Operators/).count())) await items.last().evaluate((node) => node.scrollIntoView({ block: "start" }));
 	await list.getByText(/Comment 1 on Operators/).waitFor();
 	assert.equal(page.url(), address);
 });

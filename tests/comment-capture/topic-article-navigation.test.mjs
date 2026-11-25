@@ -120,7 +120,7 @@ test("a late topic brief cannot replace the next topic or a member article", asy
 	assert(await waitFor(() => traffic(app).length === 1));
 	await card(page, 1).click();
 	await articlePane(page).getByText(summaries[1], { exact: false }).first().waitFor();
-	assert.equal(await card(page, 0).getAttribute("aria-current"), null);
+	assert.equal(await card(page, 0).count(), 0, "the previously opened topic leaves Unread");
 	assert.equal(await card(page, 1).getAttribute("aria-current"), "true");
 	await page.getByRole("tab", { name: "By link" }).click();
 	await member(page, 2).click();

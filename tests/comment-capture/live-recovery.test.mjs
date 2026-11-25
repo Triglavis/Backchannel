@@ -396,12 +396,12 @@ test('Reader Sync still requests a working Reddit feed after an individual discu
   const now = Math.floor(Date.now() / 1000);
   const post = { id: 'freshpost', url, title: STORIES[0].title, author: 'reader', subreddit: 'news', subreddit_name_prefixed: 'r/news', permalink: '/r/news/comments/freshpost/article/', num_comments: 1, created_utc: now - 3600, score: 100 };
   const comment = { kind: 't1', data: { id: 'freshcomment', body: 'A comment available from the archive', author: 'reader', parent_id: 't3_freshpost', link_id: 't3_freshpost', created_utc: now - 60, replies: '' } };
-  const original = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
-  const seam = 'renderAppList({ force: !sharedRefreshSince }).finally(finishFeed),';
+  const original = await readFile(process.env.BC_SCRIPT || new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
+  const seam = 'renderAppList({ force: !sharedRefreshSince, redditReady }).finally(finishFeed),';
   assert(original.includes(seam));
   const stagedFeed = 'if (!batch.reuseFresh && (batch.feedOnly || appState || isBrowsing(sidebarUI))) {';
   assert(original.includes(stagedFeed));
-  const source = original.replace(seam, 'new Promise((resolve) => setTimeout(resolve, 3000)).then(() => renderAppList({ force: true })).finally(finishFeed),')
+  const source = original.replace(seam, 'new Promise((resolve) => setTimeout(resolve, 3000)).then(() => renderAppList({ force: true, redditReady })).finally(finishFeed),')
     .replace(stagedFeed,'if (!window.__skipStagedFeed && !batch.reuseFresh && (batch.feedOnly || appState || isBrowsing(sidebarUI))) {');
   const app = await launchApp({ source, sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com'], settings: { sources: { hn: true, reddit: true }, updateCheck: false, frontPageMode: 'sources' }, values: { 'HNewhere:reddit_read_window_notice': 2 }, responses: [
     { match: (path) => path.includes('/api/posts/search'), json: { data: [post] } },
@@ -531,7 +531,7 @@ test("the Reddit tab identifies its purpose and closes before local comment rend
 test("Sidebar Sync closes its Reddit tab after requests, before local rendering completes", { timeout: 45000 }, async () => {
   const url = STORIES[0].url;
   const sourceText = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
-  const seam = 'const lookup = new Map(renderedComments.map((entry) => [entry.discussionKey + "\\0" + entry.id, entry]));';
+  const seam = 'const source = new Map(nextStories.map((story, index) => [story.key, { story, thread: threads[index] }]));';
   assert(sourceText.includes(seam));
   const source = sourceText.replace(seam, `${seam}\n\t\tif (window.__bcSlowRender) await new Promise((resolve) => setTimeout(resolve, 4000));`);
   const now = Math.floor(Date.now() / 1000);
@@ -573,7 +573,7 @@ test("Sidebar Sync closes its Reddit tab after requests, before local rendering 
 test("Reader Sync closes its Reddit tab after feeds and threads load, before local reconciliation finishes", { timeout: 60000 }, async () => {
   const url = STORIES[0].url;
   const sourceText = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
-  const seam = 'const lookup = new Map(renderedComments.map((entry) => [entry.discussionKey + "\\0" + entry.id, entry]));';
+  const seam = 'const source = new Map(nextStories.map((story, index) => [story.key, { story, thread: threads[index] }]));';
   assert(sourceText.includes(seam));
   const source = sourceText.replace(seam, `${seam}\n\t\tif (window.__bcSlowRender) await new Promise((resolve) => setTimeout(resolve, 4000));`);
   const now = Math.floor(Date.now() / 1000);
