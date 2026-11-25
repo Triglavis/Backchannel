@@ -70,6 +70,7 @@ async function openPhoneDiscussion(page, compose = false) {
 
 const feedList = (aside) => aside.getByRole("list", { name: "Comments across discussions" });
 const threadDetail = (aside) => aside.getByRole("region", { name: "Thread comments" });
+const threadContent = (detail) => detail.locator(".app-topic-thread-content");
 const inspectionSources = count => Array.from({length: count}, (_, i) => ({
 	id: "ref" + i, publisher: "Survey station " + i, title: "Measurements from station " + i,
 	url: "https://station" + i + ".example/harbor", discussions: [],
@@ -140,25 +141,43 @@ for (const phone of [false, true]) {
 		assert(await waitFor(async () => (await replies.count()) > firstPage), "scrolling the discussion loads the next comments");
 		const keys = await list.locator(".app-topic-comment-source").evaluateAll((nodes) => nodes.map((node) => node.href));
 		assert.equal(new Set(keys).size, keys.length);
-		const anchor = locator.getByRole("button", { name: "Read thread on Hacker News" });
+		const anchor = locator.getByRole("button", { name: /^focus$/i });
 		await anchor.focus();
 		const scroller = aside.locator(".app-topic-discussion-scroll");
 		const position = await scroller.evaluate((node) => node.scrollTop);
 		await anchor.press("Enter");
 		const detail = threadDetail(aside);
-		await detail.getByText(/Comment 1 on Operators/).waitFor();
-		assert.equal(await detail.getByRole("link", { name: "Open original discussion" }).getAttribute("href"), threadURL(stories[1].id));
+		await threadContent(detail).getByText(/Comment 1 on Operators/).waitFor();
+		const banner = detail.locator(".app-topic-focus-banner");
+		const source = banner.getByRole("link", { name: "Hacker News" });
+		assert.equal(await source.getAttribute("href"), threadURL(stories[1].id));
+		assert.equal(await source.getAttribute("target"), "_blank");
+		assert(await banner.getByText("Focused comment", { exact: true }).isVisible());
+		assert.match(await banner.locator(".filter-banner-quote").textContent(), /commenter1.*Comment 1 on Operators/);
+		const clear = banner.getByRole("button", { name: "Show all comments" });
+		assert.equal(await banner.getByRole("button").count(), 1);
+		const appearance = await clear.evaluate((button) => {
+			const { width, height } = button.getBoundingClientRect();
+			const focus = button.closest(".app-discussion-focus-banner");
+			const quote = getComputedStyle(focus.querySelector(".filter-banner-quote"));
+			const head = getComputedStyle(focus.querySelector(".filter-banner-head"));
+			return { width, height, quoteRule: quote.borderLeftWidth, divider: getComputedStyle(focus).borderBottomWidth,
+				sharedFont: quote.fontFamily === head.fontFamily, fontSize: quote.fontSize };
+		});
+		assert.deepEqual(appearance, { width: 15, height: 15, quoteRule: "2px", divider: "1px", sharedFont: true, fontSize: "12px" });
+		const body = threadContent(detail).locator(".app-topic-comment-body").first();
+		assert.equal(await body.evaluate((element) => getComputedStyle(element).fontSize), "13px");
+		assert.equal(await detail.getByRole("heading").count(), 0);
 		assert.equal(page.url(), address);
 		assert.equal(context.pages().length, 1);
 		assert.deepEqual(store.get("HNewhere:seen_comments") || {}, {});
 		assert.equal(requests.some(({ url }) => new URL(url).hostname === "hn.algolia.com"), false);
-		if (phone) await page.locator("#app-bar-back").tap();
-		else await detail.getByRole("button", { name: "Back to discussions" }).click();
+		await clear.click();
 		await detail.waitFor({ state: "hidden" });
 		assert(await waitFor(() => anchor.evaluate((node) => node.getRootNode().activeElement === node)));
 		assert.equal(await scroller.evaluate((node) => node.scrollTop), position);
 		await anchor.press("Enter");
-		await detail.getByText(/Comment 1 on Operators/).waitFor();
+		await threadContent(detail).getByText(/Comment 1 on Operators/).waitFor();
 		await page.keyboard.press("Escape");
 		await detail.waitFor({ state: "hidden" });
 		assert(await anchor.evaluate((node) => node.getRootNode().activeElement === node));
@@ -190,7 +209,7 @@ test("scrolling one busy topic thread reaches its final comment without duplicat
 		await items.last().evaluate((node) => node.scrollIntoView({ block: "start" }));
 		assert(await waitFor(async () => await items.count() > previous), "scrolling past " + previous + " comments uncovers more");
 	}
-	const links = await list.getByRole("link").evaluateAll((nodes) => nodes.map((node) => node.href));
+	const links = await list.locator(".app-topic-comment-source").evaluateAll((nodes) => nodes.map((node) => node.href));
 	assert.deepEqual(new Set(links), new Set(comments.map(({ id }) => threadURL(id))));
 	assert.equal(links.length, comments.length);
 	assert.equal(reads().length, comments.length, "a comment is fetched once across scrolls");
@@ -310,14 +329,14 @@ test("a slow conversation lets earlier comments appear and cannot overwrite an o
 	await list.getByText(/Comment 1 on Inspectors/).waitFor();
 	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
 	assert.equal(await list.getByText(/Comment 1 on Operators/).count(), 0);
-	const trigger = list.getByRole("button", { name: "Read thread on Hacker News" }).first();
+	const trigger = list.getByRole("button", { name: /^focus$/i }).first();
 	await trigger.click();
 	const detail = threadDetail(aside);
-	await detail.getByText(/Comment 1 on Inspectors/).waitFor();
+	await threadContent(detail).getByText(/Comment 1 on Inspectors/).waitFor();
 	await page.evaluate(() => window.__releaseTopicResponse());
 	await aside.locator(".app-topic-feed .app-topic-comment-body").filter({ hasText: /Comment 1 on Operators/ }).waitFor({ state: "attached" });
-	assert(await detail.getByText(/Comment 1 on Inspectors/).isVisible());
-	await detail.getByRole("button", { name: "Back to discussions" }).click();
+	assert(await threadContent(detail).getByText(/Comment 1 on Inspectors/).isVisible());
+	await detail.getByRole("button", { name: "Show all comments" }).click();
 	await list.getByText(/Comment 1 on Operators/).waitFor();
 	assert.equal(page.url(), address);
 });
@@ -326,10 +345,10 @@ test("phone Back closes a discussion before leaving a public topic with no local
 	const local = [{ ...stories[0], id: 9750, title: "Autumn harvest sets a new record", url: "https://orchard.example/harvest" }];
 	const { page, aside } = await openTopic(t, { phone: true, local });
 	const entry = feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Operators/ });
-	await entry.getByRole("button", { name: "Read thread on Hacker News" }).tap();
+	await entry.getByRole("button", { name: /^focus$/i }).tap();
 	assert.equal(await page.locator("#app-list-topic").isVisible(), false);
 	const detail = threadDetail(aside);
-	await detail.getByText(/Comment 1 on Operators/).waitFor();
+	await threadContent(detail).getByText(/Comment 1 on Operators/).waitFor();
 	await page.locator("#app-bar-back").tap();
 	await detail.waitFor({ state: "hidden" });
 	await page.locator("#app-bar-back").tap();
@@ -362,7 +381,10 @@ test("an unavailable and an empty conversation give way to replies from another 
 	const detail = threadDetail(aside);
 	await detail.getByRole("button", { name: "Retry comments" }).waitFor();
 	const opened = context.waitForEvent("page");
-	await detail.getByRole("link", { name: "Open original discussion" }).click();
+	const banner = detail.locator(".app-topic-focus-banner");
+	assert.match(await banner.textContent(), /Hacker News.*35 comments/);
+	assert.equal(await detail.getByRole("heading").count(), 0);
+	await banner.getByRole("link", { name: "Hacker News" }).click();
 	const original = await opened;
 	await original.waitForURL(threadURL(stories[0].id));
 	assert.equal(await original.evaluate(() => window.opener), null);
@@ -370,13 +392,13 @@ test("an unavailable and an empty conversation give way to replies from another 
 	await page.bringToFront();
 	available = true;
 	await detail.getByRole("button", { name: "Retry comments" }).click();
-	await detail.getByText(/Comment 1 on Inspectors/).waitFor();
-	await detail.getByRole("button", { name: "Back to discussions" }).click();
+	await threadContent(detail).getByText(/Comment 1 on Inspectors/).waitFor();
+	await banner.getByRole("button", { name: "Show all discussions" }).click();
 	assert(await first.evaluate((node) => node.getRootNode().activeElement === node));
 	await feedList(aside).getByText(/Comment 1 on Inspectors/).waitFor();
 	const second = await sourceThread(page, threadURL(stories[1].id));
 	await second.click();
-	await detail.getByText("No comments yet.", { exact: true }).waitFor();
+	await threadContent(detail).getByText("No comments yet.", { exact: true }).waitFor();
 });
 
 test("a feed with only failed reads can retry and distinguishes an empty thread", async (t) => {
@@ -467,11 +489,11 @@ test("the feed includes public Lobsters, Lemmy and Bluesky replies from their kn
 	for (const [index, thread] of threads.entries()) {
 		const row = list.getByRole("listitem").filter({ hasText: expected[index] });
 		await row.getByText(expected[index], { exact: true }).waitFor();
-		await row.getByRole("button").click();
+		await row.getByRole("button", { name: /^focus$/i }).click();
 		const detail = threadDetail(aside);
-		await detail.getByText(expected[index], { exact: true }).waitFor();
-		assert.equal(await detail.getByRole("link", { name: "Open original discussion" }).getAttribute("href"), thread.url);
-		await detail.getByRole("button", { name: "Back to discussions" }).click();
+		await threadContent(detail).getByText(expected[index], { exact: true }).waitFor();
+		assert.equal(await detail.locator(".app-topic-focus-banner .app-discussion-byline a").getAttribute("href"), thread.url);
+		await detail.getByRole("button", { name: "Show all comments" }).click();
 	}
 	assert.equal(await aside.getByText("An observer explains the inspection.", { exact: true }).count(), 0);
 	assert(requests.filter(({ url }) => /public\.api\.bsky\.app|lobste\.rs|lemmy\.world/.test(url)).every(({ method, anonymous, hasBody }) => method === "GET" && anonymous && hasBody === undefined));
@@ -589,9 +611,9 @@ test("the inline thread keeps its continuation when an entire portion was remove
 	assert(await more.isVisible(), "the reader can pass an initial block of removed comments");
 	for (let i = 0; i < 5 && await more.isVisible(); i++) {
 		await more.click();
-		await detail.locator(".app-topic-feed-more:not([aria-busy])").waitFor({ state: "attached" });
+		await detail.locator(".more-replies:not([aria-busy])").waitFor({ state: "attached" });
 	}
-	await detail.getByText("The final harbor report.", { exact: true }).waitFor();
+	await threadContent(detail).getByText("The final harbor report.", { exact: true }).waitFor();
 	assert.equal(await more.isVisible(), false);
 });
 
@@ -827,9 +849,9 @@ test("cached X replies remain available without accessing X or showing the origi
 	const row = feedList(aside).getByRole("listitem").filter({ hasText: "An actual saved X reply" });
 	await row.getByText("An actual saved X reply").waitFor();
 	assert.equal(await aside.getByText("Original X post").count(), 0);
-	assert.equal(await row.getByRole("link").getAttribute("href"), "https://x.com/pilot/status/123459");
-	await row.getByRole("button", { name: "Read thread on X" }).click();
-	await threadDetail(aside).getByText("An actual saved X reply").waitFor();
+	assert.equal(await row.getByRole("link", { name: "Open comment on X in a new tab" }).getAttribute("href"), "https://x.com/pilot/status/123459");
+	await row.getByRole("button", { name: /^focus$/i }).click();
+	await threadContent(threadDetail(aside)).getByText("An actual saved X reply").waitFor();
 	assert.equal(requests.some(({ url }) => /(^|\.)x\.com$/.test(new URL(url).hostname)), false);
 });
 
@@ -990,7 +1012,7 @@ test("a missing comment response is reported as unavailable", async (t) => {
 	assert.equal(await aside.locator(".app-topic-comment-body").count(), 0);
 });
 
-test("Back from a differently ordered full Reddit thread restores the original archived reply and focus", async (t) => {
+test("clearing focus after a full Reddit read restores the original archived reply and focus", async (t) => {
 	const raw = (id, body) => ({ id, body, link_id: "t3_abcde", parent_id: "t3_abcde", author: "bridgepilot", created_utc: now });
 	const archived = Array.from({ length: 12 }, (_, i) => raw("saved" + i, "Archived observation " + i));
 	const children = Array.from({ length: 10 }, (_, i) => ({ kind: "t1", data: raw("full" + i, "Full conversation reply " + i) }));
@@ -1000,14 +1022,15 @@ test("Back from a differently ordered full Reddit thread restores the original a
 		{ match: (url) => new URL(url).hostname === "www.reddit.com" && url.includes("/comments/abcde/") && url.includes(".json"), json: [null, { data: { children } }] },
 	] });
 	const list = feedList(aside);
-	const original = list.getByRole("listitem").filter({ hasText: "Archived observation 0" }).getByRole("button");
+	const original = list.getByRole("listitem").filter({ hasText: "Archived observation 0" }).getByRole("button", { name: /^focus$/i });
 	await original.focus();
-	const keys = await list.getByRole("link").evaluateAll((links) => links.map((link) => link.href));
+	const keys = await list.locator(".app-topic-comment-source").evaluateAll((links) => links.map((link) => link.href));
 	await original.press("Enter");
-	await threadDetail(aside).getByText("Full conversation reply 0", { exact: true }).waitFor();
-	await page.keyboard.press("Escape");
+	const detail = threadDetail(aside);
+	await threadContent(detail).getByText("Archived observation 0", { exact: true }).waitFor();
+	await detail.getByRole("button", { name: "Show all comments" }).click();
 	await list.waitFor();
-	assert.deepEqual(await list.getByRole("link").evaluateAll((links) => links.map((link) => link.href)), keys);
+	assert.deepEqual(await list.locator(".app-topic-comment-source").evaluateAll((links) => links.map((link) => link.href)), keys);
 	assert(await original.evaluate((node) => node.getRootNode().activeElement === node));
 });
 
@@ -1347,31 +1370,92 @@ test("topic Sources filters all, platforms and individual threads and syncs the 
 	assert.equal(requests.filter(({ url }) => url === hnItem(stories[0].id)).length, before);
 	if (await group.isVisible()) await group.getByRole("checkbox", { name: "All sources" }).press("Escape");
 	assert(await sources.evaluate((button) => button.matches(":focus")));
-	await sources.click();
-	await all.check();
-	await group.getByRole("checkbox", { name: "All sources" }).press("Escape");
+	const filtered = aside.locator(".app-topic-feed .app-discussion-focus-banner");
+	assert.equal(await filtered.getByRole("link", { name: "Hacker News" }).getAttribute("href"), threadURL(stories[1].id));
+	const focus = list.getByRole("listitem").filter({ hasText: published }).getByRole("button", { name: /^focus$/i });
+	await focus.tap();
+	await threadDetail(aside).getByRole("button", { name: "Show all comments" }).tap();
+	assert(await waitFor(() => focus.evaluate((button) => button.matches(":focus"))));
+	assert.equal(await list.getByText(/Comment 1 on Inspectors/).count(), 0);
+	await filtered.getByRole("button", { name: "Show all discussions" }).tap();
 	await list.getByText(/Comment 1 on Inspectors/).waitFor();
 	assert(await list.getByText(published).isVisible());
 	assert.equal(await aside.evaluate((element) => element.scrollWidth > element.clientWidth + 1), false);
 	assert.deepEqual(errors, []);
 });
 
+test("mixed Topic Article comments have inline reply, focus, save and collapse actions", async (t) => {
+	const { aside, store } = await openTopic(t);
+	const feed = feedList(aside);
+	const row = feed.getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
+	const byline = row.locator(".comment-attribution");
+	const controls = byline.locator(".comment-attribution-actions button");
+	await controls.last().waitFor();
+	assert.deepEqual(await controls.allTextContents(), ["reply", "focus", "save", "[–]"]);
+	assert(await byline.evaluate((node) => node.nextElementSibling.matches(".app-topic-comment-body")));
+	const reply = byline.getByRole("button", { name: /^reply$/i });
+	await reply.click();
+	await row.getByRole("textbox").fill("A reply started in the mixed feed");
+	await reply.click();
+	await byline.getByRole("button", { name: /^save$/i }).click();
+	assert(await waitFor(() => store.get("HNewhere:favorites")?.some((item) =>
+		item.focus === "hn:974201" && item.parent === "9742" && item.page === "journal.example/findings")));
+	await byline.getByRole("button", { name: "Collapse comment" }).click();
+	await row.locator(".app-topic-comment-body").waitFor({ state: "hidden" });
+	await byline.getByRole("button", { name: "Expand comment" }).click();
+	assert(await row.locator(".app-topic-comment-body").isVisible());
+	assert(await feed.isVisible());
+});
+
+test("Focus keeps the selected comment, its ancestors and its replies", async (t) => {
+	const [story, parent, selected, child, sibling, other] = [9742, 974200, 974201, 974202, 974203, 974204];
+	const earlier = Array.from({ length: 18 }, (_, i) => ({ id: 974210 + i, parent: story, text: "Earlier comment " + i }));
+	const siblings = Array.from({ length: 12 }, (_, i) => ({ id: 974230 + i, parent: sibling, text: "Other reply " + i }));
+	const responses = [
+		{ match: (url) => url === hnItem(story), json: { id: story, kids: [...earlier.map(({ id }) => id), parent, other] } },
+		{ match: (url) => url === hnItem(9741), json: { id: 9741, kids: [] } },
+		...[...earlier, { id: parent, parent: story, text: "Root context", kids: [selected, sibling] },
+			{ id: selected, parent, text: "Selected comment", kids: [child] },
+			{ id: child, parent: selected, text: "Reply to selected comment" },
+			{ id: sibling, parent, text: "Sibling outside focus", kids: siblings.map(({ id }) => id) },
+			...siblings,
+			{ id: other, parent: story, text: "Unrelated root" }]
+			.map((item) => ({ match: (url) => url === hnItem(item.id), json: { ...item, type: "comment", by: "reader", time: now } })),
+	];
+	const { aside, page } = await openTopic(t, { responses, values: { "HNewhere:collapsed_comments": ["hn:" + parent] } });
+	const feed = feedList(aside);
+	await feed.getByText("Reply to selected comment", { exact: true }).waitFor();
+	const focus = feed.locator('[data-comment-key="hn:' + selected + '"]').getByRole("button", { name: /^focus$/i });
+	await focus.click();
+	const detail = threadDetail(aside);
+	const visible = () => detail.locator(".app-topic-comment-body:visible").allTextContents();
+	await threadContent(detail).getByText("Reply to selected comment", { exact: true }).waitFor();
+	assert.deepEqual(await visible(), ["Root context", "Selected comment", "Reply to selected comment"]);
+	assert.equal(await detail.getByRole("button", { name: "Show more replies" }).count(), 0);
+	await detail.getByRole("button", { name: "Show all comments" }).click();
+	await feed.waitFor();
+	assert.equal(await feed.locator('[data-comment-key="hn:' + parent + '"] .app-topic-comment-body').isVisible(), false);
+	assert(await focus.evaluate((button) => button.getRootNode().activeElement === button));
+	assert.equal(page.url(), address);
+});
+
 test("thread controls target the chosen comment, preserve drafts, and save under its source article", async (t) => {
 	const { aside, store, page, errors } = await openTopic(t, { values: { "HNewhere:comment_draft:9742": "Draft from the Reader discussion" } });
 	const root = feedList(aside).getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
-	await root.getByRole("button", { name: /Read thread/ }).click();
+	await root.getByRole("button", { name: /^focus$/i }).click();
 	const detail = threadDetail(aside);
 	const row = detail.getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
 	await row.waitFor();
-	const reply = row.getByRole("button", { name: "Reply", exact: true });
+	assert.equal(await detail.getByRole("listitem").count(), 1);
+	const reply = row.getByRole("button", { name: /^reply$/i });
 	assert(await reply.count(), "thread actions are available for the selected source comment");
 	assert(await row.evaluate((li) => li.matches(":focus")));
 	await reply.click();
 	const field = row.getByRole("textbox");
 	await field.fill("Comment draft for the second port report");
-	await detail.getByRole("button", { name: "Back to discussions" }).click();
-	assert(await root.getByRole("button", { name: /Read thread/ }).evaluate((button) => button.matches(":focus")));
-	await root.getByRole("button", { name: /Read thread/ }).click();
+	await detail.getByRole("button", { name: "Show all comments" }).click();
+	assert(await root.getByRole("button", { name: /^focus$/i }).evaluate((button) => button.matches(":focus")));
+	await root.getByRole("button", { name: /^focus$/i }).click();
 	await reply.click();
 	await field.waitFor();
 	assert(await waitFor(async () => (await field.inputValue()) === "Comment draft for the second port report"));
@@ -1382,10 +1466,6 @@ test("thread controls target the chosen comment, preserve drafts, and save under
 	assert.equal(await row.locator(".app-topic-comment-body").isVisible(), false);
 	assert(await waitFor(() => store.get("HNewhere:collapsed_comments")?.includes("hn:974201")));
 	await row.getByRole("button", { name: "Expand comment" }).press("Enter");
-	await row.getByRole("button", { name: "Focus", exact: true }).click();
-	assert.equal(await detail.getByRole("listitem").count(), 1);
-	await detail.getByRole("button", { name: "Show full thread" }).click();
-	assert(await detail.getByRole("listitem").count() > 1);
 	const topDraft = detail.getByRole("textbox", { name: /Add a comment/ });
 	assert(await waitFor(async () => (await topDraft.inputValue()) === "Draft from the Reader discussion"));
 	assert.equal(await topDraft.evaluate((node) => getComputedStyle(node.closest(".compose-field")).display), "grid");
@@ -1403,10 +1483,10 @@ test("the thread vote and reply controls address the selected Hacker News item",
 		text: '<a id="up_974201" href="vote?id=974201&amp;how=up">up</a>' }] });
 	await context.route("https://news.ycombinator.com/**", (route) => route.fulfill({ contentType: "text/html", body: "<p>Fixture discussion</p>" }));
 	const origin = feedList(aside).getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
-	await origin.getByRole("button", { name: /Read thread/ }).click();
+	await origin.getByRole("button", { name: /^focus$/i }).click();
 	const row = threadDetail(aside).getByRole("listitem").filter({ hasText: /Comment 2 on Operators/ });
 	await row.waitFor();
-	const reply = row.getByRole("button", { name: "Reply", exact: true });
+	const reply = row.getByRole("button", { name: /^reply$/i });
 	assert(await reply.count(), "reply is available on this source");
 	await reply.click();
 	const composer = row.locator(".comment-composer");
@@ -1482,9 +1562,8 @@ test("a topic draft survives an immediate reload after opening and leaving a thr
 		const target = box.querySelector(".compose-target");
 		target.focus();
 		target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-		pane.querySelector(".app-topic-comment-context").click();
-		const back = pane.querySelector(".app-topic-thread-back");
-		back.click();
+		pane.querySelector(".app-topic-feed-focus").click();
+		pane.querySelector('.app-topic-thread-detail button[aria-label="Show all comments"]').click();
 		return !pane.querySelector(".app-topic-thread-detail") && field.value === message;
 	}, text);
 	assert(entered);
@@ -1507,9 +1586,9 @@ test("the mixed topic message bar keeps its draft and saves a note to the select
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
 	assert(await field.isVisible(), "the phone feed offers the message bar");
 	await field.fill("A local note about the operator interviews");
-	await feedList(aside).getByRole("button", { name: /Read thread/ }).first().tap();
+	await feedList(aside).getByRole("button", { name: /^focus$/i }).first().tap();
 	assert.equal(await threadDetail(aside).getByRole("textbox", { name: /Add a comment/ }).inputValue(), "");
-	await threadDetail(aside).getByRole("button", { name: "Back to discussions" }).tap();
+	await threadDetail(aside).getByRole("button", { name: "Show all comments" }).tap();
 	assert.equal(await field.inputValue(), "A local note about the operator interviews");
 	assert(await waitFor(() => [...store.values()].includes("A local note about the operator interviews")));
 	await page.reload();
@@ -1605,53 +1684,48 @@ test("a read-only source offers a note-only message bar and saves directly to it
 	const thread = await sourceThread(page, "https://lemmy.world/post/112233");
 	await thread.click();
 	const detail = threadDetail(aside);
-	await detail.getByText("No comments yet.", { exact: true }).waitFor();
+	await threadContent(detail).getByText("No comments yet.", { exact: true }).waitFor();
 	const noteDraft = detail.getByRole("textbox", { name: /Keep a note/ });
 	assert.equal(await noteDraft.inputValue(), "", "a read-only thread has its own note draft");
 	await noteDraft.fill("Continue this port note later");
-	await detail.getByRole("button", { name: "Back to discussions" }).click();
+	await detail.getByRole("button", { name: "Show all discussions" }).click();
 	await thread.click();
 	assert(await waitFor(async () => await noteDraft.inputValue() === "Continue this port note later"));
 	assert.equal(store.get("HNewhere:comment_draft:112233"), "Separate Hacker News draft");
 	assert.deepEqual(errors, []);
 });
 
-test("a long inline topic thread can load the next replies", async (t) => {
-	const { aside } = await openTopic(t);
-	await feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Inspectors/ }).getByRole("button", { name: /Read thread/ }).click();
+test("a source discussion can load the next replies and resume there after focusing a comment", async (t) => {
+	const { aside, page } = await openTopic(t);
+	await (await sourceThread(page, threadURL(stories[0].id))).click();
 	const detail = threadDetail(aside);
-	await detail.getByText(/Comment 16 on Inspectors/).waitFor();
+	await threadContent(detail).getByText(/Comment 16 on Inspectors/).waitFor();
 	const more = detail.getByRole("button", { name: "Show more replies", exact: true });
 	assert(await more.count(), "the inline thread exposes unread portions of a long conversation");
 	await more.click();
-	await detail.getByText(/Comment 17 on Inspectors/).waitFor();
-	await detail.getByText(/Comment 1 on Inspectors/).waitFor();
-});
-
-test("an inline topic thread offers the submission's own vote and Save controls and links its authors", async (t) => {
-	const { aside, store } = await openTopic(t, { responses: [{ match: (url) => url === threadURL(9742),
-		text: '<a id="up_9742" href="vote?id=9742&amp;how=up">up</a>' }] });
-	await feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Operators/ }).getByRole("button", { name: /Read thread/ }).click();
-	const detail = threadDetail(aside);
-	await detail.getByText(/Comment 1 on Operators/).waitFor();
-	const actions = detail.getByRole("group", { name: "Discussion actions" });
-	assert(await actions.count(), "the discussion has its own source actions");
-	await actions.getByRole("button", { name: "Upvote on Hacker News" }).waitFor();
-	await actions.getByRole("button", { name: /^save$/i }).click();
-	assert(await waitFor(() => store.get("HNewhere:favorites")?.some((item) => item.key === "hn:9742" && item.kind === "discussion" && item.url === stories[1].url)));
-	assert.equal(await detail.getByRole("link", { name: "commenter1", exact: true }).getAttribute("href"), "https://news.ycombinator.com/user?id=commenter1");
+	await threadContent(detail).getByText(/Comment 17 on Inspectors/).waitFor();
+	await threadContent(detail).getByText(/Comment 1 on Inspectors/).waitFor();
+	const trigger = detail.getByRole("listitem").filter({ hasText: /Comment 17 on Inspectors/ }).getByRole("button", { name: /^focus$/i });
+	await trigger.click();
+	assert.equal(await more.count(), 0);
+	await detail.getByRole("button", { name: "Show all comments" }).click();
+	await threadContent(detail).getByText(/Comment 1 on Inspectors/).waitFor();
+	assert(await trigger.evaluate((button) => button.matches(":focus")));
+	assert(await more.isVisible());
+	await detail.getByRole("button", { name: "Show all discussions" }).click();
+	await feedList(aside).waitFor();
 });
 
 test("sync in an open topic thread reloads comments beyond the mixed feed preview", async (t) => {
 	let revised = false;
 	const changed = 974111;
-	const { aside } = await openTopic(t, { responses: [{ match: (url) => revised && url === hnItem(changed),
+	const { aside, page } = await openTopic(t, { responses: [{ match: (url) => revised && url === hnItem(changed),
 		json: { id: changed, type: "comment", by: "editor", text: "Revised after the hydrographic survey.", time: now } }] });
-	await feedList(aside).getByRole("listitem").filter({ hasText: /Comment 1 on Inspectors/ }).getByRole("button", { name: /Read thread/ }).click();
+	await (await sourceThread(page, threadURL(stories[0].id))).click();
 	const detail = threadDetail(aside);
-	await detail.getByText(/Comment 12 on Inspectors/).waitFor();
+	await threadContent(detail).getByText(/Comment 12 on Inspectors/).waitFor();
 	revised = true;
 	await asideSources(aside).click();
 	await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
-	assert(await waitFor(async () => (await detail.getByText("Revised after the hydrographic survey.").count()) === 1), "sync retrieves fresh bodies throughout the inline discussion");
+	assert(await waitFor(async () => (await threadContent(detail).getByText("Revised after the hydrographic survey.").count()) === 1), "sync retrieves fresh bodies throughout the inline discussion");
 });

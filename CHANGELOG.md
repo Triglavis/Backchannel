@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.19.2] — 2026-11-24
+
+### Fixed
+
+- Topic Article comments use the same actions and focused byline as Reader.
+  Closing Focus returns you to your place in the discussion.
+- The Sidebar composer stays at the bottom and shows its actions as you type.
+  You can carry a note into Reader and save it even if its discussion is unavailable.
+- The Sidebar's focused byline sits below the discussion title and counts.
+  Reader adds space between the focused quote and divider.
+- Reader shows Related coverage after the article and before Next in queue.
+
+### Security
+
+- Keep private notes, drafts and Collection views inside Backchannel.
+- Preserve Collection discussion-check opt-outs and send less information in
+  background lookups.
+- Add safeguards for Account recovery and sessions, topic reports and shared
+  Topic Article generation.
+- Once an account upgrades to signed sync proofs, update Reader on every device
+  to keep signing in and uploading sync snapshots. A Worker rollback must also
+  support signed proofs.
+
 ## [1.6.19.1] — 2026-11-24
 
 ### Added
@@ -2914,7 +2937,8 @@ Releases before 1.4.7 are recorded in the
 commit history. Entries for 1.4.7 through 1.5.3 are summarized from their release
 commits rather than written at the time.
 
-[Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.1...main
+[Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...main
+[1.6.19.2]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.1...tags/v1.6.19.2
 [1.6.19.1]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19...tags/v1.6.19.1
 [1.6.19]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.18.5...v1.6.19
 [1.6.1]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.0...v1.6.1

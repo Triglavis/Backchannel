@@ -135,6 +135,64 @@ test('the phone Reader discussion byline opens the original discussion in a new 
   }finally{await app.browser.close()}
 });
 
+for (const sidebar of [true, false]) {
+  test(`the ${sidebar ? 'Sidebar keeps the title above the focused byline' : 'phone Reader gives the focused quote room above its divider'}`, {timeout:20000}, async(t)=>{
+    const app = await launchApp({
+      topHosts: [new URL(url).hostname],
+      ...(sidebar ? {} : {hasTouch: true, viewport: {width: 390, height: 844}}),
+      settings: {autoOpenSidebar: true, sources: {hn: true}, updateCheck: false},
+    });
+    t.after(()=>app.browser.close());
+    const {page} = app;
+    page.setDefaultTimeout(6000);
+    await page.goto(sidebar ? url : 'https://backchnnl.app/');
+    if (!sidebar) {
+      await page.locator('#app-list-body .browse-title-link').first().click();
+      await page.locator('#app-bar-discussion').click();
+    }
+    await settled(app);
+    const banner = page.locator('#filter-banner');
+    const focus = page.locator(`#comments-content .comment[data-comment-id="hn:${sidebar ? 900119 : 900100}"] .focus-link`);
+    await focus.click();
+    const close = banner.getByRole('button', {name: 'Show all comments', exact: true});
+    await close.waitFor();
+    const source = banner.getByRole('link', {name: 'Hacker News', exact: true});
+    assert.equal(await source.count(), 1, 'the discussion source is linked in the byline');
+    assert.equal(await source.getAttribute('target'), '_blank');
+    assert(await banner.getByText('Focused comment', {exact: true}).isVisible());
+    const layout = await banner.evaluate(node=>{
+      const comments = node.closest('#comments');
+      const {left, right, top, bottom} = node.getBoundingClientRect();
+      const frame = comments.getBoundingClientRect();
+      const details = comments.querySelector('.submission-details').getBoundingClientRect();
+      const list = comments.querySelector('.top-level-comments').getBoundingClientRect();
+      const quote = node.querySelector('.filter-banner-quote').getBoundingClientRect();
+      return {
+        start: left-frame.left-comments.clientLeft,
+        end: frame.left+comments.clientLeft+comments.clientWidth-right,
+        top: top-frame.top+comments.scrollTop,
+        afterDetails: top >= details.bottom - 1,
+        beforeComments: bottom <= list.top + 1,
+        quoteGap: bottom - quote.bottom - parseFloat(getComputedStyle(node).borderBottomWidth),
+        border: getComputedStyle(node).borderBottomWidth,
+      };
+    });
+    assert.equal(layout.border, '1px');
+    assert(Math.abs(layout.start)<1 && Math.abs(layout.end)<1, 'the divider spans the discussion pane');
+    if (sidebar) {
+      assert(layout.afterDetails && layout.beforeComments, 'the byline sits between the discussion details and the comments');
+      assert(await waitFor(()=>page.locator('#comments').evaluate(node=>node.scrollTop <= 1)), 'focusing a lower comment reveals the title above the byline');
+    } else {
+      assert(Math.abs(layout.top-12)<1, 'the byline uses the same top inset even when the story details are visible');
+      assert(layout.quoteGap >= 12, 'the quote has bottom padding before the horizontal rule');
+    }
+    await close.click();
+    await close.waitFor({state: 'hidden'});
+    assert(await focus.isVisible());
+    assert.deepEqual(app.errors, []);
+  });
+}
+
 test('an open Reader source group keeps keyboard focus when the first comments finish loading', {timeout:25000}, async(t)=>{
   const app = await launchApp({sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   t.after(()=>app.browser.close());

@@ -1,4 +1,5 @@
 import { expireAccountState, fetchAccount } from "./account/worker.mjs";
+import { flushTopicReportDeletions } from "./account/topic-reports.mjs";
 
 const HOME = "backchnnl.app";
 
@@ -9,6 +10,7 @@ function isPreview(hostname) {
 export default {
 	scheduled(_event, env, ctx) {
 		ctx.waitUntil(expireAccountState(env.ACCOUNTS_DB));
+		ctx.waitUntil(flushTopicReportDeletions(env));
 	},
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);

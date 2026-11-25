@@ -7,6 +7,7 @@ const token = "fixture-operator-token";
 const article = "https://news.example.org/chess";
 const historicalArticle = "https://blog.example.com/chess";
 const unknown = "https://news.example.org/outside-the-index";
+const reportPageId = "1".repeat(32);
 const umbrella = { id: "topic:chess", label: "Chess", kind: "topic" };
 const canonicalUmbrella = { ...umbrella, id: "topic:chess-current" };
 const match = { id: "story:match", label: "Championship match", kind: "story" };
@@ -31,7 +32,7 @@ test("operators can resolve reports and curate published topics in WebKit", { ti
   const decisions = [];
   let reports = [
     { url: article, title: reportTitle, topic: "Chess", topicId: umbrella.id, suggestedTopic: match.label, count: 2, lastReportedAt: Date.parse(postedAt) },
-    { url: unknown, title: null, topic: "Chess", suggestedTopic: "", count: 1, lastReportedAt: Date.parse(postedAt) },
+    { url: unknown, reportPageId, title: null, topic: "Chess", suggestedTopic: "", count: 1, lastReportedAt: Date.parse(postedAt) },
     { url: "https://news.example.org/third", title: "Third pending link", topic: "Chess", suggestedTopic: "", count: 1, lastReportedAt: Date.parse(postedAt) },
   ];
   let simulateSaveFailure = true;
@@ -67,6 +68,7 @@ test("operators can resolve reports and curate published topics in WebKit", { ti
         return route.abort();
       }
       if (decision.reportUrl) reports = reports.filter(({ url }) => url !== decision.reportUrl);
+      if (decision.reportPageId) reports = reports.filter((report) => report.reportPageId !== decision.reportPageId);
       if (decision.action === "dismiss") simulateQueueRefreshFailure = true;
       return route.fulfill({ status: 201, json: { id: decision.requestId, ...(decision.action === "split" ? { topicId: "story:new" } : {}) } });
     }
@@ -87,7 +89,7 @@ test("operators can resolve reports and curate published topics in WebKit", { ti
         ] } });
       }
     }
-    if (url.pathname === "/internal/refresh" && method === "POST") {
+    if (url.pathname === "/internal/publish-topics" && method === "POST") {
       return route.fulfill({ json: { generatedAt: postedAt, sources: [], stats: {} } });
     }
     return route.fulfill({ status: 404 });
@@ -157,7 +159,7 @@ test("operators can resolve reports and curate published topics in WebKit", { ti
   await action.selectOption("dismiss");
   await save.click();
   await page.getByText("Report dismissed.").waitFor();
-  lastDecision({ action: "dismiss", reportUrl: unknown });
+  lastDecision({ action: "dismiss", reportPageId });
   await page.locator("#reports-status").getByText("The request failed. Try again.").waitFor();
   const requestsBeforeQueueRetry = requests.length;
   await page.getByRole("button", { name: "Reload reports" }).click();
@@ -218,10 +220,10 @@ test("operators can resolve reports and curate published topics in WebKit", { ti
   await page.getByText("Decision saved. It will appear after the next refresh.").waitFor();
   lastDecision({ action: "remove", url: article });
 
-  assert.equal(requests.some(({ url }) => url.pathname === "/internal/refresh"), false);
+  assert.equal(requests.some(({ url }) => url.pathname === "/internal/publish-topics"), false);
   await page.getByRole("button", { name: "Publish now" }).click();
   await page.getByText("Topics published.").waitFor();
-  assert.ok(requests.some(({ url, method, authorization }) => url.pathname === "/internal/refresh" && method === "POST" && authorization === "Bearer " + token));
+  assert.ok(requests.some(({ url, method, authorization }) => url.pathname === "/internal/publish-topics" && method === "POST" && authorization === "Bearer " + token));
   assert.ok(requests.filter(({ url }) => url.pathname.startsWith("/api/")).every(({ authorization }) => !authorization));
   assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length, document.cookie]), [0, 0, ""]);
 

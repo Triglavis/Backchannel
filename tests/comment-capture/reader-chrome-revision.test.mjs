@@ -61,7 +61,8 @@ test('Next in queue follows the article inside the Reader scroller',{timeout:200
   const queue=page.locator('#next-up');
   await queue.getByRole('link',{name:next.title,exact:true}).waitFor();
   assert.equal(await page.locator('#panel #next-up').count(),0,'the discussion does not contain the queue footer');
-  assert(await queue.evaluate(node=>node.previousElementSibling?.matches('slot[name="reader"]')),'the queue follows the full article in the same scroller');
+  assert(await queue.evaluate(node=>node.parentElement?.matches('.app-reader-scroll') &&
+    node.parentElement.firstElementChild?.matches('slot[name="reader"]')),'the queue follows the full article in the same scroller');
   await queue.getByRole('link',{name:next.title,exact:true}).click();
   assert.equal(await page.locator('#app-article-open').getAttribute('href'),next.url);
   await queue.waitFor({state:'hidden'});

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, sign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -35,21 +35,26 @@ const { outputFiles: [mailWorkerScript] } = await build({
   bundle: true, write: false, format: 'esm', platform: 'browser',
 });
 
-function createWorker(t, { database = false, limit, mail, deliver, sender = 'accounts@backchnnl.app', hourlyLimit = 120 } = {}) {
+function createWorker(t, { database = false, limit, mail, deliver, sender = 'accounts@backchnnl.app', hourlyLimit = 120, enrollmentLimit, topicTokenSecret, topicReports } = {}) {
   const worker = new Miniflare(convertV4MiniflareOptions({
     modules: true, script: (mail ? mailWorkerScript : workerScript).text, compatibilityDate: config.compatibility_date,
     assets: { ...config.assets, directory: fileURLToPath(new URL('site', root)), routerConfig: { has_user_worker: true } },
     ...(database ? { d1Databases: { ACCOUNTS_DB: 'account-test' } } : {}),
     ...(limit ? { ratelimits: { ACCOUNT_RATE_LIMIT: { namespace_id: '1', simple: { limit, period: 60 } } } } : {}),
-    ...(mail ? {
-      bindings: { ACCOUNT_EMAIL_FROM: sender, ACCOUNT_EMAIL_CODE_SECRET: 'email-code-test-secret', ACCOUNT_EMAIL_HOURLY_LIMIT: String(hourlyLimit) },
-      serviceBindings: { TEST_MAIL: async request => {
+    bindings: {
+      ...(mail && { ACCOUNT_EMAIL_FROM: sender, ACCOUNT_EMAIL_CODE_SECRET: 'email-code-test-secret', ACCOUNT_EMAIL_HOURLY_LIMIT: String(hourlyLimit) }),
+      ...(enrollmentLimit !== undefined && { ACCOUNT_EMAIL_ENROLLMENT_HOURLY_LIMIT: String(enrollmentLimit) }),
+      ...(topicTokenSecret && { TOPIC_REPORT_TOKEN_SECRET: topicTokenSecret }),
+    },
+    serviceBindings: {
+      ...(mail && { TEST_MAIL: async request => {
         const message = await request.json();
         mail.push(message);
         await deliver?.(message);
         return Response.json({ messageId: String(mail.length) });
-      } },
-    } : {}),
+      } }),
+      ...(topicReports && { TOPIC_REPORTS: topicReports }),
+    },
   }));
   t.after(() => worker.dispose());
   return worker;
@@ -88,6 +93,7 @@ async function applySchema(worker, ...migrations) {
   if (selected.has('0002_recovery_email.sql')) {
     selected.add('0005_email_resend_limits.sql');
     selected.add('0009_email_hourly_budget.sql');
+    selected.add('0011_account_hardening.sql');
   }
   for (const filename of [...selected].sort()) {
     await applyMigration(db, filename);
@@ -357,6 +363,22 @@ test('the database enforces a shared email budget for concurrent requests', asyn
   assert.equal(mail.length, 3);
 });
 
+test('email recovery for an existing account has reserved delivery capacity', async t => {
+  const mail = [];
+  const worker = createWorker(t, { database: true, limit: 20, mail, hourlyLimit: 3, enrollmentLimit: 1 });
+  const db = await applySchema(worker, '0002_recovery_email.sql');
+  const email = 'existing@example.test';
+  await db.prepare('INSERT INTO accounts (id, recovery_email) VALUES (?, ?)').bind('existing', email).run();
+  const send = (kind, address) => request(worker, `/account/email/${kind}/start`, { method:'POST', body:{email:address} });
+  assert.equal((await send('register', 'new@example.test')).status, 200);
+  assert.equal((await send('register', 'another@example.test')).status, 429);
+  const continuation = await request(worker, '/account/email/register/start', { method:'POST', body:{email, flow:'continue'} });
+  assert.equal(continuation.status, 200);
+  assert(await waitFor(() => mail.some(message => message.to === email)));
+  assert.equal((await send('recover', email)).status, 200);
+  assert(await waitFor(() => mail.filter(message => message.to === email).length === 2));
+});
+
 test('Account responses block cross-origin browser contexts and opt out of caching', async t => {
   const worker = createWorker(t);
   const status = await request(worker, '/account/status', { headers:{ 'Sec-Fetch-Site':'same-origin' } });
@@ -384,7 +406,7 @@ test('the Worker accepts only bounded diagnostics without account or article ide
     ACCOUNT_RATE_LIMIT: { limit: async () => ({success:allowed}) },
     BACKCHANNEL_DIAGNOSTICS: { writeDataPoint: point => points.push(point) },
   };
-  const report = {operation:'thread',source:'reddit',outcome:'timeout',duration:30000,version:'1.6.19-alpha'};
+  const report = {operation:'thread',source:'reddit',outcome:'timeout',duration:30000,version:'1.6.19.2'};
   const send = (body, headers = {}, query = '') => accountApp.fetch(new Request('https://backchnnl.app/account/diagnostics' + query, {
     method:'POST', headers:{'Content-Type':'application/json',Origin:'https://backchnnl.app',...headers}, body:JSON.stringify(body),
   }), env, {});
@@ -399,8 +421,152 @@ test('the Worker accepts only bounded diagnostics without account or article ide
   allowed = false;
   assert.equal((await send(report)).status,429);
   assert.deepEqual(points,[{
-    blobs:['thread','reddit','timeout','1.6.19-alpha'], doubles:[30000], indexes:['thread:reddit'],
+    blobs:['thread','reddit','timeout','1.6.19.2'], doubles:[30000], indexes:['thread:reddit'],
   }]);
+});
+
+test('a live Account session receives a short-lived Topics reporting capability', async t => {
+  const secret = 'topics-reporting-test-secret';
+  const worker = createWorker(t, { database:true, limit:20, topicTokenSecret:secret });
+  const db = await applySchema(worker);
+  const account = 'test-account';
+  const bearer = 'A'.repeat(43);
+  await db.prepare('INSERT INTO accounts (id) VALUES (?)').bind(account).run();
+  await db.prepare('INSERT INTO sessions (token_hash, account_id, expires_at) VALUES (?, ?, ?)')
+    .bind(createHash('sha256').update(bearer).digest('base64url'), account, Date.now() + 600_000).run();
+  const mint = token => request(worker, '/account/topic-report-token', { method:'POST', token });
+  assert.equal((await mint()).status, 401);
+  const response = await mint(bearer);
+  assert.equal(response.status, 200);
+  const { token } = await response.json();
+  const [version, encoded, signature] = token.split('.');
+  assert.equal(version, 'v1');
+  const claims = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+  assert.deepEqual(claims, { aud:'backchannel-topics', scope:'topic:report',
+    sub:createHash('sha256').update('topic-report:' + account).digest('hex').slice(0, 32), exp:claims.exp });
+  assert(claims.exp > Date.now() && claims.exp <= Date.now() + 300_000);
+  assert.equal(signature, createHmac('sha256', secret).update(`${version}.${encoded}`).digest('base64url'));
+});
+
+test('queued Topics report deletion survives a service failure and clears when delivered', async t => {
+  const subject = 'b'.repeat(32);
+  const secret = 'topics-reporting-test-secret';
+  const deliveries = [];
+  let result = 503;
+  const worker = createWorker(t, {
+    database:true, limit:20, topicTokenSecret:secret,
+    topicReports(request) {
+      deliveries.push(request);
+      return new Response(null, { status:result });
+    },
+  });
+  const db = await applySchema(worker, '0002_recovery_email.sql');
+  await db.prepare('INSERT INTO account_report_deletions (subject, queued_at) VALUES (?, ?)').bind(subject, Date.now()).run();
+  const account = await worker.getWorker();
+  const run = async () => {
+    const { outcome } = await account.scheduled();
+    assert.equal(outcome, 'ok');
+  };
+  await run();
+  assert.equal(deliveries.length, 1);
+  assert.equal(await db.prepare('SELECT COUNT(*) AS count FROM account_report_deletions WHERE next_attempt_at > ?').bind(Date.now()).first('count'), 1);
+  await run();
+  assert.equal(deliveries.length, 1);
+  await db.prepare('UPDATE account_report_deletions SET next_attempt_at = 0').run();
+  result = 204;
+  await run();
+  assert.equal(deliveries.length, 2);
+  for (const delivery of deliveries) {
+    assert.equal(delivery.url, 'https://topics.backchnnl.app/internal/account-reports');
+    assert.equal(delivery.method, 'DELETE');
+    const [version, encoded, signature] = delivery.headers.get('Authorization').replace(/^Bearer /, '').split('.');
+    assert.equal(signature, createHmac('sha256', secret).update(`${version}.${encoded}`).digest('base64url'));
+    const claims = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+    assert.equal(claims.scope, 'topic:report:delete');
+    assert.equal(claims.sub, subject);
+  }
+  assert.equal(await db.prepare('SELECT COUNT(*) AS count FROM account_report_deletions').first('count'), 0);
+});
+
+test('fresh passkey confirmation signs out other sessions on the same device', { timeout:15_000 }, async t => {
+  const mail = [];
+  const worker = createWorker(t, { database:true, limit:30, mail });
+  await applySchema(worker, '0002_recovery_email.sql', '0003_devices.sql');
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const device = await createDevice(browser, worker);
+  const { session: older } = await registerWithEmail(worker, device, mail, 'revocation@example.test');
+  const current = await device.signIn();
+  const id = 'd9064aa9-1314-4ea8-9589-a46b928e6c9c';
+  for (const { token } of [older, current]) {
+    assert.equal((await request(worker, '/account/devices/current', { method:'PUT', token, body:{ id, name:'Same device' } })).status, 204);
+  }
+  const options = await request(worker, '/account/devices/revoke/options', { method:'POST', token:current.token, body:{ target:'others' } });
+  assert.equal(options.status, 200);
+  const challenge = await options.json();
+  const body = { ceremony:challenge.ceremony, credential:await device.getCredential(challenge.options) };
+  assert.equal((await request(worker, '/account/devices/others', { method:'DELETE', token:current.token, body })).status, 204);
+  assert.equal((await request(worker, '/account/email', { token:older.token })).status, 401);
+  assert.equal((await request(worker, '/account/email', { token:current.token })).status, 200);
+});
+
+test('a fresh passkey sign-in upgrades existing sync access to signed proofs', { timeout:15_000 }, async t => {
+  const mail = [];
+  const worker = createWorker(t, { database:true, limit:30, mail });
+  const db = await applySchema(worker, '0002_recovery_email.sql');
+  const browser = await chromium.launch();
+  t.after(() => browser.close());
+  const device = await createDevice(browser, worker);
+  const email = 'upgrade@example.test';
+  const { session } = await registerWithEmail(worker, device, mail, email);
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const syncKeyPublic = publicKey.export({ format:'jwk' }).x;
+  const prove = (action, ...fields) => sign(null, Buffer.from(JSON.stringify([action, 2, ...fields])), privateKey).toString('base64url');
+  const post = (path, body) => request(worker, '/account' + path, { method:'POST', body });
+  const unlock = async () => {
+    const options = await (await post('/login/options')).json();
+    return (await post('/login/verify', { ceremony:options.ceremony, credential:await device.getCredential(options.options), keyProofVersion:2 })).json();
+  };
+
+  const upgrade = await unlock();
+  assert.equal(upgrade.keyProofVersion, 1);
+  const migrated = await post('/login/complete', { unlock:upgrade.unlock, syncKeyVerifier:fixtureVerifier, syncKeyPublic,
+    syncKeySignature:prove('backchannel-key-upgrade', upgrade.unlock, syncKeyPublic) });
+  assert.equal(migrated.status, 200);
+  const modern = await migrated.json();
+  assert.equal(modern.keyProofVersion, 2);
+  assert.deepEqual(await db.prepare('SELECT sync_key_verifier, sync_key_public FROM accounts WHERE id = ?').bind(modern.account).first(),
+    { sync_key_verifier:null, sync_key_public:syncKeyPublic });
+
+  const next = await unlock();
+  assert.equal(next.keyProofVersion, 2);
+  const proof = { unlock:next.unlock, syncKeySignature:prove('backchannel-account-unlock', next.unlock) };
+  assert.equal((await post('/login/complete', proof)).status, 200);
+  assert.equal((await post('/login/complete', proof)).status, 401);
+  const ciphertext = 'B'.repeat(64);
+  const tokenHash = createHash('sha256').update(session.token).digest('base64url');
+  assert.equal((await writeSnapshot(worker, session, 0, ciphertext)).status, 428);
+  assert.equal((await writeSnapshot(worker, session, 0, ciphertext, {
+    proof:prove('backchannel-snapshot-write', session.account, tokenHash, 0, null, ciphertext),
+  })).status, 200);
+
+  await db.prepare("UPDATE account_email_sends SET expires_at = 0 WHERE kind = 'register'").run();
+  assert.equal((await post('/email/register/start', { email })).status, 200);
+  const scoped = await (await post('/register/options', { email, code:emailCode(mail.at(-1)), flow:'continue' })).json();
+  assert.equal(scoped.keyProofVersion, 2);
+  const recoveryRequest = { signInCeremony:scoped.ceremony, syncKeySignature:prove('backchannel-key-recovery', scoped.ceremony) };
+  const recovery = await post('/recover/options', recoveryRequest);
+  assert.equal(recovery.status, 200);
+  assert.equal((await post('/recover/options', recoveryRequest)).status, 401);
+  const challenge = await recovery.json();
+  const replacement = await createDevice(browser, worker);
+  const enrollment = await enrollmentProof(replacement, challenge);
+  const { syncKeyVerifier: _, ...keyProof } = enrollment;
+  const recovered = await post('/recover/verify', { ...keyProof, syncKeyPublic,
+    syncKeySignature:prove('backchannel-key-replace', challenge.ceremony, syncKeyPublic) });
+  assert.equal(recovered.status, 200);
+  assert.equal((await recovered.json()).account, session.account);
+  assert.equal((await request(worker, '/account/email', { token:modern.token })).status, 401);
 });
 
 test('Reader Account POSTs reach the Worker with a same-origin browser request', async t => {
@@ -490,7 +656,7 @@ test('verified recovery email gates registration and can replace a passkey on th
   });
   const post = (path, body, token) => request(worker, '/account' + path, { method: 'POST', body, token });
   const status = await request(worker, '/account/status');
-  assert.deepEqual(await status.json(), { available: true, emailAvailable: true });
+  assert.deepEqual(await status.json(), { available: true, emailAvailable: true, emailContinuation: true, deviceStepUp: true });
   const db = await applySchema(worker, '0002_recovery_email.sql');
   assert.equal((await post('/register/options', {})).status, 401);
   assert.equal((await post('/email/register/start', { email: 'x@example.test\r\nBcc:y@example.test' })).status, 400);
@@ -667,7 +833,7 @@ test('two devices share snapshot revisions and delete the account with a fresh p
   const mail = [];
   const worker = createWorker(t, { database: true, limit: 20, mail });
   const status = await request(worker, '/account/status');
-  assert.deepEqual(await status.json(), { available: true, emailAvailable: true });
+  assert.deepEqual(await status.json(), { available: true, emailAvailable: true, emailContinuation: true, deviceStepUp: true });
   const db = await applySchema(worker, '0002_recovery_email.sql', '0006_passkey_key_envelopes.sql');
   const browser = await chromium.launch();
   t.after(() => browser.close());
@@ -990,7 +1156,7 @@ test('Reader settings verify account email, connect two devices, resolve edits, 
   await first.page.getByLabel('Verification code',{exact:true}).fill(emailCode(mail.at(-1)));
   await first.syncButton('Verify email');
   await first.page.locator('#toast.is-showing').filter({hasText:'Email updated.'}).waitFor();
-  assert.equal(await manageAddress.getAttribute('placeholder'),readerEmail);
+  assert(await waitFor(async () => await manageAddress.getAttribute('placeholder') === readerEmail));
   assert.equal(await manageAddress.inputValue(),'');
   await first.syncButton('Back');
   const testPasskeyPRF = await first.page.evaluate(() => window.testPasskeyPRF);

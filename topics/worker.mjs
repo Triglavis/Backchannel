@@ -22,6 +22,8 @@ const ARTICLE_LOOKUP_BYTES = 1024 * 1024;
 const ARTICLE_LEASE_MS = 45_000;
 const ARTICLE_WAIT_MS = 900;
 const ARTICLE_RETRY_MS = 15 * 60_000;
+const ARTICLE_DAILY_BUDGET = 250;
+const UTC_DAY_MS = 86_400_000;
 const ARTICLE_HEADERS = {
   "Access-Control-Allow-Origin": "*", "Access-Control-Expose-Headers": "ETag, Retry-After",
   "Content-Type": "application/json; charset=utf-8", "X-Content-Type-Options": "nosniff",
@@ -34,6 +36,8 @@ const SOURCES_UNAVAILABLE = "sources-unavailable";
 const EMPTY_INDEX = JSON.stringify({ version: 1, generatedAt: null, topics: [], pages: [] });
 const REPORT_ORIGIN = "https://backchnnl.app";
 const REPORT_BODY_LIMIT = 4096;
+const REPORT_PROOF_TTL_MS = 5 * 60_000;
+const REPORT_RETENTION_MS = 90 * UTC_DAY_MS;
 const DECISION_BODY_LIMIT = 512 * 1024;
 const REVIEW_HEADERS = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
 const REPORT_HEADERS = {
@@ -313,6 +317,7 @@ async function refresh(env) {
       await db.batch([
         db.prepare("DELETE FROM topic_articles WHERE expires_at <= ?").bind(now),
         db.prepare("DELETE FROM topic_article_selections WHERE generation <> (SELECT generation FROM topic_article_publication WHERE id = 1)"),
+        db.prepare("DELETE FROM topic_article_budget WHERE day < ?").bind(Math.floor(now / UTC_DAY_MS) - 1),
       ]);
     } catch (error) {
       console.warn("Topic article cleanup unavailable", error.message);
@@ -324,12 +329,12 @@ async function refresh(env) {
   }
 }
 
-function authorized(request, env) {
+function authorized(request, token) {
   const provided = request.headers.get("Authorization") || "";
-  if (!env.REFRESH_TOKEN || provided.length !== env.REFRESH_TOKEN.length + 7 || !provided.startsWith("Bearer ")) return false;
+  if (!token || provided.length !== token.length + 7 || !provided.startsWith("Bearer ")) return false;
   let difference = 0;
-  for (let index = 0; index < env.REFRESH_TOKEN.length; index++) {
-    difference |= provided.charCodeAt(index + 7) ^ env.REFRESH_TOKEN.charCodeAt(index);
+  for (let index = 0; index < token.length; index++) {
+    difference |= provided.charCodeAt(index + 7) ^ token.charCodeAt(index);
   }
   return difference === 0;
 }
@@ -660,7 +665,10 @@ async function readArticleInput(db, id) {
 function articleStatus(status, retryAfter) {
   const headers = { ...ARTICLE_HEADERS, "Cache-Control": "no-store" };
   if (retryAfter) headers["Retry-After"] = String(retryAfter);
-  const messages = { 400: "One published topic ID is required", 404: "Topic not found", 503: "Public coverage is temporarily unavailable" };
+  const messages = {
+    400: "One published topic ID is required", 404: "Topic not found", 429: "New briefs are temporarily at capacity",
+    503: "Public coverage is temporarily unavailable",
+  };
   return Response.json(status === 202 ? { status: "generating" } : { error: messages[status] }, { status, headers });
 }
 
@@ -772,14 +780,27 @@ async function serveTopicArticle(request, url, env, context) {
   }
 
   const owner = crypto.randomUUID();
-  const claim = await db.prepare(`
-    INSERT INTO topic_articles (topic_id, revision, owner, lease_until, expires_at)
-    SELECT ?, ?, ?, ?, ? FROM topic_article_publication WHERE id = 1 AND generation = ?
-    ON CONFLICT(topic_id, revision) DO UPDATE SET owner = excluded.owner, lease_until = excluded.lease_until, expires_at = excluded.expires_at
-    WHERE topic_articles.lease_until <= ? AND topic_articles.retry_at <= ? AND (topic_articles.body IS NULL OR topic_articles.retry_at > 0)
-    RETURNING body, failures
-  `).bind(input.topic.id, input.revision, owner, now + ARTICLE_LEASE_MS, now + RETENTION_MS, input.generation, now, now).first();
-  if (!claim) return articleResponse(request, input, await readArticleRow(db, input));
+  const day = Math.floor(now / UTC_DAY_MS);
+  const configuredBudget = Number(env.TOPIC_ARTICLE_DAILY_BUDGET ?? ARTICLE_DAILY_BUDGET);
+  const budget = Number.isSafeInteger(configuredBudget) && configuredBudget >= 0 ? configuredBudget : ARTICLE_DAILY_BUDGET;
+  const [{ results: [claim] }] = await db.batch([
+    db.prepare(`INSERT INTO topic_articles (topic_id, revision, owner, lease_until, expires_at)
+      SELECT ?, ?, ?, ?, ? FROM topic_article_publication WHERE id = 1 AND generation = ?
+      AND COALESCE((SELECT generations FROM topic_article_budget WHERE day = ?), 0) < ?
+      ON CONFLICT(topic_id, revision) DO UPDATE SET owner = excluded.owner, lease_until = excluded.lease_until, expires_at = excluded.expires_at
+      WHERE topic_articles.lease_until <= ? AND topic_articles.retry_at <= ? AND (topic_articles.body IS NULL OR topic_articles.retry_at > 0)
+      RETURNING body, failures`)
+      .bind(input.topic.id, input.revision, owner, now + ARTICLE_LEASE_MS, now + RETENTION_MS, input.generation, day, budget, now, now),
+    db.prepare(`INSERT INTO topic_article_budget (day, generations)
+      SELECT ?, 1 FROM topic_articles WHERE topic_id = ? AND revision = ? AND owner = ?
+      ON CONFLICT(day) DO UPDATE SET generations = generations + 1`).bind(day, input.topic.id, input.revision, owner),
+  ]);
+  if (!claim) {
+    const current = await readArticleRow(db, input);
+    if (current?.body || current?.lease_until > now || current?.retry_at > now) return articleResponse(request, input, current);
+    const used = await db.prepare("SELECT generations FROM topic_article_budget WHERE day = ?").bind(day).first("generations") ?? 0;
+    return used >= budget ? articleStatus(429, Math.ceil(((day + 1) * UTC_DAY_MS - now) / 1000)) : articleStatus(202, 2);
+  }
 
   const generation = generateArticle(request, env, id, input, owner, claim).catch(articleStorageError);
   if (!context?.waitUntil) return generation;
@@ -821,22 +842,64 @@ async function readTopicJSON(request, limit) {
   catch { return { status: 400 }; }
 }
 
-async function topicReporter(request, db) {
-  const token = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("Authorization") || "")?.[1];
-  if (!token) return null;
-  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
-  const sessionHash = btoa(String.fromCharCode(...hash)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-  return db.prepare("SELECT account_id FROM sessions WHERE token_hash = ? AND expires_at > ?")
-    .bind(sessionHash, Date.now()).first("account_id");
+function decodeBase64URL(value) {
+  return Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/")), (character) => character.charCodeAt(0));
+}
+
+async function verifyTopicProof(token, secret, scope) {
+  const match = typeof token === "string" && /^v1\.([A-Za-z0-9_-]{1,512})\.([A-Za-z0-9_-]{43})$/.exec(token);
+  if (!secret || !match) return null;
+  const [, payload, signature] = match;
+  try {
+    const key = await crypto.subtle.importKey("raw", utf8.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    if (!await crypto.subtle.verify("HMAC", key, decodeBase64URL(signature), utf8.encode("v1." + payload))) return null;
+    const proof = JSON.parse(new TextDecoder().decode(decodeBase64URL(payload)));
+    const now = Date.now();
+    return proof?.aud === "backchannel-topics" && proof.scope === scope &&
+      typeof proof.sub === "string" && /^[a-f0-9]{32}$/.test(proof.sub) && Number.isSafeInteger(proof.exp) &&
+      proof.exp > now && proof.exp <= now + REPORT_PROOF_TTL_MS ? proof : null;
+  } catch { return null; }
+}
+
+async function topicReporter(request, env) {
+  if (!env.TOPIC_REPORT_TOKEN_SECRET) return { status: 503 };
+  const authorization = request.headers.get("Authorization") || "";
+  let token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  if (/^[A-Za-z0-9_-]{43}$/.test(token) && env.ACCOUNTS) {
+    try {
+      const response = await env.ACCOUNTS.fetch(new Request(REPORT_ORIGIN + "/account/topic-report-token", {
+        method: "POST", headers: { Authorization: authorization }, redirect: "error", signal: AbortSignal.timeout(5000),
+      }));
+      if (!response.ok) return { status: [401, 429].includes(response.status) ? response.status : 503 };
+      token = (await response.json()).token;
+    } catch { return { status: 503 }; }
+  }
+  const proof = await verifyTopicProof(token, env.TOPIC_REPORT_TOKEN_SECRET, "topic:report");
+  return proof ? { proof } : { status: 401 };
+}
+
+async function deleteAccountReports(request, env) {
+  const authorization = request.headers.get("Authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  const proof = await verifyTopicProof(token, env.TOPIC_REPORT_TOKEN_SECRET, "topic:report:delete");
+  if (!proof) return new Response(null, { status: 401, headers: REVIEW_HEADERS });
+  const db = env.TOPICS_DB;
+  await db.batch([
+    db.prepare(`INSERT INTO topic_report_revocations (reporter_id, revoked_until) VALUES (?, ?)
+      ON CONFLICT (reporter_id) DO UPDATE SET revoked_until = MAX(revoked_until, excluded.revoked_until)`)
+      .bind(proof.sub, Date.now() + REPORT_PROOF_TTL_MS),
+    db.prepare("DELETE FROM topic_reports WHERE reporter_id = ?").bind(proof.sub),
+  ]);
+  return new Response(null, { status: 204, headers: REVIEW_HEADERS });
 }
 
 async function receiveTopicReport(request, env) {
   const origin = request.headers.get("Origin");
   if (origin && origin !== REPORT_ORIGIN) return topicReportStatus(403);
   if (request.method === "OPTIONS") return topicReportStatus(204);
-  const account = await topicReporter(request, env.ACCOUNTS_DB);
-  if (!account) return topicReportStatus(401);
-  const reporter = await fingerprint("topic-report:" + account);
+  const { status: authStatus, proof } = await topicReporter(request, env);
+  if (authStatus) return topicReportStatus(authStatus);
+  const reporter = proof.sub;
   if (!(await env.TOPIC_REPORT_RATE_LIMIT.limit({ key: reporter })).success) return topicReportStatus(429);
   const { status, payload } = await readTopicJSON(request, REPORT_BODY_LIMIT);
   if (status) return topicReportStatus(status);
@@ -844,14 +907,21 @@ async function receiveTopicReport(request, env) {
   const { topic = "", suggestedTopic = "" } = payload ?? {};
   if (!page || typeof topic !== "string" || topic.length > 512 ||
     typeof suggestedTopic !== "string" || suggestedTopic.length > 120) return topicReportStatus(400);
-  await env.TOPICS_DB.prepare(`
+  const pageId = await fingerprint(page.key);
+  const now = Date.now();
+  if (proof.exp <= now) return topicReportStatus(401);
+  const reportUrl = new URL(page.url);
+  reportUrl.search = "";
+  const stored = await env.TOPICS_DB.prepare(`
     INSERT INTO topic_reports (page_id, reporter_id, url, topic, suggested_topic, reported_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (
+      SELECT 1 FROM topic_report_revocations WHERE reporter_id = ? AND revoked_until > ?
+    )
     ON CONFLICT (page_id, reporter_id) DO UPDATE SET
       url = excluded.url, topic = excluded.topic, suggested_topic = excluded.suggested_topic, reported_at = excluded.reported_at
-  `).bind(await fingerprint(page.key), reporter, page.url,
-    topic.trim().replace(/\s+/g, " "), suggestedTopic.trim().replace(/\s+/g, " "), Date.now()).run();
-  return topicReportStatus(204);
+  `).bind(pageId, reporter, reportUrl.href,
+    topic.trim().replace(/\s+/g, " "), suggestedTopic.trim().replace(/\s+/g, " "), now, reporter, now).run();
+  return topicReportStatus(stored.meta.changes ? 204 : 401);
 }
 
 async function reviewTopicReports(db, url) {
@@ -860,14 +930,16 @@ async function reviewTopicReports(db, url) {
   const pending = url.searchParams.get("pending") === "1";
   const limit = 100;
   const { results } = await db.prepare(`
-    SELECT COALESCE(p.url, MIN(r.url)) AS url, p.title, r.topic, r.suggested_topic AS suggestedTopic,
+    SELECT ${pending ? "r.page_id AS reportPageId," : ""}
+      COALESCE(p.url, MIN(r.url)) AS url, p.title, r.topic, r.suggested_topic AS suggestedTopic,
       COUNT(*) AS count, MAX(r.reported_at) AS lastReportedAt
     FROM topic_reports AS r LEFT JOIN pages AS p ON p.id = r.page_id
-    ${pending ? `WHERE NOT EXISTS (SELECT 1 FROM topic_decisions AS d
+    WHERE r.reported_at > ?
+    ${pending ? `AND NOT EXISTS (SELECT 1 FROM topic_decisions AS d
       WHERE d.report_page_id = r.page_id AND d.decided_at >= r.reported_at)` : ""}
     GROUP BY r.page_id, r.topic, r.suggested_topic
     ORDER BY count DESC, lastReportedAt DESC, r.page_id, r.topic, r.suggested_topic LIMIT ? OFFSET ?
-  `).bind(limit + 1, offset).all();
+  `).bind(Date.now() - REPORT_RETENTION_MS, limit + 1, offset).all();
   const nextOffset = results.length > limit ? offset + limit : null;
   const reports = results.slice(0, limit);
   if (pending && reports.length) {
@@ -879,7 +951,9 @@ async function reviewTopicReports(db, url) {
     }
     const pages = new Map((index?.pages || []).map((page) => [page.key, page.topicIds]));
     for (const report of reports) {
-      const ids = pages.get(canonicalURL(report.url)?.key) || [];
+      const key = canonicalURL(report.url)?.key;
+      const ids = pages.get(key);
+      if (!ids || await fingerprint(key) !== report.reportPageId) continue;
       const labelId = names.get(report.topic.trim().toLowerCase());
       if (ids.includes(labelId)) report.topicId = labelId;
       else if (ids.length === 1) report.topicId = ids[0];
@@ -899,7 +973,7 @@ function reviewAccepted(requestId, decision) {
 }
 
 async function receiveTopicDecision(request, env, url) {
-  if (!authorized(request, env)) return reviewError(401, "A valid operator token is required");
+  if (!authorized(request, env.TOPIC_REVIEW_TOKEN)) return reviewError(401, "A valid operator token is required");
   const origin = request.headers.get("Origin");
   if (origin && origin !== url.origin) return reviewError(403, "Open the review page on the Topics host");
   const { payload, status } = await readTopicJSON(request, DECISION_BODY_LIMIT);
@@ -913,11 +987,21 @@ async function receiveTopicDecision(request, env, url) {
   const existing = await saved();
   if (existing) return reviewAccepted(requestId, JSON.parse(existing));
   let reportPageId = null;
-  if (Object.hasOwn(payload, "reportUrl") || payload.action === "dismiss") {
-    const page = typeof payload.reportUrl === "string" && canonicalURL(payload.reportUrl);
-    if (!page) return reviewError(400, "Choose a report to resolve");
-    reportPageId = await fingerprint(page.key);
-    const report = await db.prepare("SELECT page_id FROM topic_reports WHERE page_id = ? LIMIT 1").bind(reportPageId).first();
+  if (Object.hasOwn(payload, "reportPageId") || Object.hasOwn(payload, "reportUrl") || payload.action === "dismiss") {
+    if (Object.hasOwn(payload, "reportPageId")) {
+      if (typeof payload.reportPageId !== "string" || !/^[a-f0-9]{32}$/.test(payload.reportPageId)) return reviewError(400, "Choose a report to resolve");
+      reportPageId = payload.reportPageId;
+    } else {
+      const page = typeof payload.reportUrl === "string" && canonicalURL(payload.reportUrl);
+      if (!page) return reviewError(400, "Choose a report to resolve");
+      reportPageId = await fingerprint(page.key);
+    }
+    if (["move", "remove"].includes(payload.action)) {
+      const page = typeof payload.url === "string" && canonicalURL(payload.url);
+      if (!page || await fingerprint(page.key) !== reportPageId) return reviewError(404, "This link is outside the published index");
+    }
+    const report = await db.prepare("SELECT page_id FROM topic_reports WHERE page_id = ? AND reported_at > ? LIMIT 1")
+      .bind(reportPageId, Date.now() - REPORT_RETENTION_MS).first();
     if (!report) return reviewError(404, "This report is no longer available");
   }
   const index = payload.action === "dismiss" ? null : await readPublishedTopics(db);
@@ -941,12 +1025,16 @@ export default {
     if (pathname === "/api/topic-reports" && ["OPTIONS", "POST"].includes(request.method)) {
       return receiveTopicReport(request, env);
     }
+    if (pathname === "/internal/account-reports" && request.method === "DELETE") return deleteAccountReports(request, env);
     if (pathname === "/internal/topic-reports") {
       if (request.method === "POST") return receiveTopicDecision(request, env, url);
-      if (request.method === "GET" && authorized(request, env)) return reviewTopicReports(env.TOPICS_DB, url);
+      if (request.method === "GET" && authorized(request, env.TOPIC_REVIEW_TOKEN)) return reviewTopicReports(env.TOPICS_DB, url);
       if (request.method === "GET" && url.searchParams.get("pending") === "1") return reviewError(401, "A valid operator token is required");
     }
-    if (pathname === "/internal/refresh" && request.method === "POST" && authorized(request, env)) {
+    if (request.method === "POST" && (
+      (pathname === "/internal/refresh" && authorized(request, env.REFRESH_TOKEN)) ||
+      (pathname === "/internal/publish-topics" && authorized(request, env.TOPIC_REVIEW_TOKEN))
+    )) {
       const result = await refresh(env);
       return Response.json(result || { status: "refresh-in-progress" }, {
         status: result?.status === SOURCES_UNAVAILABLE ? 503 : result ? 200 : 409,
@@ -956,7 +1044,11 @@ export default {
     return new Response("Not found", { status: 404 });
   },
   async scheduled(_event, env) {
-    const result = await refresh(env);
+    const now = Date.now();
+    const [result] = await Promise.all([refresh(env), env.TOPICS_DB.batch([
+      env.TOPICS_DB.prepare("DELETE FROM topic_reports WHERE reported_at <= ?").bind(now - REPORT_RETENTION_MS),
+      env.TOPICS_DB.prepare("DELETE FROM topic_report_revocations WHERE revoked_until <= ?").bind(now),
+    ])]);
     if (result?.status === SOURCES_UNAVAILABLE) throw new Error("All public sources unavailable");
   },
 };

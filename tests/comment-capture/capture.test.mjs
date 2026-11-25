@@ -193,7 +193,7 @@ test('a delayed clear keeps a search made after the clear', { timeout: 30000 }, 
   } finally { await app.browser.close(); }
 });
 
-test('recent search queries are reusable and shared between Reader and Sidebar', { timeout: 60000 }, async () => {
+test('recent search queries are reusable in Reader and private from Sidebar host pages', { timeout: 60000 }, async () => {
   const app = await launchApp({ sharedStore: true, topHosts: [new URL(url).hostname], settings: { sources: { hn: true }, autoOpenSidebar: true, frontPageMode: 'sources', updateCheck: false } });
   const recent = (page, root) => page.locator(`${root} .app-search-group`).filter({ has: page.locator('.app-search-group-name', { hasText: /^Recent searches$/ }) });
   try {
@@ -222,21 +222,15 @@ test('recent search queries are reusable and shared between Reader and Sidebar',
     await article.locator('#browse-toggle .wordmark-root').click();
     await article.locator('#browse-home-search-toggle').click();
     const sidebarRecent = recent(article, '#browse-home-search-results');
-    assert(await waitFor(async () => (await sidebarRecent.locator('.app-search-item-title').allTextContents()).join('|') === 'settings|Fixture Story 8', 10000), 'Sidebar sees the same recent queries');
-    await sidebarRecent.locator('.app-search-item').filter({ hasText: 'Fixture Story 8' }).click();
     const sidebarInput = article.locator('#browse-home-search');
-    assert.equal(await sidebarInput.inputValue(), 'Fixture Story 8');
-    assert(await waitFor(async () => await article.locator('#browse-home-search-results .app-search-item-title', { hasText: /^Fixture story 8$/ }).count() > 0, 10000), 'a restored query runs the normal search');
+    await sidebarInput.fill('Fixture Story 8');
+    assert(await waitFor(async () => await article.locator('#browse-home-search-results .app-search-item-title', { hasText: /^Fixture story 8$/ }).count() > 0, 10000), 'Sidebar still searches public links');
+    await sidebarInput.fill('');
+    assert.equal(await sidebarRecent.count(), 0);
+    await sidebarInput.fill('sidebar fixture query');
     await sidebarInput.press('Escape');
-    await article.locator('#browse-home-search-toggle').click();
-    assert(await waitFor(async () => (await sidebarRecent.locator('.app-search-item-title').allTextContents()).join('|') === 'Fixture Story 8|settings', 10000));
-    await sidebarRecent.getByRole('button', { name: 'Clear recent searches' }).click();
-    assert.equal(await sidebarRecent.count(), 0, 'recent searches can be cleared');
-    assert(await sidebarInput.evaluate((element) => element.getRootNode().activeElement === element), 'clearing returns keyboard focus to Search');
-    assert(await waitFor(() => !app.store.has('HNewhere:recent_searches') && [...app.store.entries()].some(([key, value]) => key.startsWith('HNewhere:recent_search_event:') && value?.clear), 5000), 'clearing removes the shared history');
-    await input.press('Escape');
     await app.page.locator('#app-rail-search').click();
-    assert(await waitFor(async () => await readerRecent.count() === 0, 5000), 'clearing applies to Reader too');
+    assert(await waitFor(async () => (await readerRecent.locator('.app-search-item-title').allTextContents()).join('|') === 'settings|Fixture Story 8', 10000), 'Sidebar searches do not enter Reader history');
     await input.fill('persist after reload');
     await input.press('Escape');
     await app.page.reload();
@@ -315,11 +309,16 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps existing comm
     if (!sidebar) await app.page.locator('#app-list-body .browse-title-link', { hasText: STORIES[0].title }).first().click();
     const root = app.page.locator('#comments-content .comment[data-comment-id="reddit:root0"]');
     const retained = app.page.locator('#comments-content .comment[data-comment-id="reddit:root1"]');
-    assert(await waitFor(async () => await root.count() === 1 && await retained.count() === 1 && await root.locator('.reply-link').count() >= 1, 15000));
+    assert(await waitFor(async () => await root.count() === 1 && await retained.count() === 1, 15000));
     await root.evaluate((element) => { window.__syncOriginal = element; });
-    await root.locator('.reply-link').first().click();
     const draft = root.locator('.reply-composer textarea').first();
-    await draft.fill('A reply drafted before syncing');
+    if (sidebar) {
+      await root.getByRole('link', { name: 'reply at source' }).first().waitFor();
+      assert.equal(await draft.count(), 0);
+    } else {
+      await root.locator('.reply-link').first().click();
+      await draft.fill('A reply drafted before syncing');
+    }
     const updated = structuredClone(fixture.trees.get('fixture0'));
     updated[0].data.body = 'This existing comment was edited';
     updated[0].data.author = 'updated_author';
@@ -336,12 +335,13 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps existing comm
     assert(await waitFor(() => app.requests.filter(({ url }) => response.match(url)).length > before, 12000), 'refresh has requested the updated thread');
     assert.equal(await root.count(), 1, 'existing comments remain visible while syncing');
     assert.equal(await app.page.locator('#comments-content .discussion-loading').count(), 0, 'sync does not replace existing comments with a skeleton');
-    assert.equal(await draft.inputValue(), 'A reply drafted before syncing');
+    if (!sidebar) assert.equal(await draft.inputValue(), 'A reply drafted before syncing');
     assert(await waitFor(async () => await button.getAttribute('aria-busy') !== 'true', 20000));
     assert(await waitFor(async () => (await root.textContent()).includes('This existing comment was edited'), 15000), 'edits are reflected');
     assert(await root.evaluate((element) => element === window.__syncOriginal), 'the existing comment remains the same DOM node');
     assert.match(await root.locator('.comment-author').first().textContent(), /updated_author/, 'changed comment metadata is reflected');
-    assert.equal(await draft.inputValue(), 'A reply drafted before syncing', 'the open reply and its draft are preserved');
+    if (sidebar) assert.equal(await draft.count(), 0);
+    else assert.equal(await draft.inputValue(), 'A reply drafted before syncing', 'the open reply and its draft are preserved');
     assert.equal(await retained.count(), 1, 'a comment omitted by the refreshed response is not discarded');
     assert.equal(await root.locator('.comment[data-comment-id="reddit:newreply"]').count(), 1, 'a new nested reply is added');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:newroot"]').count(), 1, 'a new root comment is added');
@@ -535,7 +535,7 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps the current r
   }
 });
 
-for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps a draft when no comments have loaded`, { timeout: 30000 }, async () => {
+for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps its writing control when no comments have loaded`, { timeout: 30000 }, async () => {
   const sidebar = mode === 'Sidebar';
   const fixture = discussionFixture(url, { rootCount: 0, replyRoots: 0 });
   const post = { ...fixture.posts[0], num_comments: 1 };
@@ -552,13 +552,24 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps a draft when 
     if (!sidebar) await app.page.locator('#app-list-body .browse-title-link', { hasText: story.title }).first().click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .top-level-comments').count() === 1 && await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     const composer = app.page.locator('#panel .compose-box');
-    await composer.locator('.composer-text').fill('Draft in an empty discussion');
-    await composer.evaluate((element) => { window.__emptyDiscussionComposer = element; });
+    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
+    if (sidebar) {
+      await write.fill('Draft in an empty discussion');
+      assert.equal(await composer.count(), 0);
+    } else {
+      await composer.locator('.composer-text').fill('Draft in an empty discussion');
+      await composer.evaluate((element) => { window.__emptyDiscussionComposer = element; });
+    }
     const button = app.page.locator(sidebar ? '#browse-home-sync' : '#app-list-sync');
     await button.click();
     assert(await waitFor(async () => await button.getAttribute('aria-busy') !== 'true', 15000));
-    assert(await composer.evaluate((element) => element === window.__emptyDiscussionComposer), 'the composer is not rebuilt');
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'Draft in an empty discussion');
+    if (sidebar) {
+      assert.equal(await composer.count(), 0);
+      assert.equal(await write.inputValue(), 'Draft in an empty discussion');
+    } else {
+      assert(await composer.evaluate((element) => element === window.__emptyDiscussionComposer), 'the composer is not rebuilt');
+      assert.equal(await composer.locator('.composer-text').inputValue(), 'Draft in an empty discussion');
+    }
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();

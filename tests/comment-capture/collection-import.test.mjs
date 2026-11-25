@@ -284,19 +284,22 @@ test("opening an imported bookmark discovers its Hacker News discussion by URL",
 	}
 });
 
-test("Reader checks imported and previously unwatched Collection pages for discussions", async () => {
+test("Collection checks only eligible URLs and sends neither fragments nor saved dates", async () => {
 	const legacy = { key: "framed.example.com/post/99", url: "https://framed.example.com/post/99", title: "Previously unwatched", unwatched: true };
 	const imported = { key: "framed.example.com/post/100", url: "https://framed.example.com/post/100", title: "Imported link", previewOnOpen: true };
-	const pages = [legacy, imported];
+	const privateQuery = { key: "framed.example.com/post/101?invite=fixture", url: "https://framed.example.com/post/101?invite=fixture", title: "Private query" };
+	const publicURL = "https://framed.example.com/post/102";
+	const publicPage = { key: "framed.example.com/post/102", url: publicURL + "?utm_source=fixture#section", title: "Manually saved link" };
+	const pages = [legacy, imported, privateQuery, publicPage];
 	const app = await launchApp({
 		sharedStore: true,
 		settings: { updateCheck: false, sourceRefreshMinutes: 5, sources: { hn: true } },
 		values: {
-			[collectedKey]: pages.map((entry) => ({ ...entry, addedAt: 1700000000000, marks: { hn: 0 } })),
+			[collectedKey]: pages.map((entry) => ({ ...entry, addedAt: 1700000000000, marks: { hn: "total:0" } })),
 			[migratedKey]: true,
 			"HNewhere:collection_filed": true,
 		},
-		extraStories: pages.map(({ url, title }) => ({ url, title, comments: 1 })),
+		extraStories: [{ url: publicURL, title: publicPage.title, comments: 1 }],
 		responses: [{
 			match: (url) => url.startsWith("https://hn.algolia.com/api/v1/search?") && new URL(url).searchParams.get("hitsPerPage") === "0",
 			json: { nbHits: 1 },
@@ -307,12 +310,15 @@ test("Reader checks imported and previously unwatched Collection pages for discu
 		page.setDefaultTimeout(6000);
 		await page.goto(readerURL);
 		await page.locator('#app-rail [data-app-view="collection"]').click();
-		for (const { url, title } of pages) {
-			const row = page.locator(".reader-collection-row").filter({ has: page.getByRole("link", { name: title, exact: true }) });
-			await row.getByText(/new comment|New discussion/).waitFor();
-			assert(app.requests.some((request) => new URL(request.url).searchParams.get("query") === url));
-			assert(!app.requests.some((request) => request.url === url), "checking discussions does not load the bookmarked page");
-		}
+		const row = page.locator(".reader-collection-row").filter({ has: page.getByRole("link", { name: publicPage.title, exact: true }) });
+		await row.getByText(/new comment|New discussion/).waitFor();
+		const queries = app.requests.map(({ url }) => new URL(url)).filter((request) => request.hostname === "hn.algolia.com");
+		assert(queries.some(({ searchParams }) => searchParams.get("query") === publicURL));
+		assert(queries.every(({ searchParams }) => !searchParams.has("numericFilters")));
+		assert(queries.every(({ searchParams }) => {
+			const query = searchParams.get("query") || "";
+			return !/post\/(?:99|100|101)|utm_source|#section/.test(query);
+		}));
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -439,10 +445,10 @@ test("Collection settings download portable bookmarks and the existing notes exp
 	}
 });
 
-test("Notes export remains available in Collection settings from the Sidebar", async () => {
+test("Sidebar Collection settings link to the Reader's export controls", async () => {
 	const url = STORIES[0].url;
 	const app = await launchApp({
-		appHost: new URL(url).hostname,
+		topHosts: [new URL(url).hostname],
 		sharedStore: true,
 		settings: { autoOpenSidebar: true, updateCheck: false },
 	});
@@ -453,7 +459,13 @@ test("Notes export remains available in Collection settings from the Sidebar", a
 		await page.getByRole("button", { name: "Open Backchannel settings" }).click();
 		const settings = page.getByRole("dialog", { name: "Settings" });
 		await settings.getByRole("button", { name: "Collection", exact: true }).click();
-		assert(await settings.getByRole("region", { name: "Export", exact: true }).getByRole("button", { name: "Download JSON" }).isVisible());
+		assert.equal(await settings.getByRole("button", { name: "Download JSON" }).count(), 0);
+		const [reader] = await Promise.all([
+			app.context.waitForEvent("page"),
+			settings.getByRole("link", { name: "Open Collection settings in Reader" }).click(),
+		]);
+		await reader.getByRole("region", { name: "Export", exact: true }).getByRole("button", { name: "Download JSON" }).waitFor();
+		assert.equal(new URL(reader.url()).origin, new URL(readerURL).origin);
 	} finally {
 		await app.browser.close();
 	}

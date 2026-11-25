@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { launchApp, waitFor } from "./harness.mjs";
+import { articleFor, launchApp, waitFor } from "./harness.mjs";
 
 const now = Math.floor(Date.now() / 1000);
 const original = {
@@ -32,7 +32,7 @@ const metadataOnly = {
 	title: "Engineers unveil compact glass bridge after years of tests",
 };
 
-async function coverageApp({ lemmy = true, ...options } = {}) {
+async function coverageApp({ lemmy = true, queue = [original], ...options } = {}) {
 	const postView = {
 		post: { id: related.id, url: related.url, name: related.title, published: new Date(related.time * 1000).toISOString(), creator_id: 1 },
 		creator: { id: 1, name: "reader" },
@@ -54,7 +54,7 @@ async function coverageApp({ lemmy = true, ...options } = {}) {
 			"HNewhere:collection_filed": true,
 			"HNewhere:collected_migrated": true,
 			"HNewhere:collected": [original, sports, metadataOnly].map(({ url, title }) => ({ key: key(url), url, title, addedAt: now * 1000, unwatched: true })),
-			"HNewhere:queue": [{ ...original, key: key(original.url), addedAt: now * 1000 }],
+			"HNewhere:queue": queue.map((story, i) => ({ ...story, key: key(story.url), addedAt: now * 1000 + i })),
 			"HNewhere:app_panes": { list: true, discussion: true },
 			"HNewhere:frontpage_feed:technology/hn/front/": feed([original, metadataOnly]),
 			"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": feed([related, older, unrelated]),
@@ -118,8 +118,8 @@ test("Collection labels saved articles using cached feed topics and headline ter
 	}
 });
 
-test("Reader shows related links above the article and opens their own discussion", async () => {
-	const app = await coverageApp();
+test("Reader shows related links between an embedded article and the queue", async () => {
+	const app = await coverageApp({ queue: [original, metadataOnly] });
 	try {
 		const { page } = app;
 		await page.goto("https://backchnnl.app/");
@@ -137,9 +137,13 @@ test("Reader shows related links above the article and opens their own discussio
 		await article.waitFor();
 		assert.equal(await article.getAttribute("href"), related.url);
 		assert.deepEqual(await coverage.locator("li").count(), 1, "older and unrelated links are omitted");
-		const header = await coverage.boundingBox();
-		const content = await page.locator("#app-article-body").boundingBox();
-		assert(header.y + header.height <= content.y + 1, "coverage sits above the article frame");
+		const body = page.locator('#app-article-body[data-mode="frame-agent"]');
+		const next = page.locator("#next-up").getByRole("link", { name: metadataOnly.title, exact: true });
+		await next.waitFor();
+		await body.waitFor();
+		const [footer, content, queued] = await Promise.all([coverage.boundingBox(), body.boundingBox(), next.boundingBox()]);
+		assert(content.y + content.height <= footer.y + 1, "coverage follows the full embedded article");
+		assert(footer.y + footer.height <= queued.y + 1, "coverage precedes the next queued link");
 		await article.focus();
 		await page.keyboard.press("Enter");
 		assert.equal(await page.locator("#app-article-open").getAttribute("href"), related.url);
@@ -170,6 +174,31 @@ test("Reader omits related coverage from a disabled topic source when opening a 
 		await story.locator(".browse-title-link").click();
 		await page.locator('#app-article-body[data-mode^="frame"]').waitFor();
 		assert.equal(await page.locator("#app-article").getByRole("navigation", { name: "Related coverage" }).count(), 0);
+		assert.deepEqual(app.errors, []);
+	} finally {
+		await app.browser.close();
+	}
+});
+
+test("Reader puts related links after extracted article text with an empty queue", async () => {
+	const article = articleFor(original.url);
+	const app = await coverageApp({
+		queue: [],
+		pages: { [original.url]: { ...article, headers: { "x-frame-options": "DENY" } } },
+	});
+	try {
+		const { page } = app;
+		await page.goto("https://backchnnl.app/");
+		await rowFor(page, original.title).locator(".browse-title-link").click();
+		const scroller = page.locator('#app-article-body[data-mode="reader"] .app-reader-scroll');
+		const coverage = scroller.getByRole("navigation", { name: "Related coverage" });
+		await coverage.waitFor({ timeout: 12000 });
+		assert(await coverage.evaluate(node => node.previousElementSibling?.matches('slot[name="reader"]')));
+		assert.equal(await page.locator("#next-up").isVisible(), false);
+		const text = page.locator(".bc-reader");
+		const [body, footer] = await Promise.all([text.boundingBox(), coverage.boundingBox()]);
+		assert(body.y + body.height <= footer.y + 1, "coverage starts after the extracted article");
+		await coverage.getByRole("link", { name: related.title, exact: true }).scrollIntoViewIfNeeded();
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();

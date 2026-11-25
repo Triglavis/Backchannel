@@ -969,6 +969,62 @@ test('new account creation requires email delivery while existing users can sign
   } finally { await app.browser.close(); }
 });
 
+test('a browser without Ed25519 keeps legacy passkey sign-in available', {timeout:12000}, async () => {
+  const app = await launchApp({sharedStore:true, settings:{updateCheck:false,sourceRefreshMinutes:0}});
+  const encoder = new TextEncoder();
+  const credentialId = 'fixture-passkey';
+  const seed = new Uint8Array(32).fill(7);
+  const iv = new Uint8Array(12).fill(9);
+  const cipher = await crypto.subtle.importKey('raw', seed, 'AES-GCM', false, ['encrypt']);
+  const additionalData = encoder.encode(JSON.stringify(['backchannel-key-envelope',1,account,credentialId]));
+  const sealed = await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData}, cipher, Buffer.from(key,'base64url'));
+  const envelope = Buffer.concat([Buffer.from(iv),Buffer.from(sealed)]).toString('base64url');
+  const verifications = [];
+  const completions = [];
+  let modern = true;
+  try {
+    await app.context.route('https://backchnnl.app/account/**', async route => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (path === '/account/status') return route.fulfill({json:{available:true}});
+      if (path === '/account/login/options') return route.fulfill({json:{ceremony:'fixture',options:{challenge:key,rpId:'backchnnl.app'}}});
+      if (path === '/account/login/verify') {
+        const body = request.postDataJSON();
+        verifications.push(body);
+        return route.fulfill({json:{account,envelope,unlock:key,keyProofVersion:modern ? 2 : body.keyProofVersion === 2 ? 1 : undefined}});
+      }
+      if (path === '/account/login/complete') {
+        completions.push(request.postDataJSON());
+        return route.fulfill({json:{account,token:session.token,expiresAt:session.expiresAt}});
+      }
+      return route.fulfill({status:404,json:{error:'not-found'}});
+    });
+    const panel = await settings(app);
+    await app.page.evaluate(({credentialId, seed}) => {
+      const importKey = crypto.subtle.importKey.bind(crypto.subtle);
+      Object.defineProperty(crypto.subtle, 'importKey', { value(format, data, algorithm, ...options) {
+        if (algorithm === 'Ed25519') throw new DOMException('Unavailable in fixture', 'NotSupportedError');
+        return importKey(format, data, algorithm, ...options);
+      }});
+      Object.defineProperty(navigator.credentials, 'get', { value: async () => ({
+        toJSON: () => ({id:credentialId,clientExtensionResults:{}}),
+        getClientExtensionResults: () => ({prf:{results:{first:new Uint8Array(seed)}}}),
+      }) });
+    }, {credentialId,seed:[...seed]});
+    const signIn = panel.getByRole('button',{name:'Sign in with passkey',exact:true});
+    await signIn.click();
+    await panel.getByRole('status').filter({hasText:'Update your browser to use this Backchannel account.'}).waitFor();
+    assert.equal(completions.length,0);
+    modern = false;
+    await signIn.click();
+    assert(await waitFor(() => app.store.get(storage)?.token === session.token));
+    assert.equal(verifications.length,2);
+    assert(verifications.every(body => body.keyProofVersion === undefined));
+    assert.match(completions[0].syncKeyVerifier,/^[A-Za-z0-9_-]{43}$/);
+    assert.equal(completions[0].syncKeySignature,undefined);
+  } finally { await app.browser.close(); }
+});
+
 test('a stalled deletion passkey times out and can be retried or cancelled', {timeout:15000}, async () => {
   const app = await launchApp({
     sharedStore:true, values:{[storage]:{...session,base:{}}}, settings:{updateCheck:false,sourceRefreshMinutes:0},
