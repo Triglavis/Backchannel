@@ -23,16 +23,17 @@ use to detect updates, so every release bumps it.
 - Safari starts the Reddit helper sooner by overlapping shared-storage checks.
 - Lobsters Front Pages reuse saved results when the source confirms the feed is
   unchanged.
-- By topic cards show publisher counts. A collapsed Other links section keeps
-  stories without a group available in the same view.
 - Topic Articles keep cited reporting visible during a refresh and can show
   newly reported developments under What changed.
 - Topic matching better recognizes the same post-IPO sell-off across sources.
+- By topic prefers images from the linked articles and ranks Front Pages topics
+  using recency, discussion activity, and distinct source articles.
 
 ### Fixed
 
 - Front Pages share refresh timing for the same feed across Headlines and topic
   views, including after returning to a tab.
+- In Unread, opening another Topic Article clears the previous topic card.
 
 ## [1.6.19.2] — 2026-11-24
 

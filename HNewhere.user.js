@@ -18613,10 +18613,8 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			(index) => readerCollectionSubjectGroups(documents, tagsByPage, index), coverage, documents);
 		await applyAppTopicVisits(projection, isCurrent);
 		if (!isCurrent()) return;
-		const visible = projection.rows.slice(0, collectionLimit);
-		const backfill = () => backfillCardLooks(visible).catch(console.error);
-		const previousOtherLinks = resetAppTopicList(list);
-		const linksList = paintAppTopicProjection(list, projection, isCurrent, previousOtherLinks, backfill);
+		list.replaceChildren();
+		paintAppTopicProjection(list, projection, isCurrent);
 		if (!matched.length) {
 			list.append(readerCollectionEmpty(Boolean(documents.length)));
 			return;
@@ -18624,14 +18622,15 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		const grouped = collectionFilter === "all" && collectionSort === "activity" &&
 			projection.rows[0]?.fresh && !projection.rows.at(-1).fresh;
+		const visible = projection.rows.slice(0, collectionLimit);
 		for (const [index, doc] of visible.entries()) {
 			if (grouped && (index === 0 || (!doc.fresh && visible[index - 1].fresh))) {
 				const heading = document.createElement("h2");
 				heading.className = "reader-collection-section";
 				heading.textContent = doc.fresh ? "New discussion activity" : "Saved pages";
-				linksList.append(heading);
+				list.append(heading);
 			}
-			linksList.append(readerCollectionRow(doc, tagsByPage.get(doc.key)));
+			list.append(readerCollectionRow(doc, tagsByPage.get(doc.key)));
 		}
 		if (visible.length < projection.rows.length) {
 			const nav = document.createElement("div");
@@ -18646,9 +18645,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 				list.querySelectorAll(".reader-collection-row")[visible.length]?.querySelector("a, button")?.focus();
 			};
 			nav.append(more);
-			linksList.append(nav);
+			list.append(nav);
 		}
-		if (linksList === list) backfill();
+		backfillCardLooks(visible).catch(console.error);
 	}
 
 	async function refreshQueueCount(root) {
@@ -19065,8 +19064,8 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		};
 		let rank = 0;
 
-		const previousOtherLinks = resetAppTopicList(list);
-		const linksList = projection ? paintAppTopicProjection(list, projection, isCurrent, previousOtherLinks) : list;
+		list.replaceChildren();
+		if (projection) paintAppTopicProjection(list, projection, isCurrent);
 
 		if (!entries.length) {
 			const empty = document.createElement("div");
@@ -19078,7 +19077,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		}
 
 		for (const entry of projection?.rows ?? entries) {
-			const row = renderBrowseRow(entry, linksList, (rank += 1), {
+			const row = renderBrowseRow(entry, list, (rank += 1), {
 				inQueue: true,
 				reload,
 				readerRow: Boolean(ui.browseHome),
@@ -40107,17 +40106,6 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-row[aria-current] { background:var(--open-row); }
 .app-topic-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .app-topic-row:not(.is-unread) .app-topic-name { color:var(--muted); }
-.app-topic-other-links > summary {
-	padding:12px;
-	border-bottom:1px solid var(--border-soft);
-	color:var(--text);
-	font-weight:600;
-	list-style-position:inside;
-	cursor:pointer;
-}
-.app-topic-other-links > summary:hover { background:var(--hover-tint); }
-.app-topic-other-links > summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-.app-topic-other-count { margin-inline-start:4px; color:var(--muted); font-weight:400; }
 .app-topic-media {
 	display:block;
 	flex:none;
@@ -40170,11 +40158,10 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-picture[src*="screenshot" i] { object-position:center bottom; }
 .app-topic-name { display:block; font-weight:600; overflow-wrap:anywhere; }
 .app-topic-meta { display:block; }
-.app-topic-publisher-count { display:block; color:var(--muted); font-size:11px; }
 .app-topic-chevron { margin-left:auto; color:var(--muted); }
 
 @media (pointer:coarse) {
-	.app-topic-row, .app-topic-other-links > summary { padding-inline:16px; }
+	.app-topic-row { padding-inline:16px; }
 }
 
 .app-selection-bar {
@@ -40348,7 +40335,7 @@ ${SETTINGS_MODAL_CSS}
 }
 
 #app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-site, .browse-sources-total, .reader-collection-new, .browse-rank),
-.app-topic-row[aria-current] :is(.app-topic-meta, .app-topic-publisher-count) {
+.app-topic-row[aria-current] .app-topic-meta {
 	color:color-mix(in srgb, var(--text) 82%, var(--meta));
 }
 
@@ -45277,6 +45264,7 @@ ${readingListShareHTML()}
 			listTopic: null,
 			topicArticle: null,
 			topicArticleIntent: null,
+			unreadTopic: null,
 			visitedTopics: new Set(),
 			listTopicPhotos: null,
 			topicExtra: null,
@@ -47347,6 +47335,7 @@ ${readingListShareHTML()}
 		const collectionChanged = state.view === "collection" || view === "collection";
 		clearAppTopicExtra();
 		closeAppTopicArticle();
+		if (view !== state.view) state.unreadTopic = null;
 		state.view = view;
 		state.listTopic = null;
 		state.topicArticleIntent = topicId;
@@ -48990,6 +48979,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		["Proof assistant", /\b(?:lean proof|formal proofs?|theorem provers?)\b/i],
 	];
 	const unavailableAppTopicPhotos = new Set();
+	const appTopicSourcePreviews = new Map();
+	let appTopicSourcePhotoQueue = Promise.resolve();
 	let wikiTopicPhotos;
 	let wikiTopicPhotoQueue = Promise.resolve();
 	let wikiTopicPhotoRetryAt = 0;
@@ -49883,18 +49874,48 @@ ${note ? appShortcutNoteHTML(note) : ""}
 
 	function rankFrontPageTopics(topics = []) {
 		if (topics.length < 2) return topics;
-		const recentAfter = Date.now() / 1000 - READER_COVERAGE_WINDOW;
+		const now = Date.now() / 1000;
+		const articleHalfLife = 3 * 86400;
+		const freshness = (time, halfLife = READER_COVERAGE_WINDOW) => time > 0 ? 2 ** (-(now - time) / halfLife) : 0;
+		const lift = (weight) => 1 - 2 ** -weight;
 		return topics.map((group) => {
-			const latest = Math.max(0, ...frontPageRowStories(group.rows).map(({ time }) => Number(time) || 0));
-			const publishers = appTopicPublisherCount(group.rows);
-			return { group, latest, publishers, recent: Number(latest >= recentAfter) };
-		}).sort((a, b) => b.recent - a.recent || b.publishers - a.publishers || b.latest - a.latest)
-			.map(({ group }) => group);
-	}
-
-	function appTopicPublisherCount(rows) {
-		return new Set(rows.map((row) => hostLabel(appTopicRowURL(row))
-			.replace(/^(?:(?:amp|m|mobile|www)\.)+/, "")).filter(Boolean)).size;
+			let latest = 0;
+			const reports = new Map();
+			const discussions = new Map();
+			for (const row of [...group.rows, ...(group.extraRows || [])]) {
+				const url = appTopicRowURL(row);
+				const publisher = hostLabel(url).replace(/^(?:(?:amp|m|mobile|www)\.)+/, "");
+				const article = topicArticleLinkKey(url).replace(/^[^/?]+/, "");
+				let articleTime = 0;
+				for (const story of [row.story, ...(row.also || [])]) {
+					const time = Math.min(now, Number(story.time));
+					if (!(time > 0)) continue;
+					latest = Math.max(latest, time);
+					articleTime = Math.max(articleTime, time);
+					if (!story.source || !story.id || !storyHasCommentCount(story) ||
+						(story.kind && story.kind !== "discussion") || !((story.descendants ?? story.commentCount) > 0)) continue;
+					const id = sourceKey(story.source, story.id);
+					if (time > (discussions.get(id)?.time || 0)) discussions.set(id, { publisher, time });
+				}
+				if (publisher && articleTime) {
+					if (!reports.has(publisher)) reports.set(publisher, new Map());
+					const articles = reports.get(publisher);
+					articles.set(article, Math.max(articles.get(article) || 0, articleTime));
+				}
+			}
+			const discussionTimes = new Map();
+			for (const { publisher, time } of discussions.values()) {
+				if (!discussionTimes.has(publisher)) discussionTimes.set(publisher, []);
+				discussionTimes.get(publisher).push(time);
+			}
+			const activity = [...discussionTimes.values()].flatMap((times) => times.sort((a, b) => b - a).slice(0, 2))
+				.reduce((total, time) => total + freshness(time), 0);
+			const breadth = [...reports.values()].reduce((total, articles) => {
+				const [first, second] = [...articles.values()].sort((a, b) => b - a);
+				return total + freshness(first, articleHalfLife) + 0.5 * freshness(second, articleHalfLife);
+			}, 0);
+			return { group, latest, score: 3 * freshness(latest) + 4 * lift(activity) + 2 * lift(breadth) };
+		}).sort((a, b) => b.score - a.score || b.latest - a.latest).map(({ group }) => group);
 	}
 
 	function appTopicProjection(rows, topicGroups, topicId, coverage, index = sharedTopicCache?.index, discoveries, availableRows = rows, readingId) {
@@ -49947,7 +49968,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				group.counts = appTopicDiscussionTotals(group.rows.map((row) => threads.get(row)));
 			}
 		}
-		return { rows: active?.rows ?? (topics.length ? rows.filter((row) => !grouped.has(row)) : rows), groups, topics, active, threads };
+		return { rows: active?.rows ?? (topics.length ? [] : rows), groups, topics, active, threads };
 	}
 
 	function paintAppTopicCounts(target, group) {
@@ -50201,20 +50222,33 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	function appTopicRepresentativePhoto(group) {
 		const software = appTopicSoftwareSubject(group);
 		if (software) return APP_TOPIC_PHOTOS[software] || APP_TOPIC_PHOTOS.software;
+		if (group.kind !== "topic") return null;
 		const theme = appTopicPhotoTheme(group.label);
-		if (theme) return APP_TOPIC_PHOTOS[theme];
-		const votes = new Map();
-		for (const row of group.rows) {
-			const evidence = appTopicEvidence(row);
-			const candidate = appTopicPhotoTheme(evidence);
-			if (candidate) votes.set(candidate, (votes.get(candidate) || 0) + 1);
-		}
-		const agreed = [...votes].find(([, count]) => count > group.rows.length / 2);
-		return agreed ? APP_TOPIC_PHOTOS[agreed[0]] : null;
+		return theme ? APP_TOPIC_PHOTOS[theme] : null;
+	}
+
+	function appTopicAssociatedPhoto(group, image) {
+		return image && (group.kind === "topic" || topicFilterKey(group.label) === topicFilterKey(image.subject));
+	}
+
+	function appTopicWikiPhotoTitles(group) {
+		const titles = wikiTopicTitles(group);
+		return group.kind === "topic" || appState?.view === "collection" || appState?.view === "queue" ?
+			titles : titles.filter((title) => topicFilterKey(title) === topicFilterKey(group.label));
+	}
+
+	function appTopicWikiPhotos(group, titles) {
+		const subjects = new Set(titles.map(topicFilterKey));
+		return wikiTopicCachedImages(titles).filter((image) =>
+			appTopicAssociatedPhoto(group, image) || subjects.has(topicFilterKey(image.subject)));
+	}
+
+	function appTopicPhotoKey(image) {
+		return image?.publisher ? image.url : image?.source;
 	}
 
 	function appTopicPhotoAvailable(image, used) {
-		return image && !used.has(image.source) && !unavailableAppTopicPhotos.has(image.url);
+		return image && !used.has(appTopicPhotoKey(image)) && !unavailableAppTopicPhotos.has(image.url);
 	}
 
 	function appTopicPhotos(topics) {
@@ -50232,7 +50266,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (group.imageCurated) choose(group, [group.image]);
 		}
 		for (const group of topics) {
-			if (!photos.get(group.id)) choose(group, [group.image]);
+			if (!photos.get(group.id) && appTopicAssociatedPhoto(group, group.image)) choose(group, [group.image]);
 		}
 		for (const group of topics) {
 			if (photos.get(group.id)) continue;
@@ -50240,17 +50274,58 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (named) choose(group, indexed?.get(topicFilterKey(group.label)) || []);
 		}
 		for (const group of topics) {
-			if (!photos.get(group.id)) choose(group, wikiTopicCachedImages(wikiTopicTitles(group)));
+			if (!photos.get(group.id)) choose(group, appTopicWikiPhotos(group, appTopicWikiPhotoTitles(group)));
 		}
 		const verified = new Set([...photos].filter(([, image]) => image).map(([id]) => id));
 		for (const group of topics) {
 			if (!photos.get(group.id)) choose(group, [appTopicRepresentativePhoto(group)]);
 		}
-		return { photos, used, verified };
+		return { photos, used, verified, fallbacks: new Map(photos), sourceChecks: new Map(), sourceCheckCount: 0 };
+	}
+
+	function appTopicSourceURL(value) {
+		const url = canonicalSharedTopicURL(value);
+		if (!url || !pageLookAssetURL(url.href) || url.pathname === "/" ||
+			/(?:^|\.)(?:news\.ycombinator\.com|lobste\.rs|lemmy\.world|reddit\.com|redd\.it|bsky\.app|twitter\.com|x\.com|facebook\.com|threads\.(?:com|net))$/i.test(url.hostname) ||
+			[...url.searchParams.keys()].some((key) => /^(?:key|code)$|token|secret|password|signature|session|(?:api|access)[_-]?key|unlocked[_-]?article/i.test(key))) return "";
+		return url.href;
+	}
+
+	function appTopicSourcePhoto(url, look) {
+		const image = appTopicPhotoURL(look?.image);
+		if (!image || !pageLookAssetURL(image) || image === appTopicPhotoURL(look.icon) ||
+			/(?:^|[\/_-])(?:logos?|brandmark|wordmark|default[-_]share|default[-_]social)(?:[./_-]|$)/i.test(new URL(image).pathname)) return null;
+		return { url: image, source: url, publisher: hostLabel(url) };
+	}
+
+	async function fetchAppTopicSourcePhoto(url) {
+		const response = await requestPage(url, undefined, 3500);
+		const final = appTopicSourceURL(response.finalUrl);
+		if (!response.ok || response.status >= 300 || !response.text || !final ||
+			(response.contentType && !/^(?:text\/html|application\/xhtml\+xml)\b/i.test(response.contentType)) ||
+			sharedTopicURLKey(final).replace(/^www\./, "") !== sharedTopicURLKey(url).replace(/^www\./, "")) return null;
+		const page = document.createElement("template");
+		page.innerHTML = pageHead(response.text).slice(0, PAGE_HEAD_LIMIT);
+		const content = page.content;
+		const directives = [parseResponseHeaders(response.headers).get("x-robots-tag"),
+			...Array.from(content.querySelectorAll('meta[name="robots" i], meta[name="googlebot" i]'), (meta) => meta.content)];
+		if (directives.some((value) => /\b(?:noimageindex|max-image-preview:\s*none)\b/i.test(value))) return null;
+		const resolve = (value) => {
+			try { return value ? new URL(value, final).href : ""; } catch { return ""; }
+		};
+		const icon = resolve(content.querySelector('link[rel~="icon" i]')?.getAttribute("href"));
+		const selectors = ['meta[property="og:image:secure_url" i]', 'meta[property="og:image" i]',
+			'meta[name="twitter:image" i]', 'meta[property="twitter:image" i]'];
+		for (const selector of selectors) {
+			const image = resolve(content.querySelector(selector)?.content?.trim());
+			const preview = appTopicSourcePhoto(url, { image, icon });
+			if (preview) return preview;
+		}
+		return null;
 	}
 
 	function appTopicPhotoCredit(image) {
-		return image.subject + " · " + image.credit;
+		return image.publisher || image.subject + " · " + image.credit;
 	}
 
 	function appTopicIcon(label) {
@@ -50276,7 +50351,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return icon;
 	}
 
-	function appTopicPicture(group, photos, used) {
+	function appTopicPicture(group, selection) {
+		const { photos, used, fallbacks, verified } = selection;
 		const media = document.createElement("span");
 		media.className = "app-topic-media";
 		media.setAttribute("aria-hidden", "true");
@@ -50303,50 +50379,108 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (!media.isConnected) return;
 			media.title = group.label;
 			unavailableAppTopicPhotos.add(image.url);
-			used.delete(image.source);
-			const backup = appTopicRepresentativePhoto(group);
-			if (!appTopicPhotoAvailable(backup, used)) {
+			used.delete(appTopicPhotoKey(image));
+			if (fallbacks.get(group.id) === image) verified.delete(group.id);
+			const backup = [fallbacks.get(group.id), appTopicRepresentativePhoto(group)]
+				.find((candidate) => appTopicPhotoAvailable(candidate, used));
+			if (!backup) {
 				photos.set(group.id, null);
 				picture.remove();
-				hydrateAppTopicPhotos([{ group, media }], photos, used);
+				hydrateAppTopicPhotos([{ group, media }], selection).catch(console.error);
 				return;
 			}
 			image = backup;
-			used.add(image.source);
+			used.add(appTopicPhotoKey(image));
 			photos.set(group.id, image);
 			show();
-			hydrateAppTopicPhotos([{ group, media }], photos, used);
+			hydrateAppTopicPhotos([{ group, media }], selection).catch(console.error);
 		};
 		show();
 		media.append(picture);
 		return media;
 	}
 
-	function hydrateAppTopicPhotos(cards, photos, used) {
-		const jobs = cards.map(({ group, media }) => ({ group, media, titles: wikiTopicTitles(group) }));
+	function appTopicPhotoMedia({ group, media }, selection) {
+		const state = appState;
+		if (state?.listTopicPhotos !== selection || state.view !== selection.view) return null;
+		const heading = state.listTopic === group.id && state.ui.shadow.querySelector("#app-list-topic > .app-topic-media");
+		const current = heading || media;
+		return current.isConnected ? current : null;
+	}
+
+	function showAppTopicPhoto(job, image, selection) {
+		const media = appTopicPhotoMedia(job, selection);
+		if (!media || !appTopicPhotoAvailable(image, selection.used)) return false;
+		const { photos, used } = selection;
+		const id = job.group.id;
+		used.delete(appTopicPhotoKey(photos.get(id)));
+		used.add(appTopicPhotoKey(image));
+		photos.set(id, image);
+		job.media = appTopicPicture(job.group, selection);
+		media.replaceWith(job.media);
+		return true;
+	}
+
+	function hydrateAppTopicWikiPhotos(jobs, selection) {
 		const ranked = [...jobs].sort((a, b) => b.group.rows.length - a.group.rows.length);
 		const titles = ranked.flatMap(({ titles }) => titles);
 		if (!titles.length) return;
 		const searchTitles = new Set(ranked.map(({ titles }) => titles.find((title) => wikiTopicTerms(title).size >= 2))
 			.filter(Boolean).map(topicFilterKey));
 		loadWikiTopicPhotos(titles, searchTitles, () => {
-			const state = appState;
-			if (state?.listTopicPhotos?.photos !== photos) return;
+			const { photos, used, fallbacks, verified } = selection;
 			for (const job of jobs) {
 				const { group, titles } = job;
-				const active = state.listTopic === group.id;
-				const heading = active && state.ui.shadow.querySelector("#app-list-topic > .app-topic-media");
-				const media = heading || job.media;
-				if (!media.isConnected) continue;
-				const current = photos.get(group.id);
-				const image = wikiTopicCachedImages(titles).find((candidate) => candidate.source === current?.source ||
-					appTopicPhotoAvailable(candidate, used));
-				if (!image || image.source === current?.source) continue;
-				used.delete(current?.source);
-				used.add(image.source);
-				photos.set(group.id, image);
-				job.media = appTopicPicture(group, photos, used);
-				media.replaceWith(job.media);
+				if (photos.get(group.id)?.publisher) continue;
+				const image = appTopicWikiPhotos(group, titles).find((candidate) => appTopicPhotoAvailable(candidate, used));
+				if (!verified.has(group.id) && showAppTopicPhoto(job, image, selection)) {
+					fallbacks.set(group.id, image);
+					verified.add(group.id);
+				}
+			}
+		}).catch(console.error);
+	}
+
+	async function hydrateAppTopicPhotos(cards, selection) {
+		if (!cards.length) return;
+		const [looks, collected] = await Promise.all([loadLooks(), loadCollected()]);
+		const deferred = new Set(collected.filter(collectedPreviewOnOpen)
+			.flatMap(({ key, url }) => [key, topicArticleLinkKey(url)]));
+		const jobs = cards.filter((job) => appTopicPhotoMedia(job, selection));
+		for (const job of jobs) {
+			const { group } = job;
+			job.sources = new Set();
+			if (selection.photos.get(group.id)?.publisher) continue;
+			for (const row of group.rows) {
+				const address = appTopicRowURL(row);
+				const url = appTopicSourceURL(address);
+				if (!url || deferred.has(topicArticleLinkKey(url)) || collectedPreviewOnOpen(row.collected)) continue;
+				const look = row.look || lookFor(looks, normalizeURL(address));
+				const preview = appTopicSourcePhoto(url, look) || appTopicSourcePreviews.get(url);
+				if (showAppTopicPhoto(job, preview, selection)) break;
+				if (!preview) job.sources.add(url);
+			}
+		}
+		hydrateAppTopicWikiPhotos(jobs.filter(({ group }) => !selection.photos.get(group.id)?.publisher &&
+			(!selection.verified.has(group.id) || !selection.photos.get(group.id)))
+			.map((job) => Object.assign(job, { titles: appTopicWikiPhotoTitles(job.group) })), selection);
+		if (!appViewIsFrontPage(selection.view)) return;
+		appTopicSourcePhotoQueue = appTopicSourcePhotoQueue.then(async () => {
+			for (const job of jobs) {
+				const id = job.group.id;
+				for (const url of job.sources) {
+					if (!appTopicPhotoMedia(job, selection) || selection.photos.get(id)?.publisher) break;
+					if (!appTopicSourcePreviews.has(url)) {
+						const checks = selection.sourceChecks.get(id) || 0;
+						if (checks >= 2 || selection.sourceCheckCount >= 6) break;
+						selection.sourceChecks.set(id, checks + 1);
+						selection.sourceCheckCount += 1;
+						const preview = await fetchAppTopicSourcePhoto(url);
+						appTopicSourcePreviews.set(url, preview);
+						if (appTopicSourcePreviews.size > 256) appTopicSourcePreviews.delete(appTopicSourcePreviews.keys().next().value);
+					}
+					if (showAppTopicPhoto(job, appTopicSourcePreviews.get(url), selection)) break;
+				}
 			}
 		}).catch(console.error);
 	}
@@ -51031,6 +51165,16 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		return ids;
 	}
 
+	function appUnreadTopics(topics, state) {
+		const retained = state.topicArticle?.group || state.unreadTopic;
+		const redirects = sharedTopicCache?.index?.redirects;
+		const retainedIds = new Set(retained && appTopicVisitIds(retained).map((id) => redirects?.get(id) || id));
+		return topics.filter((group) => {
+			const ids = appTopicVisitIds(group);
+			return ids.some((id) => retainedIds.has(id)) || !group.visited && !ids.some((id) => state.visitedTopics.has(id));
+		});
+	}
+
 	async function applyAppTopicVisits({ topics, active }, isCurrent) {
 		if (!isCurrent() || (!active && !topics?.length)) return;
 		const visits = (await load(APP_TOPIC_VISITS_KEY, {})) || {};
@@ -51063,44 +51207,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}).catch(console.error);
 	}
 
-	function resetAppTopicList(list) {
-		const details = list.querySelector(":scope > .app-topic-other-links");
-		const previous = details && details.dataset.view === appState?.view ? {
-			open: details.open,
-			focused: details.firstElementChild === list.getRootNode().activeElement,
-		} : null;
-		list.replaceChildren();
-		return previous;
-	}
-
-	function paintAppTopicOtherLinks(list, count, previous, onOpen) {
-		const details = appTopicArticleNode("details", "app-topic-other-links");
-		details.dataset.view = appState.view;
-		details.open = Boolean(previous?.open);
-		const summary = appTopicArticleNode("summary");
-		summary.append("Other links ",
-			appTopicArticleNode("span", "app-topic-other-count", count.toLocaleString()));
-		details.append(summary);
-		const links = document.createElement("div");
-		if (details.open) details.append(links);
-		details.ontoggle = () => {
-			if (!details.isConnected) return;
-			if (details.open) {
-				if (!links.isConnected) details.append(links);
-				refreshSaveControls().catch(console.error);
-				onOpen?.();
-			} else links.remove();
-			decorateAppRows(list);
-		};
-		list.append(details);
-		if (previous?.focused) summary.focus({ preventScroll: true });
-		return links;
-	}
-
-	function paintAppTopicProjection(list, { rows = [], topics = [], groups = [], active, threads, tabCheck }, isCurrent, previousOtherLinks, onOtherLinksOpen) {
+	function paintAppTopicProjection(list, { topics = [], groups = [], active, threads, tabCheck, hasTopics = topics.length > 0 }, isCurrent) {
 		const state = appState;
 		const shadow = state.ui.shadow;
-		paintAppTopicTabs(Boolean(topics.length || active));
+		paintAppTopicTabs(Boolean(hasTopics || active));
 		tabCheck?.then((available) => { if (isCurrent()) paintAppTopicTabs(available); });
 		state.activeListTopic = active;
 		state.topicExtraRows = null;
@@ -51134,14 +51244,16 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			paintAppTopicCounts(shadow.getElementById("app-list-topic-count"), active);
 			const existing = state.listTopicPhotos;
 			const index = sharedTopicCache?.index;
-			const selection = existing?.view === state.view && existing.index === index && existing.photos.has(active.id) ?
-				existing : { view: state.view, index, ...appTopicPhotos(topics) };
+			const previousPhoto = existing?.photos.get(active.id);
+			const stillCovered = !previousPhoto?.publisher || active.rows.some((row) => appTopicSourceURL(appTopicRowURL(row)) === previousPhoto.source);
+			const selection = existing?.view === state.view && existing.index === index && existing.photos.has(active.id) && stillCovered ?
+				existing : { view: state.view, index, ...appTopicPhotos([active]) };
 			state.listTopicPhotos = selection;
-			const media = appTopicPicture(active, selection.photos, selection.used);
+			const media = appTopicPicture(active, selection);
 			bar.querySelector(":scope > .app-topic-media")?.remove();
 			title.parentElement.before(media);
-			if (!selection.verified.has(active.id)) hydrateAppTopicPhotos([{ group: active, media }], selection.photos, selection.used);
-			return list;
+			hydrateAppTopicPhotos([{ group: active, media }], selection).catch(console.error);
+			return;
 		}
 		delete bar.dataset.topicId;
 		delete bar.dataset.topicLabel;
@@ -51150,9 +51262,9 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			state.listTopic = null;
 			endAppSelection();
 		}
-		if (!state.topicsMode) return list;
-		const { photos, used, verified } = appTopicPhotos(topics);
-		state.listTopicPhotos = { view: state.view, index: sharedTopicCache?.index, photos, used, verified };
+		if (!state.topicsMode) return;
+		const selection = { view: state.view, index: sharedTopicCache?.index, ...appTopicPhotos(topics) };
+		state.listTopicPhotos = selection;
 		const pendingPhotos = [];
 		for (const group of topics) {
 			const button = document.createElement("button");
@@ -51169,8 +51281,6 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const name = document.createElement("span");
 			name.className = "app-topic-name";
 			name.textContent = topicDisplayName(group.label);
-			const publishers = appTopicPublisherCount(group.rows);
-			const publisherCount = appTopicArticleNode("span", "app-topic-publisher-count", pluralize(publishers, "publisher"));
 			const meta = document.createElement("span");
 			meta.className = "app-topic-meta";
 			paintAppTopicCounts(meta, group);
@@ -51178,10 +51288,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			chevron.className = "app-topic-chevron";
 			chevron.setAttribute("aria-hidden", "true");
 			chevron.textContent = "›";
-			labels.append(name, publisherCount, meta);
-			const media = appTopicPicture(group, photos, used);
+			labels.append(name, meta);
+			const media = appTopicPicture(group, selection);
 			button.append(media, labels, chevron);
-			if (!verified.has(group.id)) pendingPhotos.push({ group, media });
+			pendingPhotos.push({ group, media });
 			button.onclick = () => openAppTopicArticle(group);
 			button.oncontextmenu = (event) => {
 				if (event.defaultPrevented) return;
@@ -51197,8 +51307,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			};
 			list.append(button);
 		}
-		hydrateAppTopicPhotos(pendingPhotos, photos, used);
-		return topics.length && rows.length ? paintAppTopicOtherLinks(list, rows.length, previousOtherLinks, onOtherLinksOpen) : list;
+		hydrateAppTopicPhotos(pendingPhotos, selection).catch(console.error);
 	}
 
 	function topicArticleLinkKey(value) {
@@ -51549,12 +51658,18 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			shadow.getElementById("app").classList.remove("has-story", "discussion-entering");
 			shadow.getElementById("app-toggle-discussion").disabled = true;
 			state.topicArticle = { group, standalone, addressId, publicId: null, revision: 0, focusHeading: appIsPhone() || standalone };
-			for (const id of [group.id, ...(group.equivalentIds || [])]) state.visitedTopics.add(id);
+			for (const id of appTopicVisitIds(group)) state.visitedTopics.add(id);
 			const card = shadow.querySelector('.app-topic-row[data-shared-topic="' + CSS.escape(group.id) + '"]');
 			if (card) {
 				card.setAttribute("aria-current", "true");
 				card.setAttribute("aria-description", "Read");
 				card.classList.remove("is-unread");
+			}
+			if (state.view === "unread") {
+				state.unreadTopic = group;
+				const read = shadow.querySelectorAll('.app-topic-row[aria-description="Read"]:not([aria-current])');
+				for (const previous of read) previous.remove();
+				if (read.length && !card) renderAppList().catch(console.error);
 			}
 			applyAppTopicVisits({ active: group }, () => appState === state).catch(console.error);
 			if (standalone) shadow.getElementById("app-onboarding").hidden = true;
@@ -51574,6 +51689,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		if (state.topicsMode === topicsMode && !state.listTopic) return;
 		clearAppTopicExtra();
 		closeAppTopicArticle();
+		state.unreadTopic = null;
 		state.topicsMode = topicsMode;
 		state.listTopic = null;
 		endAppSelection();
@@ -51598,6 +51714,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		resetAppListScroll();
 		await renderAppList();
 		if (!state.topicsMode || state.view !== view || (state.listTopic !== id && !state.activeListTopic?.equivalentIds?.includes(id))) return;
+		if (id && view === "unread") state.unreadTopic = state.activeListTopic;
 		const shadow = state.ui.shadow;
 		const target = id ? shadow.getElementById("app-list-topic-back") :
 			[...shadow.querySelectorAll(".app-topic-row")].find((button) => button.dataset.sharedTopic === previous);
@@ -51809,6 +51926,10 @@ ${frontPageChooserHTML()}
 					await list._hnewherePointer.done;
 					if (request !== state.listSeq || revision !== paintRevision) return;
 				}
+				const hasTopics = Boolean(projection.topics?.length);
+				const topics = view === "unread" && state.topicsMode && !projection.active && hasTopics
+					? appUnreadTopics(projection.topics, state) : projection.topics;
+				const topicsCaughtUp = hasTopics && !topics.length;
 				outcome = { feedStates };
 				state.rows = rows;
 				state.rowsView = view;
@@ -51819,9 +51940,9 @@ ${frontPageChooserHTML()}
 				state.feedFilterKey = JSON.stringify(cardSettings.hiddenTopics);
 				state.seen = seenRows;
 				state.listTopicGroups = state.topicsMode ? null : groups;
-				const previousOtherLinks = resetAppTopicList(list);
+				list.replaceChildren();
 
-				if (!shown.length && !projection.active) {
+				if ((!shown.length || topicsCaughtUp) && !projection.active) {
 					renderAppListMessage(
 						pending ? "Loading Front Pages…" : failureText || (filteredEmpty
 							? "No links match your topic filters." : !allRows.length
@@ -51844,11 +51965,10 @@ ${frontPageChooserHTML()}
 					state.listTopicGroups = groups;
 					return Boolean(appTopicProjection(rowsForView(rows, state.seen, appUnreadOpenKey(state)), groups).topics.length);
 				}).catch(() => false) : null;
-				const linksList = paintAppTopicProjection(list, { ...projection, topics: rankFrontPageTopics(projection.topics), tabCheck },
-					isCurrent, previousOtherLinks);
+				paintAppTopicProjection(list, { ...projection, topics: rankFrontPageTopics(topics), hasTopics, tabCheck }, isCurrent);
 				for (const row of projection.rows) {
 					const unread = rowIsUnread(row, state.seen);
-					const element = renderBrowseRow(row.story, linksList, 0, {
+					const element = renderBrowseRow(row.story, list, 0, {
 						also: row.also,
 						queuedKeys,
 						hideable: true,
