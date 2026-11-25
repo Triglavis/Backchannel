@@ -17,7 +17,10 @@ use to detect updates, so every release bumps it.
   the displayed order in place.
 - Comment requests keep moving while individual replies are slow. Discussion
   updates reuse the comment branches already on screen.
-- Other sources can start syncing while Safari prepares the Reddit helper tab.
+- Other sources can start syncing while Safari prepares the Reddit helper tab,
+  including when re-clicking the open Reader article or when Front Pages refresh
+  automatically.
+- Safari starts the Reddit helper sooner by overlapping shared-storage checks.
 - Lobsters Front Pages reuse saved results when the source confirms the feed is
   unchanged.
 

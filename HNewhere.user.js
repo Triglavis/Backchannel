@@ -7152,12 +7152,15 @@ ${
 		const stage = { kind: "reddit-read", nonce: batch.nonce, origin: location.origin, ts: batch.created, expires: batch.expires, request: null, requests, abandoned: batch.abandoned || [] };
 
 		await stageBridgePayload(batch.nonce, stage);
-		await indexBridgePayload(batch.nonce);
+		const indexed = indexBridgePayload(batch.nonce);
 		const url = "https://www.reddit.com/#" + new URLSearchParams({ backchannel_read: "1", nonce: batch.nonce });
 
 		if (batch.tab) {
+			const [index, ownership] = await Promise.allSettled([indexed, batch.onOpened?.(batch.nonce, false, indexed)]);
+			if (index.status === "rejected") throw index.reason;
 			batch.tabAttempted = true;
-			if (batch.onOpened && !(await batch.onOpened(batch.nonce))) return { error: "window-unavailable" };
+			if (ownership.status === "rejected") throw ownership.reason;
+			if (batch.onOpened && !ownership.value) return { error: "window-unavailable" };
 			const opened = await openRedditReadTab(url, batch);
 
 			if (!opened) return { error: "window-unavailable" };
@@ -7168,6 +7171,7 @@ ${
 				return { error: "window-unavailable" };
 			}
 		} else {
+			await indexed;
 			rememberReadHelperTab(batch.nonce, "reddit", batch.popup, batch.created);
 			batch.popup.location = url;
 		}
@@ -7467,7 +7471,8 @@ ${
 				}, 10000);
 				let ok = false;
 				const outcome = {};
-				const onOpened = async (nonce, late = false) => withSharedStorageLock("reddit-refresh", async (lease) => {
+				const onOpened = async (nonce, late = false, indexed = null) => withSharedStorageLock("reddit-refresh", async (lease) => {
+					if (indexed) await indexed;
 					const current = await load(REDDIT_SHARED_REFRESH_KEY, null);
 					if (current?.id === id && current.state === "running" && current.expires > Date.now()) {
 						await lease.commit(() => save(REDDIT_SHARED_REFRESH_KEY, { ...current, helperNonce: nonce }));
@@ -11802,7 +11807,7 @@ button {
 		});
 	}
 
-	function loadTopicFeed(feed, force, settings, legacy = null, { cachedOnly = false, redditReady = null } = {}) {
+	function loadTopicFeed(feed, force, settings, legacy = null, { cachedOnly = false, automatic = false, redditReady = null } = {}) {
 		const key = frontPageFeedKey(feed);
 		const existing = frontPageJobs.get(key);
 		if (!cachedOnly && existing && (!force || existing.force)) return existing.promise;
@@ -11812,17 +11817,23 @@ button {
 		if (!cachedOnly) frontPageLoads.set(key, request);
 		job.promise = (async () => {
 			const waitForReddit = !cachedOnly && feed.source === "reddit" && redditReady;
+			const scheduled = waitForReddit && automatic;
+			const scheduledUI = scheduled ? activeFrontPageUI() : null;
 			if (waitForReddit) await redditReady;
 			const previous = await readFrontPageFeedCache(feed, legacy);
+			const refreshSettings = scheduled ? await loadSettings() : settings;
 			const cached = previous ? { ...previous, stories: tagCachedFrontPageStories(previous.stories, feed), status: previous.status || "ok" } : null;
 			const now = Date.now();
 			const savedResult = () => ({ stories: Array.isArray(cached?.stories) ? cached.stories : [], status: cached?.status || "ok", cached: Boolean(cached?.status && cached.status !== "ok" && cached.stories?.length), attempted: false, lastAttemptAt: cached?.lastAttemptAt ?? cached?.timestamp ?? 0, lastSuccessAt: cached?.lastSuccessAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), dataFetchedAt: cached?.dataFetchedAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), retryAt: cached?.retryAt || 0 });
 			if (epoch !== frontPageCacheEpoch || !cachedOnly && frontPageLoads.get(key) !== request ||
 				waitForReddit && !sourceReadEnabled?.has(feed.source)) return { stories: [], status: "cancelled", attempted: false };
 			const transportReady = feed.source === "reddit" && cached?.status === "window" && redditReadBatch?.connected && !redditReadBatch.closing && !redditReadBatch.cancelled;
-			if (cachedOnly || !transportReady && (!force && frontPageNextAttempt(cached, settings, now) > now || cached?.retryAt > now)) return savedResult();
+			if (cachedOnly || scheduled && !sourceRefreshInterval(refreshSettings) ||
+				!transportReady && (!force && frontPageNextAttempt(cached, refreshSettings, now) > now || cached?.retryAt > now)) return savedResult();
 			const cooldown = feed.source === "reddit" ? await load(REDDIT_POLL_KEY, null) : null;
 			if (cooldown?.until > now) return { ...savedResult(), status: "limited", retryAt: cooldown.until };
+			if (scheduled && (document.visibilityState === "hidden" || !scheduledUI || activeFrontPageUI() !== scheduledUI ||
+				!frontPageFeedsForView(refreshSettings, activeFrontPageView()).some((active) => frontPageFeedKey(active) === key))) return savedResult();
 			const cachedETag = feed.source === "lobsters" && feed.kind === "front" && cached?.dataFetchedAt > 0 && Array.isArray(cached.stories) && validETag(cached.etag) ? cached.etag : "";
 			const result = await frontPageFeedResult(feed, force, cachedETag);
 			const finished = Date.now();
@@ -11934,12 +11945,13 @@ button {
 		if (!ui || !sourceRefreshInterval(await loadSettings())) return;
 		frontPageRefreshRunning = true;
 		try {
-			const task = async () => {
+			const task = async (_releaseRead, redditReady) => {
 				if (document.visibilityState === "hidden" || activeFrontPageUI() !== ui) return;
-				return appState ? renderAppList({ automatic: true }) : renderBrowseView(ui, { automatic: true });
+				const options = { automatic: true, redditReady };
+				return appState ? renderAppList(options) : renderBrowseView(ui, options);
 			};
 			const allowHelper = !usesRedditReadWindow() || !redditReadSourceOn || usesManagerTabs() && Boolean(await load(REDDIT_READ_NOTICE_KEY, false));
-			await runSync(task, { automatic: true, feedOnly: true, allowHelper });
+			await runSync(task, { automatic: true, feedOnly: true, allowHelper, overlapReddit: true });
 		} finally {
 			frontPageRefreshRunning = false;
 			scheduleFrontPageRefresh();
@@ -52040,7 +52052,7 @@ ${frontPageChooserHTML()}
 
 		if (!focus && state.open?.key === key && renderedFor === key && state.ui.body.querySelector(".top-level-comments")) {
 			if (appIsPhone()) setAppStage("article");
-			return runSync((releaseRead) => syncDiscussions(state.ui, renderedDiscussions, releaseRead));
+			return runSync((releaseRead, redditReady) => syncDiscussions(state.ui, renderedDiscussions, releaseRead, { redditReady }), { overlapReddit: true });
 		}
 
 		const opened = { url, key, row: entry };
