@@ -18613,8 +18613,10 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			(index) => readerCollectionSubjectGroups(documents, tagsByPage, index), coverage, documents);
 		await applyAppTopicVisits(projection, isCurrent);
 		if (!isCurrent()) return;
-		list.replaceChildren();
-		paintAppTopicProjection(list, projection, isCurrent);
+		const visible = projection.rows.slice(0, collectionLimit);
+		const backfill = () => backfillCardLooks(visible).catch(console.error);
+		const previousOtherLinks = resetAppTopicList(list);
+		const linksList = paintAppTopicProjection(list, projection, isCurrent, previousOtherLinks, backfill);
 		if (!matched.length) {
 			list.append(readerCollectionEmpty(Boolean(documents.length)));
 			return;
@@ -18622,15 +18624,14 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		const grouped = collectionFilter === "all" && collectionSort === "activity" &&
 			projection.rows[0]?.fresh && !projection.rows.at(-1).fresh;
-		const visible = projection.rows.slice(0, collectionLimit);
 		for (const [index, doc] of visible.entries()) {
 			if (grouped && (index === 0 || (!doc.fresh && visible[index - 1].fresh))) {
 				const heading = document.createElement("h2");
 				heading.className = "reader-collection-section";
 				heading.textContent = doc.fresh ? "New discussion activity" : "Saved pages";
-				list.append(heading);
+				linksList.append(heading);
 			}
-			list.append(readerCollectionRow(doc, tagsByPage.get(doc.key)));
+			linksList.append(readerCollectionRow(doc, tagsByPage.get(doc.key)));
 		}
 		if (visible.length < projection.rows.length) {
 			const nav = document.createElement("div");
@@ -18645,9 +18646,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 				list.querySelectorAll(".reader-collection-row")[visible.length]?.querySelector("a, button")?.focus();
 			};
 			nav.append(more);
-			list.append(nav);
+			linksList.append(nav);
 		}
-		backfillCardLooks(visible).catch(console.error);
+		if (linksList === list) backfill();
 	}
 
 	async function refreshQueueCount(root) {
@@ -19064,8 +19065,8 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		};
 		let rank = 0;
 
-		list.replaceChildren();
-		if (projection) paintAppTopicProjection(list, projection, isCurrent);
+		const previousOtherLinks = resetAppTopicList(list);
+		const linksList = projection ? paintAppTopicProjection(list, projection, isCurrent, previousOtherLinks) : list;
 
 		if (!entries.length) {
 			const empty = document.createElement("div");
@@ -19077,7 +19078,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		}
 
 		for (const entry of projection?.rows ?? entries) {
-			const row = renderBrowseRow(entry, list, (rank += 1), {
+			const row = renderBrowseRow(entry, linksList, (rank += 1), {
 				inQueue: true,
 				reload,
 				readerRow: Boolean(ui.browseHome),
@@ -40106,6 +40107,17 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-row[aria-current] { background:var(--open-row); }
 .app-topic-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .app-topic-row:not(.is-unread) .app-topic-name { color:var(--muted); }
+.app-topic-other-links > summary {
+	padding:12px;
+	border-bottom:1px solid var(--border-soft);
+	color:var(--text);
+	font-weight:600;
+	list-style-position:inside;
+	cursor:pointer;
+}
+.app-topic-other-links > summary:hover { background:var(--hover-tint); }
+.app-topic-other-links > summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.app-topic-other-count { margin-inline-start:4px; color:var(--muted); font-weight:400; }
 .app-topic-media {
 	display:block;
 	flex:none;
@@ -40158,10 +40170,11 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-picture[src*="screenshot" i] { object-position:center bottom; }
 .app-topic-name { display:block; font-weight:600; overflow-wrap:anywhere; }
 .app-topic-meta { display:block; }
+.app-topic-publisher-count { display:block; color:var(--muted); font-size:11px; }
 .app-topic-chevron { margin-left:auto; color:var(--muted); }
 
 @media (pointer:coarse) {
-	.app-topic-row { padding-inline:16px; }
+	.app-topic-row, .app-topic-other-links > summary { padding-inline:16px; }
 }
 
 .app-selection-bar {
@@ -40335,7 +40348,7 @@ ${SETTINGS_MODAL_CSS}
 }
 
 #app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-site, .browse-sources-total, .reader-collection-new, .browse-rank),
-.app-topic-row[aria-current] .app-topic-meta {
+.app-topic-row[aria-current] :is(.app-topic-meta, .app-topic-publisher-count) {
 	color:color-mix(in srgb, var(--text) 82%, var(--meta));
 }
 
@@ -49873,10 +49886,15 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const recentAfter = Date.now() / 1000 - READER_COVERAGE_WINDOW;
 		return topics.map((group) => {
 			const latest = Math.max(0, ...frontPageRowStories(group.rows).map(({ time }) => Number(time) || 0));
-			const publishers = new Set(group.rows.map((row) => hostLabel(appTopicRowURL(row)).replace(/^(?:(?:amp|m|mobile)\.)+/, "")).filter(Boolean)).size;
+			const publishers = appTopicPublisherCount(group.rows);
 			return { group, latest, publishers, recent: Number(latest >= recentAfter) };
 		}).sort((a, b) => b.recent - a.recent || b.publishers - a.publishers || b.latest - a.latest)
 			.map(({ group }) => group);
+	}
+
+	function appTopicPublisherCount(rows) {
+		return new Set(rows.map((row) => hostLabel(appTopicRowURL(row))
+			.replace(/^(?:(?:amp|m|mobile|www)\.)+/, "")).filter(Boolean)).size;
 	}
 
 	function appTopicProjection(rows, topicGroups, topicId, coverage, index = sharedTopicCache?.index, discoveries, availableRows = rows, readingId) {
@@ -49929,7 +49947,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				group.counts = appTopicDiscussionTotals(group.rows.map((row) => threads.get(row)));
 			}
 		}
-		return { rows: active?.rows ?? (topics.length ? [] : rows), groups, topics, active, threads };
+		return { rows: active?.rows ?? (topics.length ? rows.filter((row) => !grouped.has(row)) : rows), groups, topics, active, threads };
 	}
 
 	function paintAppTopicCounts(target, group) {
@@ -50527,7 +50545,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (!copy || !date || !["shared", "published", "event"].includes(event.kind)) return null;
 			if (event.kind === "event") timeline.push({ date, kind: event.kind, ...copy });
 		}
+		const changes = Array.isArray(data.changes) && data.changes.length <= 3
+			? data.changes.map(statement).filter((entry) => entry?.citations?.length && entry.citations.length === entry.sourceIds.length) : [];
 		const article = { version: 1, topic: { id, label }, generatedAt, method: data.method, sources, sections,
+			...(changes.length && { changes }),
 			images: appTopicPublisherPhotos(Array.isArray(data.images) ? data.images.slice(0, 3) : [], ids),
 			timeline: timeline.sort((a, b) => Date.parse(a.date) - Date.parse(b.date)) };
 		return JSON.stringify(article).length <= 262144 ? article : null;
@@ -50914,11 +50935,18 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const art = article.artwork;
 		if (art && !failedPhotos.has(art.url) && !photos.some((photo) => photo.url === art.url)) lead.push({ url: art.url, alt: art.subject, credit: art.credit, href: art.source });
 		if (lead.length) narrative.append(appTopicArticleFigure(lead, false, failedPhotos));
-		if (article.sections.length) {
+		const hasBrief = article.sections.length || article.changes?.length;
+		if (hasBrief) {
 			const meta = [pluralize(references.size, "source")];
 			if (article.method === "synthesis") meta.unshift("AI-generated brief");
 			if (article.generatedAt) meta.push("Updated " + readerDateText(article.generatedAt));
 			head.append(appTopicArticleNode("p", "bc-reader-byline", meta.join(" · ")));
+			if (article.changes?.length) {
+				const section = appTopicArticleNode("section", "app-topic-brief-section");
+				section.append(appTopicArticleNode("h2", "", "What changed"));
+				for (const change of article.changes) section.append(appTopicCitedParagraph(change, references));
+				narrative.append(section);
+			}
 			for (const part of article.sections) {
 				const { heading, paragraphs } = part;
 				const section = appTopicArticleNode("section", "app-topic-brief-section");
@@ -50930,8 +50958,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				narrative.append(section);
 			}
 		}
-		if (!article.sections.length || retry) {
-			const message = article.sections.length ? "" : pending ? "Loading the brief…" :
+		if (!hasBrief || retry) {
+			const message = hasBrief ? "" : pending ? "Loading the brief…" :
 				references.size ? "No readable summary was available. You can read the original sources below." : "Source links are unavailable for this topic.";
 			const status = appTopicArticleNode("p", "app-topic-request-status", message);
 			status.setAttribute("role", "status");
@@ -51035,7 +51063,41 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		}).catch(console.error);
 	}
 
-	function paintAppTopicProjection(list, { topics = [], groups = [], active, threads, tabCheck }, isCurrent) {
+	function resetAppTopicList(list) {
+		const details = list.querySelector(":scope > .app-topic-other-links");
+		const previous = details && details.dataset.view === appState?.view ? {
+			open: details.open,
+			focused: details.firstElementChild === list.getRootNode().activeElement,
+		} : null;
+		list.replaceChildren();
+		return previous;
+	}
+
+	function paintAppTopicOtherLinks(list, count, previous, onOpen) {
+		const details = appTopicArticleNode("details", "app-topic-other-links");
+		details.dataset.view = appState.view;
+		details.open = Boolean(previous?.open);
+		const summary = appTopicArticleNode("summary");
+		summary.append("Other links ",
+			appTopicArticleNode("span", "app-topic-other-count", count.toLocaleString()));
+		details.append(summary);
+		const links = document.createElement("div");
+		if (details.open) details.append(links);
+		details.ontoggle = () => {
+			if (!details.isConnected) return;
+			if (details.open) {
+				if (!links.isConnected) details.append(links);
+				refreshSaveControls().catch(console.error);
+				onOpen?.();
+			} else links.remove();
+			decorateAppRows(list);
+		};
+		list.append(details);
+		if (previous?.focused) summary.focus({ preventScroll: true });
+		return links;
+	}
+
+	function paintAppTopicProjection(list, { rows = [], topics = [], groups = [], active, threads, tabCheck }, isCurrent, previousOtherLinks, onOtherLinksOpen) {
 		const state = appState;
 		const shadow = state.ui.shadow;
 		paintAppTopicTabs(Boolean(topics.length || active));
@@ -51079,7 +51141,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			bar.querySelector(":scope > .app-topic-media")?.remove();
 			title.parentElement.before(media);
 			if (!selection.verified.has(active.id)) hydrateAppTopicPhotos([{ group: active, media }], selection.photos, selection.used);
-			return;
+			return list;
 		}
 		delete bar.dataset.topicId;
 		delete bar.dataset.topicLabel;
@@ -51088,7 +51150,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			state.listTopic = null;
 			endAppSelection();
 		}
-		if (!state.topicsMode) return;
+		if (!state.topicsMode) return list;
 		const { photos, used, verified } = appTopicPhotos(topics);
 		state.listTopicPhotos = { view: state.view, index: sharedTopicCache?.index, photos, used, verified };
 		const pendingPhotos = [];
@@ -51107,6 +51169,8 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const name = document.createElement("span");
 			name.className = "app-topic-name";
 			name.textContent = topicDisplayName(group.label);
+			const publishers = appTopicPublisherCount(group.rows);
+			const publisherCount = appTopicArticleNode("span", "app-topic-publisher-count", pluralize(publishers, "publisher"));
 			const meta = document.createElement("span");
 			meta.className = "app-topic-meta";
 			paintAppTopicCounts(meta, group);
@@ -51114,7 +51178,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			chevron.className = "app-topic-chevron";
 			chevron.setAttribute("aria-hidden", "true");
 			chevron.textContent = "›";
-			labels.append(name, meta);
+			labels.append(name, publisherCount, meta);
 			const media = appTopicPicture(group, photos, used);
 			button.append(media, labels, chevron);
 			if (!verified.has(group.id)) pendingPhotos.push({ group, media });
@@ -51134,6 +51198,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			list.append(button);
 		}
 		hydrateAppTopicPhotos(pendingPhotos, photos, used);
+		return topics.length && rows.length ? paintAppTopicOtherLinks(list, rows.length, previousOtherLinks, onOtherLinksOpen) : list;
 	}
 
 	function topicArticleLinkKey(value) {
@@ -51228,7 +51293,11 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			}
 		}
 		const sources = new Map();
-		for (const original of [...(remote?.sources || []), ...local.sources]) {
+		const remoteSources = remote?.sources || [];
+		const previousEdition = remote && reading.remoteEdition !== reading.edition;
+		const members = previousEdition ? index?.topicPages.get(reading.publicId) : null;
+		const published = previousEdition ? remoteSources.filter(({ url }) => members?.has(sharedTopicURLKey(url))) : remoteSources;
+		for (const original of [...published, ...local.sources]) {
 			const key = topicArticleLinkKey(original.url);
 			if (excluded.has(key) || matchesMuted?.({ story: { ...original, description: original.excerpt } })) continue;
 			const existing = sources.get(key);
@@ -51261,6 +51330,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			images: appTopicPublisherPhotos([...remote.images, ...combined.images], refs),
 			method: sections.length ? remote.method : "coverage",
 			sections: sections.length ? sections : combined.sections,
+			changes: remote.changes?.filter(visible),
 			timeline: remote.timeline.filter((event) => event.kind === "event" && visible(event)),
 		};
 	}
@@ -51380,7 +51450,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		catch { result = { status: "unavailable" }; }
 		if (appState.topicArticle !== reading || reading.abort !== controller) return;
 		reading.pending = false;
-		reading.remote = result?.article || reading.remote;
+		if (result?.article || result?.status === "missing") {
+			reading.remote = result.article || null;
+			reading.remoteEdition = reading.edition;
+		}
 		reading.retryAt = result?.retryAt || null;
 		reading.retry = ["unavailable", "pending"].includes(result?.status);
 		showAppTopicArticle(reading);
@@ -51404,12 +51477,13 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		reading.local = appTopicSourceArticle(group.label, group.id, appTopicReadingSources(rows, looks));
 		const index = sharedTopicCache?.index;
 		const id = reading.standalone ? group.id : publicTopicForReading(group, index) || (index?.topics.has(reading.addressId) ? reading.addressId : null);
-		if (id !== reading.publicId || (id && reading.edition !== index?.generatedAt)) {
+		const changedTopic = id !== reading.publicId;
+		if (changedTopic || (id && reading.edition !== index?.generatedAt)) {
 			reading.abort?.abort();
 			reading.abort = new AbortController();
 			reading.publicId = id;
 			reading.edition = index?.generatedAt;
-			reading.remote = null;
+			if (changedTopic) reading.remote = null;
 			reading.retryAt = null;
 			reading.retry = reading.pending = false;
 			setAppTopicAddress(id);
@@ -51745,7 +51819,7 @@ ${frontPageChooserHTML()}
 				state.feedFilterKey = JSON.stringify(cardSettings.hiddenTopics);
 				state.seen = seenRows;
 				state.listTopicGroups = state.topicsMode ? null : groups;
-				list.replaceChildren();
+				const previousOtherLinks = resetAppTopicList(list);
 
 				if (!shown.length && !projection.active) {
 					renderAppListMessage(
@@ -51770,10 +51844,11 @@ ${frontPageChooserHTML()}
 					state.listTopicGroups = groups;
 					return Boolean(appTopicProjection(rowsForView(rows, state.seen, appUnreadOpenKey(state)), groups).topics.length);
 				}).catch(() => false) : null;
-				paintAppTopicProjection(list, { ...projection, topics: rankFrontPageTopics(projection.topics), tabCheck }, isCurrent);
+				const linksList = paintAppTopicProjection(list, { ...projection, topics: rankFrontPageTopics(projection.topics), tabCheck },
+					isCurrent, previousOtherLinks);
 				for (const row of projection.rows) {
 					const unread = rowIsUnread(row, state.seen);
-					const element = renderBrowseRow(row.story, list, 0, {
+					const element = renderBrowseRow(row.story, linksList, 0, {
 						also: row.also,
 						queuedKeys,
 						hideable: true,

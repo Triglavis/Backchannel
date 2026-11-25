@@ -514,14 +514,63 @@ async function enrich(record, fetcher, signal) {
   }
 }
 
-function dateInSentence(sentence) {
+function explicitDate(sentence) {
   const dates = [...sentence.matchAll(/\b(?:(\d{4}-\d\d-\d\d)|([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})|(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?\s+(\d{4}))\b/g)];
   if (dates.length !== 1) return null;
   const [, numeric, monthFirst, daySecond, yearLast, dayFirst, monthSecond, year] = dates[0];
   const month = monthFirst || monthSecond;
   const number = month && "jan feb mar apr may jun jul aug sep oct nov dec".split(" ").indexOf(month.slice(0, 3).toLowerCase()) + 1;
   const day = numeric || (yearLast || year) + "-" + String(number).padStart(2, "0") + "-" + (daySecond || dayFirst).padStart(2, "0");
-  return explicitlyDated(day, sentence) ? isoDate(day) : null;
+  const date = explicitlyDated(day, sentence) && isoDate(day);
+  return date ? { date, index: dates[0].index, text: dates[0][0] } : null;
+}
+
+const UNCERTAIN_DEVELOPMENT = /\b(?:would|will|could|may|might|reported to|reportedly|expected|plans?|planned|scheduled|proposed|did not|has not|had not)\b/i;
+
+function datedDevelopment(sentence) {
+  const dated = explicitDate(sentence);
+  if (!dated) return null;
+  const before = sentence.slice(0, dated.index);
+  const after = sentence.slice(dated.index + dated.text.length);
+  const event = /^(?:On\s+)?$/i.test(before) && /^,\s+/.test(after) ? after.replace(/^,\s+/, "") :
+    /\bon\s+$/i.test(before) && /^[.!]$/.test(after) && !/\b(?:after|before|because|though|when|while|since|during)\b/i.test(before)
+      ? before.replace(/\bon\s+$/i, "").trimEnd() : "";
+  if (!/\b(?:adopted|announced|approved|arrested|awarded|began|built|cancelled|canceled|closed|completed|confirmed|cut|died|filed|finished|found|held|issued|launched|left|opened|passed|published|recalled|released|removed|reopened|replaced|resigned|restored|returned|ruled|sent|signed|started|stopped|suspended|voted|won)\b/i.test(event) ||
+    UNCERTAIN_DEVELOPMENT.test(event)) return null;
+  return { date: dated.date, event };
+}
+
+function previousReporting(article, topic) {
+  const date = article?.version === 1 && article.topic?.id === topic.id && isoDate(article.generatedAt);
+  if (!date || !Array.isArray(article.sections)) return null;
+  const paragraphs = article.sections.flatMap(({ paragraphs }) => paragraphs || []);
+  if (!paragraphs.some(({ citations }) => citations?.some(({ excerpt }) => excerpt))) return null;
+  const points = [...paragraphs, ...(Array.isArray(article.timeline) ? article.timeline : [])];
+  const facts = points.flatMap(({ text, citations }) => [text, ...(citations || []).map(({ excerpt }) => excerpt)])
+    .filter((text) => typeof text === "string").flatMap(evidenceSentences)
+    .filter((sentence) => !UNCERTAIN_DEVELOPMENT.test(sentence)).map((sentence) => new Set(terms(sentence)));
+  return { day: date.slice(0, 10), facts };
+}
+
+function recentDevelopments(ranked, records, generatedAt, previous) {
+  if (!previous) return [];
+  const originals = new Map(records.filter(({ roundup, canonicalKey, key }) => !roundup && (!canonicalKey || canonicalKey === key))
+    .map(({ source }) => [source.id, source]));
+  const dated = new Map();
+  for (const { direct, sentence, citations } of ranked) {
+    if (!direct) continue;
+    const development = datedDevelopment(sentence);
+    if (!development) continue;
+    const { date, event } = development;
+    const day = date.slice(0, 10);
+    if (day <= previous.day || day > generatedAt.slice(0, 10) || dated.has(day)) continue;
+    const words = new Set(terms(event));
+    if (previous.facts.some((fact) => [...words].filter((word) => fact.has(word)).length >= Math.max(4, words.size * 0.8))) continue;
+    const cite = [...citations.values()].find(({ sourceId, excerpt }) => originals.has(sourceId) && excerpt === sentence);
+    if (!cite) continue;
+    dated.set(day, { text: originals.get(cite.sourceId).publisher + " reports, “" + sentence + "”", sourceIds: [cite.sourceId], citations: [cite] });
+  }
+  return [...dated.keys()].sort().reverse().slice(0, 3).map((day) => dated.get(day));
 }
 
 function standaloneFinding(sentence) {
@@ -583,12 +632,13 @@ function responseVoice(sentence, topicWords) {
   return { stance, actors };
 }
 
-function coverage(topic, records, generatedAt, draft, sources) {
+function coverage(topic, records, generatedAt, draft, sources, previous) {
   const narrative = draft?.sections.flatMap(({ paragraphs }) => paragraphs) || [];
   const regularLimit = narrative.length >= 3 ? 0 : 3;
   const origins = new Map(records.map(({ source, origin }) => [source.id, origin]));
   const extensive = new Set(records.filter((record) => !record.roundup).map((record) => record.origin)).size >= 4;
-  if (draft && (!regularLimit && !extensive || records.reduce((size, { parts }) => size + parts.length, 0) < 4)) return draft;
+  const keepDraft = draft && (!regularLimit && !extensive || records.reduce((size, { parts }) => size + parts.length, 0) < 4);
+  if (keepDraft && !previous) return draft;
   const wanted = new Set(terms(topic.label));
   const headlines = sources.map(({ source }) => new Set(terms(source.title).filter((word) => !wanted.has(word) && word.length > 3)));
   // An appositive can distinguish two people with the same name and age.
@@ -598,7 +648,7 @@ function coverage(topic, records, generatedAt, draft, sources) {
   const findings = new Map();
   const context = records.flatMap(({ parts }) => parts);
   const observations = context.flatMap(evidenceSentences).map(marketObservation).filter((sample) => sample && !sample.ambiguous);
-  for (const { source, parts, roundup, live, named: primary } of records) {
+  for (const { source, parts, roundup, live, canonicalKey, key: sourceKey, named: primary } of records) {
     if (!parts.length) continue;
     const document = new Set(terms(parts.join(" ")));
     if (affiliations.some((word) => terms(word).some((term) => !document.has(term)))) continue;
@@ -619,24 +669,25 @@ function coverage(topic, records, generatedAt, draft, sources) {
       const shared = [...words].filter((term) => wanted.has(term)).length;
       const echoes = [...words].filter((word) => ownTitle.has(word)).length;
       const direct = (shared >= minimum || shared > 0 && titleMatches > 0 && echoes >= 2) && (!named || folded(sentence).includes(folded(named[1])));
+      const firsthand = direct && primary && !roundup && (!canonicalKey || canonicalKey === sourceKey) && shared >= Math.min(2, wanted.size);
       const angle = Math.max(0, ...headlines.map((headline) => [...headline].filter((word) => words.has(word)).length));
       const departure = departureActor(sentence, wanted);
       const background = !!departure && /\b(?:\w+ (?:days?|weeks?|months?|years?) (?:ago|earlier)|earlier (?:this|that) (?:month|week|year)|previously)\b/i.test(sentence);
       const detail = index > 0 || !part.startsWith(sentence);
       const rank = shared + Number(!roundup) + 2 * Number(PENDING_TRANSACTION.test(part)) + 2 * Number(!!primary) +
         Number(!detail) - 4 * Number(/\b(?:must have|might have|could have|may have|speculat\w*)\b/i.test(sentence));
-      candidates.push({ key, sentence, direct, shared, detail, rank, market, departure, background, angle, location: source.id + "/" + index });
+      candidates.push({ key, sentence, direct, firsthand, shared, detail, rank, market, departure, background, angle, location: source.id + "/" + index });
     }
     if (!candidates.some(({ direct }) => direct)) continue;
-    for (const { key, sentence, direct, shared, detail, rank, market, departure, background, angle, location } of candidates) {
+    for (const { key, sentence, direct, firsthand, shared, detail, rank, market, departure, background, angle, location } of candidates) {
       if (!direct && (roundup || live || !titleMatches)) continue;
       if (!direct && /\b(?:polled|surveyed).+\b(?:expected|estimated)\s+[$€£\d][\d.,]+(?:\s+\w+)?[.!]?$/i.test(sentence)) continue;
       let finding = findings.get(key);
       if (!finding) {
-        finding = { sentence, direct, shared, detail, rank, location, market, departure, background, angle, publisher: source.publisher, citations: new Map(), roundup };
+        finding = { sentence, direct, firsthand, shared, detail, rank, location, market, departure, background, angle, publisher: source.publisher, citations: new Map(), roundup };
         findings.set(key, finding);
-      } else if (rank > finding.rank) {
-        Object.assign(finding, { rank, publisher: source.publisher, roundup });
+      } else if (firsthand && !finding.firsthand || firsthand === finding.firsthand && rank > finding.rank) {
+        Object.assign(finding, { firsthand, rank, publisher: source.publisher, roundup });
       }
       if (direct) finding.direct = true;
       if (detail) finding.detail = true;
@@ -647,13 +698,15 @@ function coverage(topic, records, generatedAt, draft, sources) {
   const ranked = all.filter((finding) => !finding.market || !all.some((other) =>
     sameMarket(finding.market, other.market) && other.market.stage > finding.market.stage)).sort((a, b) => Number(!!a.roundup) - Number(!!b.roundup) ||
     b.citations.size - a.citations.size || b.rank - a.rank);
+  const changes = recentDevelopments(ranked, records, generatedAt, previous);
+  if (keepDraft) return { ...draft, changes };
   const statement = (finding, attribute = true) => {
     const citations = [...finding.citations.values()].sort((a, b) => Number(a.sourceId.slice(1)) - Number(b.sourceId.slice(1)));
     const attribution = attribute || finding.roundup || finding.market ? finding.publisher + (finding.roundup ? "’s roundup reports, " : " reports, ") : "";
     return { text: attribution + "“" + finding.sentence + "”",
       sourceIds: citations.map(({ sourceId }) => sourceId), citations };
   };
-  const lead = ranked.find(({ direct }) => direct);
+  const lead = (!draft && ranked.find(({ firsthand }) => firsthand)) || ranked.find(({ direct }) => direct);
   const sections = draft ? [...draft.sections] : lead ? [{ heading: "Brief", paragraphs: [statement(lead)] }] : [];
   if (!lead) return draft || { sections, timeline: [] };
   const existing = draft ? [...narrative, ...draft.timeline] : [statement(lead)];
@@ -712,17 +765,17 @@ function coverage(topic, records, generatedAt, draft, sources) {
     if (details.length === regularLimit + Number(extensive)) break;
   }
   if (details.length) sections.push({ heading: "Further details", paragraphs: details });
-  if (draft) return { sections, timeline: draft.timeline };
+  if (draft) return { sections, timeline: draft.timeline, changes };
   const events = new Map();
   for (const finding of ranked) {
     if (!finding.direct) continue;
-    const date = dateInSentence(finding.sentence);
+    const date = explicitDate(finding.sentence)?.date;
     if (!date || events.has(date) || (date > generatedAt && !/\b(?:scheduled|plans?|expected|due|set to|will|would|proposed)\b/i.test(finding.sentence))) continue;
     events.set(date, finding);
   }
   const timeline = [...events].filter(([, finding]) => events.size > 1 || finding !== lead).map(([date, finding]) =>
     ({ date, kind: "event", ...statement(finding) })).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6);
-  return { sections, timeline };
+  return { sections, timeline, changes };
 }
 
 const textSchema = { type: "string" };
@@ -1039,7 +1092,7 @@ async function synthesize(topic, records, ai, generatedAt) {
   finally { clearTimeout(timer); }
 }
 
-export async function buildTopicArticle(topic, pages, { ai, fetcher, now = Date.now(), onStatus } = {}) {
+export async function buildTopicArticle(topic, pages, { ai, fetcher, now = Date.now(), onStatus, previous } = {}) {
   const generatedAt = isoDate(now) || new Date().toISOString();
   const identity = { id: topic.id, label: plain(topic.label, 260) };
   const { sources: records, selected } = articleSelection(identity, pages);
@@ -1069,7 +1122,8 @@ export async function buildTopicArticle(topic, pages, { ai, fetcher, now = Date.
     else status = "unavailable";
   }
   onStatus?.(status);
-  const content = coverage(identity, reporting, generatedAt, draft, records);
+  const comparison = status === "unavailable" || status === "rejected" ? null : previousReporting(previous, identity);
+  const content = coverage(identity, reporting, generatedAt, draft, records, comparison);
   const byId = new Map(reporting.map((record) => [record.source.id, record]));
   const images = [], publishers = new Set();
   const cited = new Set(content.sections.flatMap(({ paragraphs }) => paragraphs.flatMap(({ sourceIds }) => sourceIds)));
@@ -1082,5 +1136,6 @@ export async function buildTopicArticle(topic, pages, { ai, fetcher, now = Date.
   }
   return { version: 1, topic: identity, generatedAt, method: draft ? "synthesis" : "coverage",
     sources: records.map(({ source }) => source), images, sections: content.sections,
-    timeline: content.timeline.sort((a, b) => a.date.localeCompare(b.date)) };
+    timeline: content.timeline.sort((a, b) => a.date.localeCompare(b.date)),
+    ...(content.changes?.length ? { changes: content.changes } : {}) };
 }
