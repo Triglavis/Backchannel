@@ -52404,6 +52404,11 @@ ${frontPageChooserHTML()}
 	const APP_TOPIC_COMMENT_PAGE = 24;
 	const APP_TOPIC_THREAD_BATCH = 8;
 	const APP_TOPIC_THREAD_SAMPLE = 8;
+	const APP_TOPIC_BEST_WAIT_MS = 400;
+
+	function appTopicUsesBest(reading) {
+		return (reading.settings.commentSort || "best") === "best";
+	}
 
 	async function cachedAppTopicReader(discussion, automatic) {
 		const { source } = discussion;
@@ -52841,8 +52846,45 @@ ${frontPageChooserHTML()}
 		return sortCommentEntries(ranked, { sort: reading.settings.commentSort, unreadFirst: reading.settings.newCommentsFirst });
 	}
 
+	const APP_TOPIC_COMMENT_EVIDENCE_LIFT = 4;
+	const APP_TOPIC_COMMENT_REACTION = /^(?:no shit(?:,? [\p{L}\d]{1,12})?|well[,\s]+duh|duh|wow|lol|lmao|thanks(?: for (?:sharing|posting))?|exactly|this|same|yep|yup)[.!?…\s]*$/iu;
+	const APP_TOPIC_COMMENT_HOUSEKEEPING = /^(?:comments (?:were |have been )?moved to (?:https?:\/\/|another (?:thread|discussion)\b)|(?:i |we )?had to (?:edit|shorten|mangle|trim)\b[^.!?]{0,100}\btitle\b[^.!?]{0,80}\b(?:limit|fit)\b)/i;
+	const APP_TOPIC_COMMENT_EXPLANATION = /\b(?:because|which (?:means|explains)|as a result|due to|(?:found|recorded|showed?|confirms?|states?|reads|wrote|reported) that)\b/i;
+	const APP_TOPIC_COMMENT_FIRSTHAND = /\b(?:i|we) (?:personally |previously )?(?:worked (?:as|at|for|on)|(?:built|tested|measured|observed|saw|ran|inspected|audited|reproduced|maintained|implemented)\b)/i;
+	const APP_TOPIC_COMMENT_MEASUREMENT = /\b\d+(?:[.,]\d+)?\s*(?:%|(?:m(?:m|s|in)?|s|km|kg|hz|gb|ms|seconds?|minutes?|hours?|days?|weeks?|years?|million|billion)\b)|\b(?:section|figure|table|version|paragraph)\s+\d/i;
+	const appTopicCommentSignals = new WeakMap();
+	const appTopicCommentContext = new WeakMap();
+
+	function appTopicCommentContribution(reading, entry, comment) {
+		let signals = appTopicCommentSignals.get(comment);
+		if (!signals) {
+			const html = comment.bodyHTML || "";
+			const text = textExcerpt(html, 1800);
+			const prose = text.replace(/^["“][^"”]{1,180}["”]\s*/, "");
+			const low = APP_TOPIC_COMMENT_REACTION.test(prose) || APP_TOPIC_COMMENT_HOUSEKEEPING.test(text);
+			const quote = /["“][^"”]{60,}["”]/.test(text) || /<blockquote\b[^>]*>[\s\S]{60,}<\/blockquote>/i.test(html);
+			const link = /<a\b[^>]*\bhref\s*=\s*["']https?:\/\//i.test(html);
+			const measurement = APP_TOPIC_COMMENT_MEASUREMENT.test(text);
+			const explanation = APP_TOPIC_COMMENT_EXPLANATION.test(text);
+			const firsthand = APP_TOPIC_COMMENT_FIRSTHAND.test(text);
+			const evidence = !low && text.length >= 90 && (quote || (explanation && (link || measurement || firsthand)) || (firsthand && measurement));
+			signals = { low, terms: evidence ? appTopicDiscussionTerms(text) : null };
+			appTopicCommentSignals.set(comment, signals);
+		}
+		if (!signals.terms) return signals.low ? -1 : 0;
+		let context = appTopicCommentContext.get(entry);
+		if (!context) {
+			context = new Set([reading.discussionPanel.topicLabel, entry.source.title, entry.thread.title].flatMap((title) =>
+				[...appTopicDiscussionTerms(title)]));
+			appTopicCommentContext.set(entry, context);
+		}
+		let matches = 0;
+		for (const term of signals.terms) if (context.has(term) && ++matches === 2) return 1;
+		return 0;
+	}
+
 	function appTopicFeedRows(reading, selected) {
-		const best = (reading.settings.commentSort || "best") === "best";
+		const best = appTopicUsesBest(reading);
 		const tie = (a, b) => (b.row.comment.createdAt || 0) - (a.row.comment.createdAt || 0) ||
 			a.entry.discussion.key.localeCompare(b.entry.discussion.key) || a.row.comment.key.localeCompare(b.row.comment.key);
 		const rows = [];
@@ -52868,10 +52910,12 @@ ${frontPageChooserHTML()}
 				compareCommentEngagement(a.row.comment, b.row.comment) || a.rank - b.rank || tie(a, b));
 			items.forEach((item, sourceRank) => {
 				item.sourceRank = sourceRank;
-				item.bestPosition = item.rank + sourceRank;
+				item.contribution = appTopicCommentContribution(reading, item.entry, item.row.comment);
+				item.bestPosition = item.rank + sourceRank - Math.max(0, item.contribution) * APP_TOPIC_COMMENT_EVIDENCE_LIFT;
 			});
 		}
-		if (best) unique.sort((a, b) => a.bestPosition - b.bestPosition || a.sourceRank - b.sourceRank || tie(a, b));
+		if (best) unique.sort((a, b) => Number(a.contribution < 0) - Number(b.contribution < 0) ||
+			a.bestPosition - b.bestPosition || b.contribution - a.contribution || a.sourceRank - b.sourceRank || tie(a, b));
 		return orderAppTopicComments(reading, unique);
 	}
 
@@ -52938,7 +52982,7 @@ ${frontPageChooserHTML()}
 			lastTail = tail;
 			lastFilter = panel.filter;
 			panel.pageFrom ||= tail;
-			panel.pageKeys = new Set(Array.from(panel.list.children, (item) => item.dataset.commentKey));
+			if (!appTopicUsesBest(reading)) panel.pageKeys = new Set(Array.from(panel.list.children, (item) => item.dataset.commentKey));
 			panel.target += APP_TOPIC_COMMENT_PAGE;
 			panel.budget += APP_TOPIC_THREAD_BATCH;
 			updateAppTopicFeed(reading);
@@ -52950,7 +52994,10 @@ ${frontPageChooserHTML()}
 		}, { root: panel.scroller, rootMargin: "0px 0px 96px" });
 		observer.observe(end);
 		const { signal } = panel.controller;
-		signal.addEventListener("abort", () => observer.disconnect(), { once: true });
+		signal.addEventListener("abort", () => {
+			observer.disconnect();
+			resetAppTopicBestFeed(panel);
+		}, { once: true });
 		const root = feed.getRootNode();
 		let lastTop = 0;
 		const followScroll = () => {
@@ -52972,7 +53019,43 @@ ${frontPageChooserHTML()}
 		return end;
 	}
 
-	function paintAppTopicFeed(reading, rows, threads) {
+	function resetAppTopicBestFeed(panel) {
+		clearTimeout(panel.bestFeed?.timer);
+		panel.bestFeed = null;
+	}
+
+	function appTopicBestPage(reading, rows, threads, waiting) {
+		const panel = reading.discussionPanel;
+		const best = panel.bestFeed ||= { visible: new Map(), unreadFirst: reading.settings.newCommentsFirst, ready: false, timer: null };
+		if (!best.ready) {
+			if (!rows.length) return [];
+			if (waiting) {
+				best.timer ??= setTimeout(() => {
+					best.timer = null;
+					best.ready = true;
+					updateAppTopicFeed(reading);
+				}, APP_TOPIC_BEST_WAIT_MS);
+				return [];
+			}
+			clearTimeout(best.timer);
+			best.timer = null;
+			best.ready = true;
+		}
+		const available = new Map(rows.map((item) => [item.row.comment.key, item]));
+		const selected = new Set(threads.map(({ discussion }) => discussion.key));
+		for (const [key, shown] of best.visible) {
+			const current = available.get(key);
+			if (current?.entry.discussion.key === shown.entry.discussion.key) best.visible.set(key, current);
+			else if (!selected.has(shown.entry.discussion.key)) best.visible.delete(key);
+		}
+		for (const [key, item] of available) {
+			if (best.visible.size >= panel.target) break;
+			if (!best.visible.has(key)) best.visible.set(key, item);
+		}
+		return [...best.visible.values()];
+	}
+
+	function paintAppTopicFeed(reading, rows, threads, best) {
 		const panel = reading.discussionPanel;
 		const feed = panel.scroller.querySelector(".app-topic-feed");
 		if (!feed) return;
@@ -53012,8 +53095,9 @@ ${frontPageChooserHTML()}
 		panel.compose.update();
 		paintAppPhoneComposer();
 		const focus = feed.getRootNode().activeElement;
-		let page = rows.slice(0, panel.target);
-		if (rows.length > panel.target && panel.pageKeys?.size) {
+		const waiting = panel.active.size > 0 || reading.pending;
+		let page = best ? appTopicBestPage(reading, rows, threads, waiting) : rows.slice(0, panel.target);
+		if (!best && rows.length > panel.target && panel.pageKeys?.size) {
 			const fresh = rows.filter(({ row }) => !panel.pageKeys.has(row.comment.key));
 			const retained = rows.length - fresh.length;
 			const additions = new Set(fresh.slice(0, panel.target - retained));
@@ -53059,7 +53143,6 @@ ${frontPageChooserHTML()}
 			if (panel.list.contains(focus) && focus !== feed.getRootNode().activeElement) focus.focus({ preventScroll: true });
 		}
 		panel.list.hidden = !visible.length;
-		const waiting = panel.active.size > 0 || reading.pending;
 		const untried = threads.some(({ discussion }) => !panel.results.has(discussion.key) && !panel.active.has(discussion.key));
 		const expandable = threads.some(({ discussion }) => {
 			const hit = panel.results.get(discussion.key);
@@ -53067,29 +53150,42 @@ ${frontPageChooserHTML()}
 		});
 		const failed = threads.some(({ discussion }) => panel.results.get(discussion.key)?.failed);
 		const restricted = threads.some(({ discussion }) => panel.results.get(discussion.key)?.data?.restricted);
+		const more = best ? rows.some(({ row }) => !panel.bestFeed.visible.has(row.comment.key)) : rows.length > panel.target;
+		const gathering = best && !panel.bestFeed.ready && rows.length > 0;
+		const short = (best ? visible.length : rows.length) < panel.target;
 		panel.status.textContent = !threads.length && panel.filter ? "No discussions selected." : visible.length ? "" : waiting ? "Loading comments…" :
 			untried || expandable ? "No replies found in the discussions checked." : failed ? "Comments couldn’t be loaded." : restricted ? "No comments available here." : "No comments yet.";
 		panel.status.hidden = !panel.status.textContent;
-		panel.retry.hidden = panel.active.size > 0 || !failed || untried || expandable || rows.length > panel.target;
-		panel.end.hidden = !(rows.length > panel.target || untried || expandable) || (rows.length < panel.target && panel.active.size > 0);
+		panel.retry.hidden = panel.active.size > 0 || !failed || untried || expandable || more;
+		panel.end.hidden = gathering || !(more || untried || expandable) || (short && panel.active.size > 0);
 	}
 
 	function updateAppTopicFeed(reading) {
 		const panel = reading.discussionPanel;
 		if (appState?.topicArticle !== reading || panel.controller.signal.aborted) return;
+		const best = appTopicUsesBest(reading);
+		if (panel.bestFeed && (!best || panel.bestFeed.unreadFirst !== reading.settings.newCommentsFirst)) resetAppTopicBestFeed(panel);
 		for (const key of panel.published) if (panel.results.get(key)?.data?.localOnly) panel.results.delete(key);
 		if (panel.filter !== panel.feedFilter) {
 			panel.feedFilter = panel.filter;
 			panel.pageFrom = null;
 			panel.pageKeys = null;
+			resetAppTopicBestFeed(panel);
 			panel.target = APP_TOPIC_COMMENT_PAGE;
 			panel.budget = APP_TOPIC_THREAD_BATCH;
 		}
 		const threads = appTopicFilteredThreads(panel);
 		const rows = appTopicFeedRows(reading, threads);
 		if (panel.active.size < 2 && !panel.selected) {
-			const available = threads.slice(0, panel.budget).filter(({ discussion }) => !panel.active.has(discussion.key));
+			const batch = threads.slice(0, panel.budget);
+			const available = batch.filter(({ discussion }) => !panel.active.has(discussion.key));
 			const next = available.filter(({ discussion }) => !panel.results.has(discussion.key));
+			if (best && panel.target === APP_TOPIC_COMMENT_PAGE && next.length > 1) {
+				const started = new Set(batch.filter(({ discussion }) => panel.active.has(discussion.key) ||
+					panel.results.has(discussion.key)).map(({ discussion }) => discussion.source));
+				const leadsNewSource = ({ thread, discussion }) => thread.comments !== 0 && !started.has(discussion.source);
+				if (started.size) next.sort((a, b) => Number(leadsNewSource(b)) - Number(leadsNewSource(a)));
+			}
 			if (rows.length < panel.target) {
 				next.push(...available.filter(({ discussion }) => {
 					const hit = panel.results.get(discussion.key);
@@ -53115,7 +53211,7 @@ ${frontPageChooserHTML()}
 				});
 			}
 		}
-		paintAppTopicFeed(reading, rows, threads);
+		paintAppTopicFeed(reading, rows, threads, best);
 		panel.controls?.update();
 	}
 
@@ -53312,6 +53408,7 @@ ${frontPageChooserHTML()}
 		if (appState.topicArticle !== reading || !entries.length) return;
 		panel.pageFrom = null;
 		panel.pageKeys = null;
+		resetAppTopicBestFeed(panel);
 		forgetSyncedItems(entries.map(({ discussion }) => discussion), entries.flatMap(({ discussion }) => Array.from(panel.hnItems.get(discussion.key) || [])));
 		for (const { discussion, thread } of entries) {
 			const key = discussion.key;
@@ -53333,7 +53430,9 @@ ${frontPageChooserHTML()}
 			if (appState.topicArticle !== reading) return;
 			panel.pageFrom = null;
 			panel.pageKeys = null;
+			resetAppTopicBestFeed(panel);
 			reading.settings = settings;
+			rankAppTopicDiscussions(reading);
 			panel.paintDetailRows?.();
 			updateAppTopicFeed(reading);
 		});
@@ -53453,6 +53552,78 @@ ${frontPageChooserHTML()}
 		return { update, clearFilter() { setFilter(null); close(true); } };
 	}
 
+	function appTopicDiscussionTerms(text) {
+		return readerStoryTerms(text.replace(/(?:https?:\/\/|www\.)\S+|@[\w.-]+/gi, " "));
+	}
+
+	function appTopicThreadRelevance(topic, title) {
+		const overlap = [...topic].filter((term) => title.has(term)).length;
+		return overlap ? overlap / topic.size * (.8 + .2 * overlap / title.size) : 0;
+	}
+
+	function appTopicBestThreads(entries, label) {
+		const topic = appTopicDiscussionTerms(label);
+		const relevance = new Map();
+		const titleRelevance = (title) => {
+			if (!relevance.has(title)) relevance.set(title, appTopicThreadRelevance(topic, appTopicDiscussionTerms(title)));
+			return relevance.get(title);
+		};
+		const bySource = new Map();
+		for (const entry of entries) {
+			const { source, thread, discussion } = entry;
+			const related = Math.max(titleRelevance(thread.title), .75 * titleRelevance(source.title));
+			const replyVolume = Math.log1p(thread.comments ?? 1);
+			const engagement = .6 * replyVolume / (replyVolume + 2);
+			const score = related * (thread.comments === 0 ? 1 : 2) + engagement;
+			if (!bySource.has(discussion.source)) bySource.set(discussion.source, { candidates: [], used: 0 });
+			bySource.get(discussion.source).candidates.push({ entry, score });
+		}
+		const groups = [...bySource.values()];
+		const compare = (a, b) => b.score - a.score || a.entry.discussion.key.localeCompare(b.entry.discussion.key);
+		for (const group of groups) group.candidates.sort(compare);
+		const ranked = [];
+		while (ranked.length < entries.length) {
+			let nextGroup;
+			let nextScore = -Infinity;
+			for (const group of groups) {
+				const candidate = group.candidates[group.used];
+				if (!candidate) continue;
+				const score = candidate.score - .25 * Math.min(5, group.used);
+				if (score > nextScore || score === nextScore && compare(candidate, nextGroup.candidates[nextGroup.used]) < 0) {
+					nextGroup = group;
+					nextScore = score;
+				}
+			}
+			ranked.push(nextGroup.candidates[nextGroup.used++].entry);
+		}
+		return ranked;
+	}
+
+	function appTopicThreadsByCount(entries) {
+		const sorted = [...entries].sort((a, b) => (b.thread.comments ?? 1) - (a.thread.comments ?? 1) || a.discussion.key.localeCompare(b.discussion.key));
+		const bySource = new Map();
+		for (const entry of sorted) {
+			const source = entry.discussion.source;
+			if (!bySource.has(source)) bySource.set(source, []);
+			bySource.get(source).push(entry);
+		}
+		const sources = [...bySource.values()];
+		const ranked = sources.map((group) => group[0]);
+		for (const zero of [false, true]) {
+			const groups = sources.map((group) => group.slice(1).filter(({ thread }) => (thread.comments === 0) === zero));
+			for (let i = 0; groups.some((group) => group.length > i); i++) {
+				for (const group of groups) if (group[i]) ranked.push(group[i]);
+			}
+		}
+		return ranked;
+	}
+
+	function rankAppTopicDiscussions(reading) {
+		const panel = reading.discussionPanel;
+		const { candidates, topicLabel } = panel;
+		panel.ranked = appTopicUsesBest(reading) ? appTopicBestThreads(candidates, topicLabel) : appTopicThreadsByCount(candidates);
+	}
+
 	function syncAppTopicDiscussions(reading, scroller, article) {
 		const panel = reading.discussionPanel ||= { controller: new AbortController(), actors: new Map(), details: new Map(),
 			results: new Map(), active: new Map(), nodes: new Map(), revisions: new Map(), hnItems: new Map(),
@@ -53485,21 +53656,9 @@ ${frontPageChooserHTML()}
 			const previous = unique.get(discussion.key);
 			if (!previous || (thread.comments ?? -1) > (previous.thread.comments ?? -1)) unique.set(discussion.key, entry);
 		}
-		const sorted = [...unique.values()].sort((a, b) => (b.thread.comments ?? 1) - (a.thread.comments ?? 1) || a.discussion.key.localeCompare(b.discussion.key));
-		const bySource = new Map();
-		for (const entry of sorted) {
-			const source = entry.discussion.source;
-			if (!bySource.has(source)) bySource.set(source, []);
-			bySource.get(source).push(entry);
-		}
-		const sources = [...bySource.values()];
-		panel.ranked = sources.map((group) => group[0]);
-		for (const zero of [false, true]) {
-			const groups = sources.map((group) => group.slice(1).filter(({ thread }) => (thread.comments === 0) === zero));
-			for (let i = 0; groups.some((group) => group.length > i); i++) {
-				for (const group of groups) if (group[i]) panel.ranked.push(group[i]);
-			}
-		}
+		panel.candidates = [...unique.values()];
+		panel.topicLabel = article.topic.label;
+		rankAppTopicDiscussions(reading);
 		if (panel.selected && !panel.entries.has(panel.selected)) {
 			panel.selected = null;
 			panel.detail?.remove();

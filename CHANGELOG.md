@@ -25,6 +25,9 @@ use to detect updates, so every release bumps it.
   unchanged.
 - Topic Articles keep cited reporting visible during a refresh and can show
   newly reported developments under What changed.
+- Best in Topic Articles starts with relevant discussions across enabled
+  sources, gives replies that add evidence more weight, and keeps comments
+  already shown in place as more arrive.
 - Topic matching better recognizes the same post-IPO sell-off across sources.
 - By topic prefers images from the linked articles and ranks Front Pages topics
   using recency, discussion activity, and distinct source articles.
