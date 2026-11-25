@@ -29840,7 +29840,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			}
 		};
 		const interruptPaint = () => {
-			if (paintingActive && !paintInterrupted) {
+			if (paintingActive && !paintInterrupted && revision !== paintedRevision) {
 				paintInterrupted = true;
 				discussionRenderRun++;
 				sidebarGeneration++;
@@ -40769,6 +40769,7 @@ ${READER_LIST_CSS}
 	gap:5px;
 	padding:0;
 	font-size:10px;
+	line-height:1.4;
 }
 
 .app-discussion-sort .settings-select {

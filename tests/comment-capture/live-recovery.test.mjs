@@ -405,13 +405,14 @@ test('Reader Sync still requests a working Reddit feed after an individual discu
   assert(original.includes(seam));
   const stagedFeed = 'if (!batch.reuseFresh && (batch.feedOnly || appState || isBrowsing(sidebarUI))) {';
   assert(original.includes(stagedFeed));
-  const source = original.replace(seam, 'new Promise((resolve) => setTimeout(resolve, 3000)).then(() => renderAppList({ force: true, redditReady })).finally(finishFeed),')
+  const source = original.replace(seam, 'Promise.resolve(window.__holdDeniedThreadFeed).then(() => renderAppList({ force: !sharedRefreshSince, redditReady })).finally(finishFeed),')
     .replace(stagedFeed,'if (!window.__skipStagedFeed && !batch.reuseFresh && (batch.feedOnly || appState || isBrowsing(sidebarUI))) {');
   const app = await launchApp({ source, sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com'], settings: { sources: { hn: true, reddit: true }, updateCheck: false, frontPageMode: 'sources' }, values: { 'HNewhere:reddit_read_window_notice': 2 }, responses: [
     { match: (path) => path.includes('/api/posts/search'), json: { data: [post] } },
     { match: (path) => path.includes('/api/comments/tree'), json: { data: [comment] } },
   ] });
   let denyThread = false;
+  let threadDenied = false;
   let denyFeed = false;
   const calls = [];
   await app.context.route('https://www.reddit.com/**', async (route) => {
@@ -419,22 +420,30 @@ test('Reader Sync still requests a working Reddit feed after an individual discu
     if (denyThread) calls.push(path);
     if (path === '/r/popular.json' && denyFeed) return route.fulfill({ status: 403, contentType: 'application/json', body: '{"message":"Forbidden"}' });
     if (path.includes('/comments/') && denyThread) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      return route.fulfill({ status: 403, contentType: 'application/json', body: '{"message":"Forbidden"}' });
+      await route.fulfill({ status: 403, contentType: 'application/json', body: '{"message":"Forbidden"}' });
+      threadDenied = true;
+      return;
     }
     const body = path === '/' ? '<!doctype html><title>Reddit fixture</title>' : path === '/api/me.json' ? JSON.stringify({ data: { name: 'fixture-user' } }) : path.includes('/comments/') ? JSON.stringify([{ data: { children: [{ kind: 't3', data: post }] } }, { data: { children: [comment] } }]) : JSON.stringify({ data: { children: [{ kind: 't3', data: post }] } });
     await route.fulfill({ status: 200, contentType: path === '/' ? 'text/html' : 'application/json', body });
   });
   try {
     await app.page.goto('https://backchnnl.app/');
+    const readerReady = () => app.store.get('HNewhere:reddit_shared_refresh')?.state === 'done' &&
+      app.context.pages().every((page) => page === app.page);
+    assert(await waitFor(readerReady, 15000), 'the initial feed refresh finishes');
     await app.page.locator('#app-list-body .browse-title-link', { hasText: STORIES[0].title }).first().click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count() === 1, 20000));
-    assert(await waitFor(async () => await app.page.locator('#app-list-sync').getAttribute('aria-busy') !== 'true', 15000), 'the initial automatic refresh completes before testing manual Sync');
+    assert(await waitFor(readerReady, 15000), 'the article read finishes and releases its Reddit tab');
     denyThread = true;
-    await app.page.evaluate(()=>window.__skipStagedFeed=true);
+    await app.page.evaluate(() => {
+      window.__skipStagedFeed = true;
+      window.__holdDeniedThreadFeed = new Promise(resolve => { window.__resumeDeniedThreadFeed = resolve; });
+    });
     await app.page.locator('#app-list-sync').click();
+    assert(await waitFor(() => threadDenied, 15000), 'a discussion request was denied');
+    await app.page.evaluate(() => window.__resumeDeniedThreadFeed());
     assert(await waitFor(async () => await app.page.locator('#app-list-sync').getAttribute('aria-busy') !== 'true', 25000));
-    assert(calls.some((path) => path.includes('/comments/')), 'a discussion request was denied');
     assert(calls.includes('/r/popular.json'), `the separately accessible feed is still requested: ${calls.join(', ')}`);
     assert(calls.findIndex((path) => path.includes('/comments/')) < calls.indexOf('/r/popular.json'), `the denial precedes the feed request: ${calls.join(', ')}`);
     assert.equal(await app.page.locator('#app-list-body .browse-feed-status').count(), 0, 'an unrelated discussion denial does not mark the feed unavailable');
