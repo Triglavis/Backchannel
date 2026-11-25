@@ -18039,8 +18039,8 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 		return tags;
 	}
 
-	function readerSubjectWords(text) {
-		return (String(text || "").normalize("NFKC").match(/[\p{L}\p{N}]+/gu) || []).slice(0, 30);
+	function readerSubjectWords(text, maxWords = 30) {
+		return (String(text || "").normalize("NFKC").match(/[\p{L}\p{N}]+/gu) || []).slice(0, maxWords);
 	}
 
 	function readerSubjectPaths(url) {
@@ -18119,10 +18119,10 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			.replace(/\bUnited Kingdom\b|\bU\.K\b\.?/gi, "UK");
 	}
 
-	function readerStoryTerms(title) {
+	function readerStoryTerms(title, maxWords = 30) {
 		let text = readerStoryText(title).toLowerCase().replace(/[’']s\b/g, "").replace(/\bcentres?\b/g, "center");
 		for (const [word, forms] of READER_STORY_ACTIONS) text = text.replace(forms, word);
-		return new Set(readerSubjectWords(text).filter((word) => readerSubjectWord(word) &&
+		return new Set(readerSubjectWords(text, maxWords).filter((word) => readerSubjectWord(word) &&
 			!/^(?:reports?|reportedly|coverage|developments?)$/.test(word)).map(readerSubjectTerm));
 	}
 
@@ -52405,6 +52405,8 @@ ${frontPageChooserHTML()}
 	const APP_TOPIC_THREAD_BATCH = 8;
 	const APP_TOPIC_THREAD_SAMPLE = 8;
 	const APP_TOPIC_BEST_WAIT_MS = 400;
+	const APP_TOPIC_BEST_MIXED_WAIT_MS = 1600;
+	const APP_TOPIC_BEST_PREVIEW = 4;
 
 	function appTopicUsesBest(reading) {
 		return (reading.settings.commentSort || "best") === "best";
@@ -52841,15 +52843,21 @@ ${frontPageChooserHTML()}
 	}
 
 	function orderAppTopicComments(reading, rows) {
-		const ranked = rows.map(({ entry, row }, position) => ({ entry, row, position, live: false, size: 0,
-			createdAt: Number(row.comment.createdAt) || 0, unread: isNewComment(row.comment, appState.seen?.[entry.discussion.key]) }));
+		const ranked = rows.map((item, position) => {
+			const { entry, row } = item;
+			return { ...item, position, live: false, size: 0,
+				createdAt: Number(row.comment.createdAt) || 0, unread: isNewComment(row.comment, appState.seen?.[entry.discussion.key]) };
+		});
 		return sortCommentEntries(ranked, { sort: reading.settings.commentSort, unreadFirst: reading.settings.newCommentsFirst });
 	}
 
-	const APP_TOPIC_COMMENT_EVIDENCE_LIFT = 4;
+	const APP_TOPIC_COMMENT_EVIDENCE_LIFT = 6;
+	const APP_TOPIC_COMMENT_CONTEXT_LIFT = 2;
+	const APP_TOPIC_COMMENT_UNANCHORED_WEIGHT = -5;
+	const APP_TOPIC_COMMENT_REACTION_WEIGHT = -8;
 	const APP_TOPIC_COMMENT_REACTION = /^(?:no shit(?:,? [\p{L}\d]{1,12})?|well[,\s]+duh|duh|wow|lol|lmao|thanks(?: for (?:sharing|posting))?|exactly|this|same|yep|yup)[.!?…\s]*$/iu;
 	const APP_TOPIC_COMMENT_HOUSEKEEPING = /^(?:comments (?:were |have been )?moved to (?:https?:\/\/|another (?:thread|discussion)\b)|(?:i |we )?had to (?:edit|shorten|mangle|trim)\b[^.!?]{0,100}\btitle\b[^.!?]{0,80}\b(?:limit|fit)\b)/i;
-	const APP_TOPIC_COMMENT_EXPLANATION = /\b(?:because|which (?:means|explains)|as a result|due to|(?:found|recorded|showed?|confirms?|states?|reads|wrote|reported) that)\b/i;
+	const APP_TOPIC_COMMENT_EXPLANATION = /\b(?:because|which (?:means|explains)|as a result|due to|so (?:i|we) (?:suspect|expect)|(?:found|recorded|showed?|confirms?|states?|reads|wrote|reported) that)\b/i;
 	const APP_TOPIC_COMMENT_FIRSTHAND = /\b(?:i|we) (?:personally |previously )?(?:worked (?:as|at|for|on)|(?:built|tested|measured|observed|saw|ran|inspected|audited|reproduced|maintained|implemented)\b)/i;
 	const APP_TOPIC_COMMENT_MEASUREMENT = /\b\d+(?:[.,]\d+)?\s*(?:%|(?:m(?:m|s|in)?|s|km|kg|hz|gb|ms|seconds?|minutes?|hours?|days?|weeks?|years?|million|billion)\b)|\b(?:section|figure|table|version|paragraph)\s+\d/i;
 	const appTopicCommentSignals = new WeakMap();
@@ -52868,19 +52876,26 @@ ${frontPageChooserHTML()}
 			const explanation = APP_TOPIC_COMMENT_EXPLANATION.test(text);
 			const firsthand = APP_TOPIC_COMMENT_FIRSTHAND.test(text);
 			const evidence = !low && text.length >= 90 && (quote || (explanation && (link || measurement || firsthand)) || (firsthand && measurement));
-			signals = { low, terms: evidence ? appTopicDiscussionTerms(text) : null };
+			signals = { evidence, terms: low ? null : appTopicDiscussionTerms(text, 90) };
 			appTopicCommentSignals.set(comment, signals);
 		}
-		if (!signals.terms) return signals.low ? -1 : 0;
+		if (!signals.terms) return APP_TOPIC_COMMENT_REACTION_WEIGHT;
 		let context = appTopicCommentContext.get(entry);
 		if (!context) {
-			context = new Set([reading.discussionPanel.topicLabel, entry.source.title, entry.thread.title].flatMap((title) =>
-				[...appTopicDiscussionTerms(title)]));
+			const { topicTerms: topic, briefTerms } = reading.discussionPanel;
+			const references = new Set([...topic, ...briefTerms, ...appTopicDiscussionTerms(entry.source.title), ...appTopicDiscussionTerms(entry.thread.title)]);
+			context = { topic, references };
 			appTopicCommentContext.set(entry, context);
 		}
 		let matches = 0;
-		for (const term of signals.terms) if (context.has(term) && ++matches === 2) return 1;
-		return 0;
+		let topicMatches = 0;
+		for (const term of signals.terms) {
+			if (context.references.has(term)) matches++;
+			if (context.topic.has(term)) topicMatches++;
+		}
+		if (signals.evidence && (topicMatches > 0 && matches >= 2 || matches >= 3)) return APP_TOPIC_COMMENT_EVIDENCE_LIFT;
+		if ((topicMatches >= 2 || topicMatches > 0 && matches >= 4) && signals.terms.size >= matches + 3) return APP_TOPIC_COMMENT_CONTEXT_LIFT;
+		return matches === 0 && signals.terms.size < 12 ? APP_TOPIC_COMMENT_UNANCHORED_WEIGHT : 0;
 	}
 
 	function appTopicFeedRows(reading, selected) {
@@ -52911,11 +52926,17 @@ ${frontPageChooserHTML()}
 			items.forEach((item, sourceRank) => {
 				item.sourceRank = sourceRank;
 				item.contribution = appTopicCommentContribution(reading, item.entry, item.row.comment);
-				item.bestPosition = item.rank + sourceRank - Math.max(0, item.contribution) * APP_TOPIC_COMMENT_EVIDENCE_LIFT;
 			});
 		}
-		if (best) unique.sort((a, b) => Number(a.contribution < 0) - Number(b.contribution < 0) ||
-			a.bestPosition - b.bestPosition || b.contribution - a.contribution || a.sourceRank - b.sourceRank || tie(a, b));
+		if (best) {
+			const grounded = unique.some((item) => item.contribution > 0);
+			for (const item of unique) {
+				if (!grounded && item.contribution === APP_TOPIC_COMMENT_UNANCHORED_WEIGHT) item.contribution = 0;
+				item.bestPosition = item.rank + item.sourceRank - item.contribution;
+			}
+			unique.sort((a, b) => Number(a.contribution === APP_TOPIC_COMMENT_REACTION_WEIGHT) - Number(b.contribution === APP_TOPIC_COMMENT_REACTION_WEIGHT) ||
+				a.bestPosition - b.bestPosition || b.contribution - a.contribution || a.sourceRank - b.sourceRank || tie(a, b));
+		}
 		return orderAppTopicComments(reading, unique);
 	}
 
@@ -53026,21 +53047,7 @@ ${frontPageChooserHTML()}
 
 	function appTopicBestPage(reading, rows, threads, waiting) {
 		const panel = reading.discussionPanel;
-		const best = panel.bestFeed ||= { visible: new Map(), unreadFirst: reading.settings.newCommentsFirst, ready: false, timer: null };
-		if (!best.ready) {
-			if (!rows.length) return [];
-			if (waiting) {
-				best.timer ??= setTimeout(() => {
-					best.timer = null;
-					best.ready = true;
-					updateAppTopicFeed(reading);
-				}, APP_TOPIC_BEST_WAIT_MS);
-				return [];
-			}
-			clearTimeout(best.timer);
-			best.timer = null;
-			best.ready = true;
-		}
+		const best = panel.bestFeed ||= { visible: new Map(), unreadFirst: reading.settings.newCommentsFirst };
 		const available = new Map(rows.map((item) => [item.row.comment.key, item]));
 		const selected = new Set(threads.map(({ discussion }) => discussion.key));
 		for (const [key, shown] of best.visible) {
@@ -53048,8 +53055,31 @@ ${frontPageChooserHTML()}
 			if (current?.entry.discussion.key === shown.entry.discussion.key) best.visible.set(key, current);
 			else if (!selected.has(shown.entry.discussion.key)) best.visible.delete(key);
 		}
+		if (best.target !== panel.target) {
+			clearTimeout(best.timer);
+			best.timer = null;
+			best.expired = false;
+			best.target = panel.target;
+			best.start = best.visible.size;
+		}
+		const mixed = reading.pending || threads.slice(0, panel.budget).some(({ discussion }) => discussion.source !== threads[0].discussion.source);
+		const preview = waiting && mixed;
+		const limit = preview ? Math.min(panel.target, best.start + APP_TOPIC_BEST_PREVIEW) : panel.target;
+		if (!waiting) {
+			clearTimeout(best.timer);
+			best.timer = null;
+			best.expired = true;
+		} else if (!best.expired && best.visible.size < limit && available.size > best.visible.size) {
+			best.timer ??= setTimeout(() => {
+				best.timer = null;
+				best.expired = true;
+				updateAppTopicFeed(reading);
+			}, mixed ? APP_TOPIC_BEST_MIXED_WAIT_MS : APP_TOPIC_BEST_WAIT_MS);
+		}
+		if (!best.expired) return [...best.visible.values()];
 		for (const [key, item] of available) {
-			if (best.visible.size >= panel.target) break;
+			if (best.visible.size >= limit) break;
+			if (preview && !(item.contribution > 0)) continue;
 			if (!best.visible.has(key)) best.visible.set(key, item);
 		}
 		return [...best.visible.values()];
@@ -53151,9 +53181,10 @@ ${frontPageChooserHTML()}
 		const failed = threads.some(({ discussion }) => panel.results.get(discussion.key)?.failed);
 		const restricted = threads.some(({ discussion }) => panel.results.get(discussion.key)?.data?.restricted);
 		const more = best ? rows.some(({ row }) => !panel.bestFeed.visible.has(row.comment.key)) : rows.length > panel.target;
-		const gathering = best && !panel.bestFeed.ready && rows.length > 0;
 		const short = (best ? visible.length : rows.length) < panel.target;
-		panel.status.textContent = !threads.length && panel.filter ? "No discussions selected." : visible.length ? "" : waiting ? "Loading comments…" :
+		const gathering = best && waiting && short;
+		panel.status.textContent = !threads.length && panel.filter ? "No discussions selected." :
+			visible.length ? gathering ? "Loading more comments…" : "" : waiting ? "Loading comments…" :
 			untried || expandable ? "No replies found in the discussions checked." : failed ? "Comments couldn’t be loaded." : restricted ? "No comments available here." : "No comments yet.";
 		panel.status.hidden = !panel.status.textContent;
 		panel.retry.hidden = panel.active.size > 0 || !failed || untried || expandable || more;
@@ -53552,8 +53583,8 @@ ${frontPageChooserHTML()}
 		return { update, clearFilter() { setFilter(null); close(true); } };
 	}
 
-	function appTopicDiscussionTerms(text) {
-		return readerStoryTerms(text.replace(/(?:https?:\/\/|www\.)\S+|@[\w.-]+/gi, " "));
+	function appTopicDiscussionTerms(text, maxWords) {
+		return readerStoryTerms(text.replace(/(?:https?:\/\/|www\.)\S+|@[\w.-]+/gi, " "), maxWords);
 	}
 
 	function appTopicThreadRelevance(topic, title) {
@@ -53658,6 +53689,9 @@ ${frontPageChooserHTML()}
 		}
 		panel.candidates = [...unique.values()];
 		panel.topicLabel = article.topic.label;
+		panel.topicTerms = appTopicDiscussionTerms(panel.topicLabel);
+		panel.briefTerms = new Set(article.sections.flatMap(({ paragraphs }) => paragraphs).slice(0, 12)
+			.flatMap(({ text }) => [...appTopicDiscussionTerms(text)]));
 		rankAppTopicDiscussions(reading);
 		if (panel.selected && !panel.entries.has(panel.selected)) {
 			panel.selected = null;
