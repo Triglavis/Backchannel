@@ -49989,7 +49989,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	}
 
 	function appTopicSoftwareSubject(group) {
-		const terms = new Set(readerTopicLabels(group).flatMap(readerSubjectWords).map((word) => word.toLowerCase()));
+		const terms = new Set(readerTopicLabels(group).flatMap((label) => readerSubjectWords(label)).map((word) => word.toLowerCase()));
 		return [...APP_TOPIC_SOFTWARE_EVIDENCE].find(([name, pattern]) =>
 			terms.has(name) && group.rows.some((row) => pattern.test(appTopicEvidence(row))))?.[0];
 	}
