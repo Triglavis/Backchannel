@@ -207,14 +207,31 @@ for (const [width, hasTouch] of [[1600, false], [320, true]]) {
 
 for(const width of [390])test(`${width}px Reader retains its bottom-right mobile-style action column`,{timeout:20000},async()=>{
   const story = STORIES[1];
-  const app=await launchApp({sharedStore:true,viewport:{width,height:900},votable:{[story.id]:true},settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
+  const app = await launchApp({
+    sharedStore: true, viewport: {width, height: 900}, votable: {[story.id]: true},
+    settings: {sources: {hn: true}, frontPageMode: 'sources', sourceRefreshMinutes: 0, updateCheck: false},
+    values: {
+      'HNewhere:frontpage_feed:/hn/front/': {
+        timestamp: Date.now(), stories: [{...story, source: 'hn', descendants: story.comments}],
+      },
+    },
+  });
   try{
-    await app.page.goto('https://backchnnl.app/');await app.page.locator('#app-list-body .browse-title-link').filter({hasText: story.title}).click();
+    await app.page.goto('https://backchnnl.app/');
+    const row = app.page.locator('#app-list-body .app-row').filter({hasText: story.title});
+    const more = row.getByRole('button', {name: 'More', exact: true});
+    await more.waitFor();
+    const menuBox = await more.evaluate(button => {
+      const {width, right} = button.getBoundingClientRect();
+      return {width, rightMargin: button.closest('.app-row').getBoundingClientRect().right - right};
+    });
+    assert.deepEqual(menuBox, {width: 24, rightMargin: 16});
+    await row.locator('.browse-title-link').click();
     const like=app.page.locator('#app-bar-like');
     await like.waitFor();
     await app.page.locator('#app-bar-view').waitFor();
     assert.equal(await app.page.locator('#app-bar-open').count(), 0);
-    const controls = ['#app-bar-save', '#app-bar-like', '#app-bar-view', '#app-bar-discussion'];
+    const controls = ['#app-bar-like', '#app-bar-view', '#app-bar-save', '#app-bar-discussion'];
     const boxes = await assertToolbarOrder(app.page, app.page.locator('#app-bar'), controls, 'y');
     for(const box of boxes)assert(Math.abs(box.x+box.width/2-(boxes[0].x+boxes[0].width/2))<1,'controls share a vertical center line');
     const bounds=await app.page.locator(width===390?'#app':'#app-article').boundingBox();
@@ -230,6 +247,9 @@ for(const width of [390])test(`${width}px Reader retains its bottom-right mobile
     await app.page.locator('#app-bar-view').click();
     await app.page.locator('#app-bar-discussion').click();
     const compose = app.page.getByRole('button', {name: 'Comment and note composer'});
+    await compose.waitFor();
+    const header = app.page.locator('#panel > header');
+    assert.equal(await header.getByRole('button', {name: 'Comment and note composer'}).count(), 1);
     const field = app.page.locator('#app-discussion-compose textarea');
     assert.equal(await field.isVisible(), false);
     await compose.click();

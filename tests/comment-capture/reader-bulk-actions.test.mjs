@@ -92,9 +92,14 @@ test("Right-click opens the same article menu as More, without view names", asyn
 		for (const [view, section, action] of [["unread", "Unread", "Hide"], ["all", "All articles", "Hide"], ["queue", "Queue", "Unqueue"], ["collection", "Collection", "Delete"]]) {
 			await page.locator(`#app-rail [data-app-view="${view}"]`).click();
 			const row = page.locator("#app-list-body .browse-row").filter({ has: page.getByRole("link", { name: story.title, exact: true }) });
-			await row.locator(".browse-more").click();
+			const more = row.locator(".browse-more");
+			await more.waitFor();
+			assert.equal(await more.getAttribute("aria-controls"), "app-row-menu", view);
+			assert.equal(await more.getAttribute("aria-expanded"), "false", view);
+			await more.click();
 			const menu = page.locator("#app-row-menu");
 			await menu.waitFor();
+			assert.equal(await more.getAttribute("aria-expanded"), "true", view);
 			const items = await menu.getByRole("menuitem").allTextContents();
 			assert.deepEqual(items.slice(0, 3), ["Open", "Open in new tab", action], view);
 			assert.deepEqual(items.slice(-2), ["Copy link", "Select link"], view);
@@ -102,6 +107,8 @@ test("Right-click opens the same article menu as More, without view names", asyn
 			await menu.getByRole("menuitem", { name: action, exact: true }).waitFor();
 			assert.equal(await menu.getByRole("menuitem", { name: /^(un)?watch$/i }).count(), 0);
 			await page.keyboard.press("Escape");
+			assert.equal(await more.getAttribute("aria-expanded"), "false", view);
+			assert(await more.evaluate((button) => button.matches(":focus")), view);
 			const target = view === "collection" ? row.locator(".browse-title-link") : row;
 			await row.evaluate((node) => node.addEventListener("contextmenu", (event) => {
 				const { clientX, clientY, defaultPrevented } = event;

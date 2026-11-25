@@ -162,12 +162,13 @@ test('a manual Reader Sync requested during an automatic refresh runs afterward'
     assert(await waitFor(()=>opened.length>0,8000));
     const helper=opened[0];
     await helper.waitForFunction(()=>typeof window.__resumeRedditIdentity==='function',null,{timeout:5000});
-    const before=app.requests.filter(request=>request.url==='https://news.ycombinator.com/news').length;
+    const feedRequests=()=>app.requests.filter(request=>request.url==='https://news.ycombinator.com/news').length;
+    assert.equal(feedRequests(),1,'the automatic refresh has already started Hacker News');
     await app.page.locator('#app-list-sync').click();
     await helper.evaluate(()=>window.__resumeRedditIdentity());
     assert(await waitFor(async()=>{
       for(const tab of opened.slice(1)) if(!tab.isClosed()) await tab.evaluate(()=>{window.__pauseRedditIdentity=false;window.__resumeRedditIdentity?.()}).catch(()=>{});
-      return app.requests.filter(request=>request.url==='https://news.ycombinator.com/news').length>=before+2;
+      return feedRequests()===2;
     },12000),'both the automatic refresh and the requested Sync fetch the feed');
     assert(await waitFor(async()=>await app.page.locator('#app-list-sync').getAttribute('aria-busy')!=='true',15000));
   } finally {await app.browser.close()}

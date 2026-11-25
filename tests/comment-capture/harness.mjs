@@ -286,6 +286,7 @@ function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts =
 		getResourceText: async () => "",
 		xmlHttpRequest(options) {
 			const request = { url: options.url, method: options.method || "GET", anonymous: Boolean(options.anonymous), responseType: options.responseType || "" };
+			if (options.headers !== undefined) request.headers = options.headers;
 			if (options.data !== undefined) request.hasBody = true;
 			window.__gmXHR(request).then(
 				(response) => {

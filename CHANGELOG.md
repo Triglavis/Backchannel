@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.19.4] — 2026-11-25
+
+### Fixed
+
+- Phone Reader list menus use consistent sizing and spacing. Topic Article
+  cards offer actions for opening the article and managing its links.
+- Regular and Topic Articles share the Discussion header layout. On a phone,
+  the composer toggle sits beside Sources, and the floating controls run
+  bottom to top as Discussion, Save, and Aa.
+- Reader refreshes stale feeds on arrival according to the Sync schedule.
+  Sync from the phone list refreshes the feeds without rechecking the
+  previously opened article's discussion.
+- Check for updates shows a checkmark and confirms when Backchannel is
+  up to date.
+
 ## [1.6.19.3] — 2026-11-25
 
 ### Changed
@@ -2968,6 +2983,7 @@ commit history. Entries for 1.4.7 through 1.5.3 are summarized from their releas
 commits rather than written at the time.
 
 [Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...main
+[1.6.19.4]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.3...tags/v1.6.19.4
 [1.6.19.3]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...tags/v1.6.19.3
 [1.6.19.2]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.1...tags/v1.6.19.2
 [1.6.19.1]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19...tags/v1.6.19.1

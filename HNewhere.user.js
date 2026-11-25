@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.19.3
+// @version      1.6.19.4
 // @license      GPL-3.0-or-later
 // @copyright    2026 Triglavis LLC
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -4254,6 +4254,7 @@ ${links.join("\n")}
 
 		const IDLE = "Check for updates";
 		const CHECKING = '<svg class="settings-update-spinner" viewBox="0 0 12 12" aria-hidden="true"><g class="settings-update-spin"><circle cx="6" cy="6" r="4.6"/></g></svg><span class="settings-update-glimmer">Checking…</span>';
+		const CURRENT = `<svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="m2.3 6 2.4 2.4 5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>You're up to date`;
 		const FAILED = "Couldn’t reach GitHub";
 		const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
@@ -4310,8 +4311,8 @@ ${links.join("\n")}
 
 				const [result] = await Promise.all([checkForUpdates({ manual: true }), wait(900)]);
 
-				if (!result.ok) {
-					await show(FAILED);
+				if (!result.ok || !result.releases.length) {
+					await show(result.ok ? CURRENT : FAILED);
 					await wait(2000);
 				}
 
@@ -7068,7 +7069,7 @@ ${
 		}
 	}
 
-	function syncReaderViews(onThreadsLoaded = null, redditReady = null) {
+	function syncReaderViews(onThreadsLoaded = null, redditReady = null, { feedOnly = false } = {}) {
 		let feedDone = false;
 		let discussionDone = false;
 		let released = false;
@@ -7079,7 +7080,7 @@ ${
 		const finishFeed = () => { feedDone = true; return finishRead(); };
 		const finishDiscussion = () => { discussionDone = true; return finishRead(); };
 		const state = appState;
-		const discussion = state?.discussionSync
+		const discussion = feedOnly ? Promise.resolve() : state?.discussionSync
 			? state.discussionSync(finishDiscussion, redditReady)
 			: state?.open && canReconcileDiscussion(state.ui)
 				? syncDiscussions(state.ui, renderedDiscussions, finishDiscussion, { redditReady })
@@ -7300,9 +7301,9 @@ ${
 		paintAppDiscussionSync();
 	}
 
-	function beginSyncOperation(kind, { target = openPageKey(), redditReady = null } = {}) {
-		const parent = [...syncOperations.values()].filter((entry) => entry.kind === "sync" || entry.target === target).at(-1);
-		const operation = { id: ++syncOperationSequence, kind, target, startedAt: Date.now(), status: "running", results: new Map(), cancellations: new Set() };
+	function beginSyncOperation(kind, { target = openPageKey(), redditReady = null, feedOnly = false } = {}) {
+		const parent = [...syncOperations.values()].filter((entry) => entry.kind === "sync" ? !entry.feedOnly : entry.target === target).at(-1);
+		const operation = { id: ++syncOperationSequence, kind, target, feedOnly, startedAt: Date.now(), status: "running", results: new Map(), cancellations: new Set() };
 		const outcome = () => [...operation.results.values()].some((result) => !["ok", "empty", "cached"].includes(result.status)) ? "partial" : "ok";
 		syncOperations.set(operation.id, operation);
 		paintSyncOperations();
@@ -7350,7 +7351,7 @@ ${
 
 	function performSync(task, options = {}) {
 		const runId = ++syncRunId;
-		const operation = beginSyncOperation("sync");
+		const operation = beginSyncOperation("sync", { feedOnly: options.feedOnly });
 		const readActionId = redditReadActionId;
 		let completedActionId = readActionId;
 		let partial = true;
@@ -11908,6 +11909,16 @@ button {
 		return appState?.view || sidebarUI?.browseHome?.view;
 	}
 
+	async function frontPageRefreshTimes(feeds, settings) {
+		const combined = await load(frontPageCacheKey(feeds), null);
+		const cooldown = feeds.some((feed) => feed.source === "reddit") ? await load(REDDIT_POLL_KEY, null) : null;
+		const now = Date.now();
+		return Promise.all(feeds.map(async (feed) => {
+			const cached = await readFrontPageFeedCache(feed, legacyFrontPageFeed(combined, feed));
+			return Math.max(frontPageNextAttempt(cached, settings, now), feed.source === "reddit" ? cooldown?.until || 0 : 0);
+		}));
+	}
+
 	function scheduleFrontPageRefresh() {
 		const schedule = ++frontPageScheduleId;
 		window.clearTimeout(frontPageRefreshTimer);
@@ -11924,13 +11935,7 @@ button {
 			if (!sourceRefreshInterval(settings)) return;
 			const feeds = frontPageFeedsForView(settings, activeFrontPageView());
 			if (!feeds.length) return;
-			const combined = await load(frontPageCacheKey(feeds), null);
-			const cooldown = feeds.some((feed) => feed.source === "reddit") ? await load(REDDIT_POLL_KEY, null) : null;
-			const now = Date.now();
-			const due = await Promise.all(feeds.map(async (feed) => {
-				const cached = await readFrontPageFeedCache(feed, legacyFrontPageFeed(combined, feed));
-				return Math.max(frontPageNextAttempt(cached, settings, now), feed.source === "reddit" ? cooldown?.until || 0 : 0);
-			}));
+			const due = await frontPageRefreshTimes(feeds, settings);
 			if (schedule !== frontPageScheduleId || document.visibilityState === "hidden" || !activeFrontPageUI() || frontPageRequests.size) return;
 			frontPageRefreshTimer = window.setTimeout(() => {
 				if (Math.min(...due) > Date.now()) scheduleFrontPageRefresh();
@@ -11939,19 +11944,36 @@ button {
 		})().catch(console.error);
 	}
 
-	async function refreshActiveFrontPages() {
+	async function refreshActiveFrontPages({ startup = false } = {}) {
 		if (frontPageRefreshRunning || frontPageRequests.size || document.visibilityState === "hidden") return;
 		const ui = activeFrontPageUI();
-		if (!ui || !sourceRefreshInterval(await loadSettings())) return;
+		if (!ui) return;
+		const view = activeFrontPageView();
+		const previousSync = syncRunId;
+		const settings = await loadSettings();
+		if (!sourceRefreshInterval(settings)) return;
+		const feeds = frontPageFeedsForView(settings, view);
+		const times = await frontPageRefreshTimes(feeds, settings);
+		const now = Date.now();
+		const due = feeds.filter((_, index) => times[index] <= now);
+		if (!due.length || frontPageRefreshRunning || frontPageRequests.size || activeFrontPageUI() !== ui || activeFrontPageView() !== view) {
+			if (!startup) scheduleFrontPageRefresh();
+			return;
+		}
 		frontPageRefreshRunning = true;
 		try {
 			const task = async (_releaseRead, redditReady) => {
-				if (document.visibilityState === "hidden" || activeFrontPageUI() !== ui) return;
+				if (document.visibilityState === "hidden" || activeFrontPageUI() !== ui || activeFrontPageView() !== view) return;
 				const options = { automatic: true, redditReady };
 				return appState ? renderAppList(options) : renderBrowseView(ui, options);
 			};
-			const allowHelper = !usesRedditReadWindow() || !redditReadSourceOn || usesManagerTabs() && Boolean(await load(REDDIT_READ_NOTICE_KEY, false));
+			const redditDue = due.some((feed) => feed.source === "reddit");
+			const allowHelper = !usesRedditReadWindow() || !redditReadSourceOn || redditDue &&
+				(!startup || !redditReadInitialAttempted) && usesManagerTabs() && Boolean(await load(REDDIT_READ_NOTICE_KEY, false));
+			if (previousSync !== syncRunId) return startup;
+			if (startup && redditDue) redditReadInitialAttempted = true;
 			await runSync(task, { automatic: true, feedOnly: true, allowHelper, overlapReddit: true });
+			return true;
 		} finally {
 			frontPageRefreshRunning = false;
 			scheduleFrontPageRefresh();
@@ -11995,7 +12017,7 @@ button {
 		const redditFeed = feeds.find((feed) => feed.source === "reddit");
 		const redditCached = redditFeed ? await load(frontPageFeedKey(redditFeed), null) || await load(frontPageCacheKey(feeds), null) : null;
 
-		if (!options.cachedOnly && frontPageNextAttempt(redditCached, settings) <= Date.now() && sourceRefreshInterval(settings) && document.visibilityState !== "hidden" && activeFrontPageUI() && usesRedditReadWindow() && !redditReadInitialAttempted && !redditReadBatch && isSidebarVisible() && redditFeed) {
+		if (!options.automatic && !options.cachedOnly && frontPageNextAttempt(redditCached, settings) <= Date.now() && sourceRefreshInterval(settings) && document.visibilityState !== "hidden" && activeFrontPageUI() && usesRedditReadWindow() && !redditReadInitialAttempted && !redditReadBatch && isSidebarVisible() && redditFeed) {
 			redditReadInitialAttempted = true;
 			const scheduledAction = redditReadActionId;
 			const [accepted, cooldown] = await Promise.all([load(REDDIT_READ_NOTICE_KEY, false), load(REDDIT_POLL_KEY, null)]);
@@ -16611,14 +16633,14 @@ html[data-backchannel-installed] .chin {
 	${meta}
 	</div>
 	</div>
-	${readerRow && !isWriting ? `<button class="browse-more app-head-icon" type="button" aria-label="More" aria-haspopup="menu"${options.readerRow ? ' aria-expanded="false"' : ""}>${MORE_ICON}</button>` : ""}
+	${options.readerRow && !appState && !isWriting ? `<button class="browse-more app-head-icon" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">${MORE_ICON}</button>` : ""}
 	`;
 		registerSidebarSaveControls(row);
 
 		const more = row.querySelector(".browse-more");
 
-		if (more && appState) {
-			wireAppRowMenu(row, more);
+		if (appState && !isWriting) {
+			mountAppRowMenu(row, (button) => appLinkRowMenuItems(row, button));
 		} else if (more) {
 			more.onclick = (event) => {
 				event.stopPropagation();
@@ -18569,11 +18591,10 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 <div class="browse-main">
 	<div class="story-title">${doc.url ? `<a class="browse-title-link" href="${escapeHTML(doc.url)}">${title}</a>` : title}</div>
 	<div class="browse-site reader-collection-meta">${escapeHTML(doc.site)}${doc.fresh ? `<span class="reader-collection-new">${doc.site ? " · " : ""}${doc.found ? escapeHTML(pluralize(doc.found, "new comment")) : "New discussion"}</span>` : ""}${tagLabels ? `${doc.site || doc.fresh ? " · " : ""}${tagLabels}` : ""}</div>
-</div>
-<button class="browse-more app-head-icon" type="button" aria-label="Actions for this page" aria-haspopup="menu" aria-expanded="false">${MORE_ICON}</button>`;
+</div>`;
 		const link = row.querySelector(".browse-title-link");
 		if (link) link.onclick = (event) => openStoryFromRow(documentStory(doc), event);
-		wireAppRowMenu(row, row.querySelector(".browse-more"), doc);
+		mountAppRowMenu(row, (button) => appLinkRowMenuItems(row, button, doc), { label: "Actions for this page" });
 		return row;
 	}
 
@@ -24127,15 +24148,13 @@ button.shortcut-key {
 }
 `;
 
-	function headerHTML({ subtitle = false, minimize = false, browse = false, hide = true, settings = true, title = "" } = {}) {
+	function headerHTML({ subtitle = false, minimize = false, browse = false, hide = true, settings = true } = {}) {
 		return `
 <header>
 
 <span class="header-title">
 ${
-	title
-		? `<span class="header-static-title">${escapeHTML(title)}</span>`
-		: browse
+	browse
 		? `<button id="browse-toggle" class="header-wordmark" type="button"
 title="${escapeHTML(browseLabel())}"><span
 class="wordmark-root"><b>Back</b>channel</span><span class="wordmark-more" aria-hidden="true">&#8943;</span><span
@@ -24147,12 +24166,11 @@ ${subtitle ? `<span id="header-subtitle" class="header-subtitle" role="status" a
 </span>
 
 <div class="header-actions">
-${title ? `<span id="app-discussion-sort" class="app-discussion-sort"></span><span id="app-discussion-meta" class="app-discussion-meta"></span><button id="app-discussion-sync-empty" class="app-head-icon" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>` : ""}
-${title ? "" : `<button id="comment-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="compose-dock" aria-label="Add a comment" title="Add a comment" hidden>
+<button id="comment-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="compose-dock" aria-label="Add a comment" title="Add a comment" hidden>
 <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false">
 <path fill="currentColor" fill-rule="evenodd" d="M3.7 2.5h8.6A1.5 1.5 0 0 1 13.8 4v5.5A1.5 1.5 0 0 1 12.3 11H7.6l-2.5 2.4V11H3.7A1.5 1.5 0 0 1 2.2 9.5V4A1.5 1.5 0 0 1 3.7 2.5ZM5.3 5.8a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Z"/>
 </svg>
-</button>`}
+</button>
 ${browse ? `<button id="browse-home-mark-read" type="button" aria-label="Mark all as read" title="Mark all as read" hidden>${APP_MARK_READ_ICON}</button><button id="browse-home-sync" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>` : ""}
 ${hide ? `<span class="hide-control">
 <button id="hide-site" class="has-scope" aria-haspopup="true" aria-expanded="false" aria-label="Disable Backchannel here" title="Disable Backchannel here">
@@ -24192,6 +24210,13 @@ ${
 }
 </header>
 `;
+	}
+
+	function appDiscussionHeaderHTML(title, actions, { topic = false, titleId = "" } = {}) {
+		return `<header class="app-discussion-header${topic ? " app-topic-discussion-head" : ""}">
+<div class="app-discussion-title"><h2 class="header-static-title"${titleId ? ` id="${escapeHTML(titleId)}"` : ""}>${escapeHTML(title)}</h2></div>
+<div class="app-discussion-actions ${topic ? "app-topic-controls" : "header-actions"}">${actions}</div>
+</header>`;
 	}
 
 	function settingsSelectHTML(id, setting, label, hint, options, extraItem = "") {
@@ -27310,7 +27335,11 @@ ${appMode ? appShellOpenHTML() : ""}<div id="panel"${appMode ? ' class="app-dock
 
 <div id="resize-handle" aria-hidden="true"></div>
 
-${headerHTML({ subtitle: true, minimize: !docked, browse: !appMode, hide: !appMode, settings: !appMode, title: appMode ? "Discussion" : "" })}
+${appMode ? appDiscussionHeaderHTML("Discussion", `
+<span id="app-discussion-sort" class="app-discussion-sort"></span><span id="app-discussion-meta" class="app-discussion-meta"></span>
+<button id="app-discussion-sync-empty" class="app-head-icon" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>
+<button id="app-bar-compose" class="app-head-icon" type="button" aria-label="Comment and note composer" aria-expanded="false" title="Comment and note composer" hidden>${APP_ICON('<path fill="currentColor" d="M3 2h6v1.5H3.5v9h9V7H14v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM12.3 1.7l2 2-6.7 6.7-2.5.5.5-2.5z"/>')}</button>
+`) : headerHTML({ subtitle: true, minimize: !docked, browse: true })}
 ${appMode ? "" : `<div class="toast-viewport">${TOAST_HTML}</div>`}
 <div class="toast-layer">${appMode ? "" : `<div id="compose-dock" class="compose-dock" hidden><button id="compose-dock-close" class="compose-dock-close" type="button" aria-label="Close the composer" title="Close">&times;</button><div id="compose-dock-slot" class="compose-dock-slot"></div></div>`}</div>
 <div id="comments">
@@ -38727,6 +38756,7 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	--rail-column:50px;
 	--app-split:.6;
 	--app-ui-font:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+	--app-discussion-header-rule:var(--border-soft);
 	display:grid;
 	grid-template-columns:var(--rail-column) min(var(--app-list-width, 300px), calc(100% - var(--rail-column) - 201px)) minmax(0, 1fr);
 	grid-template-rows:minmax(0, 1fr);
@@ -39863,7 +39893,7 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-chronology li:last-child .app-topic-event { border-color:transparent; padding-bottom:0; }
 .app-topic-event .app-topic-credit { margin-bottom:.35em; color:var(--reader-link); font-weight:600; }
 .app-topic-sources { margin-top:1.65em; padding-top:.8em; border-top:1px solid var(--reader-rule); }
-.app-topic-sources > h2, .app-topic-discussion-head h2 { margin:0 0 .35em; color:var(--reader-ink); font:650 .95em/1.45 var(--topic-sans); }
+.app-topic-sources > h2 { margin:0 0 .35em; color:var(--reader-ink); font:650 .95em/1.45 var(--topic-sans); }
 .app-topic-sources > ol > li { padding:.52em 0; border-bottom:1px solid var(--reader-rule); }
 .app-topic-sources > ol > li:last-child { border-bottom:0; }
 .app-topic-sources .app-topic-cite { top:auto; margin:0 .12em; padding:.2em; background:transparent; color:inherit; font:normal .82em/1 var(--topic-sans); font-variant-numeric:tabular-nums; }
@@ -39912,13 +39942,9 @@ ${SETTINGS_MODAL_CSS}
 	color-scheme:var(--reader-scheme);
 	margin-top:1.6em; padding-top:.8em; border-top:1px solid var(--reader-rule);
 }
-.app-topic-discussion-head {
-	position:relative; z-index:2; display:flex; align-items:center; flex-wrap:wrap; gap:2px 8px;
-	min-height:36px; margin-bottom:.45em; border-bottom:1px solid var(--reader-rule);
-}
-.app-topic-discussion-head h2 { margin:0; }
+.app-topic-discussion-head { z-index:2; }
 .app-topic-discussion-head:has(.source-menu:not(.hidden), .settings-select-toggle[aria-expanded="true"]) { z-index:4; }
-.app-topic-controls { display:flex; align-items:center; gap:2px; margin-inline-start:auto; font:12px/1.4 var(--app-ui-font); }
+.app-topic-controls { margin-inline-start:auto; font:12px/1.4 var(--app-ui-font); }
 .app-topic-controls .discussion-thread-link { color:var(--reader-link); }
 .app-topic-controls .app-sources-head { align-items:center; justify-content:space-between; }
 .app-topic-controls .choice-label { white-space:normal; }
@@ -40085,6 +40111,11 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-meta { color:var(--muted); font-size:11px; }
 .app-topic-more { min-height:36px; padding:6px 0; }
 .app-topic-more-status { color:var(--muted); }
+.app-topic-list-row {
+	position:relative;
+	border-bottom:1px solid var(--border-soft);
+}
+
 .app-topic-row {
 	display:flex;
 	align-items:center;
@@ -40092,9 +40123,8 @@ ${SETTINGS_MODAL_CSS}
 	box-sizing:border-box;
 	width:100%;
 	min-height:52px;
-	padding:8px 12px;
+	padding:8px 44px 8px 12px;
 	border:0;
-	border-bottom:1px solid var(--border-soft);
 	background:none;
 	color:var(--text);
 	text-align:left;
@@ -40102,8 +40132,10 @@ ${SETTINGS_MODAL_CSS}
 	cursor:pointer;
 }
 
-.app-topic-row:hover { background:var(--hover-tint); }
-.app-topic-row[aria-current] { background:var(--open-row); }
+@media (hover: hover) {
+	.app-topic-list-row:hover { background:var(--hover-tint); }
+}
+.app-topic-list-row:has(> .app-topic-row[aria-current]) { background:var(--open-row); }
 .app-topic-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .app-topic-row:not(.is-unread) .app-topic-name { color:var(--muted); }
 .app-topic-media {
@@ -40158,10 +40190,9 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-picture[src*="screenshot" i] { object-position:center bottom; }
 .app-topic-name { display:block; font-weight:600; overflow-wrap:anywhere; }
 .app-topic-meta { display:block; }
-.app-topic-chevron { margin-left:auto; color:var(--muted); }
 
 @media (pointer:coarse) {
-	.app-topic-row { padding-inline:16px; }
+	.app-topic-row { padding-inline-start:16px; }
 }
 
 .app-selection-bar {
@@ -40666,17 +40697,52 @@ ${READER_LIST_CSS}
 	cursor:default;
 }
 
-#panel.app-docked > header {
+.app-discussion-header {
 	--header-bg:var(--bg);
 	--header-text:var(--text);
-	--subtitle-stage:var(--meta);
-	--subtitle-stage-peak:var(--text);
-	flex-shrink:0;
-	height:36px;
 	box-sizing:border-box;
-	padding-top:0;
-	padding-bottom:0;
+	flex:none;
+	height:36px;
+	padding:0 8px;
 	border-bottom:1px solid var(--border-soft);
+	font:700 13px/1.25 var(--app-ui-font);
+}
+
+.app-discussion-title {
+	min-width:0;
+	padding-inline-start:12px;
+}
+
+.app-discussion-header .header-static-title {
+	margin:0;
+	font:inherit;
+}
+
+.app-discussion-actions {
+	display:flex;
+	flex:none;
+	align-items:center;
+	gap:2px;
+}
+
+@media (min-width:701px) {
+	.app-discussion-header.app-topic-discussion-head {
+		min-height:36px;
+		height:auto;
+		margin-bottom:.45em;
+		padding:0;
+		flex-wrap:wrap;
+		gap:2px 8px;
+		font:inherit;
+	}
+
+	.app-topic-discussion-head .app-discussion-title {
+		padding-inline-start:0;
+	}
+
+	.app-topic-discussion-head .header-static-title {
+		font:650 .95em/1.45 var(--topic-sans);
+	}
 }
 
 #panel.app-docked .toast-layer {
@@ -40962,15 +41028,24 @@ ${READER_LIST_CSS}
 
 
 
-#panel.app-docked #header-subtitle,
 #panel.app-docked .page-header-title,
 #panel.app-docked .page-header-meta,
 #panel.app-docked #comments-content > .page-header {
 	display:none;
 }
 
-#panel.app-docked .header-actions {
-	gap:2px;
+#panel.app-docked .header-actions #app-bar-compose {
+	width:24px;
+	height:24px;
+}
+
+#app #app-bar-compose[hidden] {
+	display:none;
+}
+
+#app #app-bar-compose svg {
+	width:14px;
+	height:14px;
 }
 
 #panel.app-docked > header:has(.source-menu:not(.hidden)) {
@@ -41123,24 +41198,6 @@ ${READER_LIST_CSS}
 	#panel.app-docked .header-actions button:not(.app-head-icon):where(:not(.settings-select button)):hover {
 		color:var(--text);
 	}
-}
-
-#panel.app-docked .header-title {
-	flex-direction:row;
-	align-items:baseline;
-	gap:8px;
-	white-space:nowrap;
-}
-
-#panel.app-docked .header-subtitle {
-	min-width:0;
-	font-size:10px;
-	overflow:hidden;
-	text-overflow:ellipsis;
-}
-
-#panel.app-docked .header-subtitle-visible {
-	padding-bottom:0;
 }
 
 #panel.app-docked {
@@ -41536,8 +41593,8 @@ header .item-action-link {
 	display:flex !important;
 	position:absolute;
 	top:50%;
-	right:4px;
-	margin-top:-12px;
+	inset-inline-end:4px;
+	transform:translateY(-50%);
 	-webkit-tap-highlight-color:transparent;
 }
 
@@ -41606,10 +41663,22 @@ header .item-action-link {
 	}
 
 	#app-list-body .browse-more {
-		width:36px;
-		height:36px;
-		margin-top:-18px;
-		border-radius:18px;
+		inset-inline-end:16px;
+	}
+
+	#app-list-body .browse-more::before {
+		content:"";
+		position:absolute;
+		inset:-8px;
+	}
+
+	#app-list-body .browse-more svg {
+		width:14px;
+		height:14px;
+	}
+
+	#app-list-body :is(.browse-row, .browse-row:has(.browse-thumb-wrap), .app-topic-row) {
+		padding-inline-end:48px;
 	}
 
 	.app-onboarding {
@@ -41813,6 +41882,15 @@ header .item-action-link {
 		overflow:auto;
 		overscroll-behavior:contain;
 		-webkit-overflow-scrolling:touch;
+	}
+
+	.app-topic-discussion-scroll {
+		padding-block-start:0;
+	}
+
+	.app-topic-discussion-head {
+		margin-inline:calc(-1 * var(--topic-discussion-gutter));
+		border-bottom-color:var(--app-discussion-header-rule);
 	}
 
 	#app-bar {
@@ -45185,11 +45263,10 @@ ${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon, { di
 <div id="app-row-menu" class="dropdown app-row-menu" role="menu" aria-label="This link" hidden></div>
 <div id="app-collection-filter-arrow" class="app-drop-arrow" aria-hidden="true" hidden></div>
 <div id="app-bar" class="app-bar" hidden>
-<button id="app-bar-save" class="app-stack-button" type="button" aria-pressed="false" aria-label="Save" hidden>${APP_ICON('<path d="M3.5 1.5h9a.5.5 0 0 1 .5.5v12.3a.4.4 0 0 1-.64.32L8 11.2l-4.36 3.42A.4.4 0 0 1 3 14.3V2a.5.5 0 0 1 .5-.5z"/>')}</button>
 <span id="app-mobile-votes" hidden></span>
 <button id="app-bar-like" class="app-stack-button" type="button" aria-pressed="false" aria-label="Like" hidden>${APP_ICON('<path d="M2 7.2h2.6V14H2.5a.5.5 0 0 1-.5-.5z"/><path d="M5.8 14V6.7l2.5-4.4a1.2 1.2 0 0 1 2.2.9L10 6h3a1.4 1.4 0 0 1 1.37 1.7l-1 4.7A2 2 0 0 1 11.4 14z"/>')}</button>
 <button id="app-bar-view" class="app-stack-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden><span class="app-view-glyph"><span class="app-view-big">A</span><span class="app-view-small">a</span></span></button>
-<button id="app-bar-compose" class="app-stack-button" type="button" aria-label="Comment and note composer" aria-expanded="false" title="Comment and note composer" hidden>${APP_ICON('<path d="M3 2h6v1.5H3.5v9h9V7H14v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="m12.3 1.7 2 2-6.7 6.7-2.5.5.5-2.5z"/>')}</button>
+<button id="app-bar-save" class="app-stack-button" type="button" aria-pressed="false" aria-label="Save" hidden>${APP_ICON('<path d="M3.5 1.5h9a.5.5 0 0 1 .5.5v12.3a.4.4 0 0 1-.64.32L8 11.2l-4.36 3.42A.4.4 0 0 1 3 14.3V2a.5.5 0 0 1 .5-.5z"/>')}</button>
 <button id="app-bar-discussion" class="app-stack-button" type="button" aria-pressed="false" aria-label="Discussion">${APP_ICON('<path d="M2.5 2h11a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1H6.2L3 14.4a.4.4 0 0 1-.66-.3V11.5h.16a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/>')}<span class="rail-badge"></span></button>
 </div>
 <section id="app-list" aria-label="Articles">
@@ -45319,7 +45396,7 @@ ${readingListShareHTML()}
 		renderAppDiscussionEmpty();
 		watchNoteSelection(await loadSettings());
 		resumeSidebarArticleInReader().catch(console.error);
-		await refreshAppSources();
+		await refreshAppSources({ startup: true });
 		if (linkedTopic && appState.topicArticleIntent === linkedTopic) {
 			const index = await loadSharedTopicIndex();
 			const topic = index?.topics.get(linkedTopic) || index?.topics.get(index.redirects?.get(linkedTopic));
@@ -45334,6 +45411,7 @@ ${readingListShareHTML()}
 
 	function wireApp(ui) {
 		const shadow = ui.shadow;
+		const composeToggle = appState.phoneComposeToggle = shadow.getElementById("app-bar-compose");
 
 		ui.headerSubtitle = null;
 		wireBookmarkImport(shadow);
@@ -45944,7 +46022,8 @@ ${readingListShareHTML()}
 		const syncButton = shadow.querySelector("#app-list-sync");
 
 		const syncList = async () => {
-			const runs = await runSync(syncReaderViews, { feedOnly: !appState?.open, overlapReddit: true });
+			const feedOnly = !appState?.open || appIsPhone() && appRoot.dataset.stage === "list";
+			const runs = await runSync((releaseRead, redditReady) => syncReaderViews(releaseRead, redditReady, { feedOnly }), { feedOnly, overlapReddit: true });
 			for (const run of runs || []) {
 				if (run.status === "rejected") console.error(run.reason);
 			}
@@ -45976,7 +46055,7 @@ ${readingListShareHTML()}
 			}
 		};
 		shadow.querySelector("#app-bar-view").onclick = () => setAppViewMenuOpen(shadow.querySelector("#app-view-menu").hidden);
-		shadow.querySelector("#app-bar-compose").onclick = () => setAppPhoneComposer(!appRoot.hasAttribute("data-compose-open"));
+		composeToggle.onclick = () => setAppPhoneComposer(!appRoot.hasAttribute("data-compose-open"));
 		const rowMenu = shadow.getElementById("app-row-menu");
 		rowMenu.oncontextmenu = (event) => event.preventDefault();
 		const closeRowMenuOutside = (event) => {
@@ -46371,7 +46450,7 @@ ${readingListShareHTML()}
 		return closeModal;
 	}
 
-	async function refreshAppSources() {
+	async function refreshAppSources({ startup = false } = {}) {
 		const state = appState;
 		const revision = ++state.sourcesSeq;
 		const railOrderRevision = state.railOrderRevision || 0;
@@ -46407,6 +46486,7 @@ ${readingListShareHTML()}
 			}
 		}
 
+		if (startup && await refreshActiveFrontPages({ startup }).catch(console.error)) return;
 		await renderAppList();
 	}
 
@@ -46946,10 +47026,34 @@ ${readingListShareHTML()}
 		}
 	}
 
-	function wireAppRowMenu(row, button, doc = null) {
+	function mountAppRowMenu(row, itemsFor, { label = "More", topicButton = null } = {}) {
+		const button = document.createElement("button");
+		button.className = "browse-more app-head-icon";
+		button.type = "button";
+		button.setAttribute("aria-label", label);
+		button.setAttribute("aria-haspopup", "menu");
+		button.setAttribute("aria-expanded", "false");
+		button.setAttribute("aria-controls", "app-row-menu");
+		button.innerHTML = MORE_ICON;
+		row.append(button);
+
+		const open = (anchor = button, point = null) => {
+			const menu = row.getRootNode().getElementById("app-row-menu");
+			const wasOpen = !point && anchor === button && !menu.hidden && button.getAttribute("aria-expanded") === "true";
+			closeAppRowMenu();
+			if (wasOpen) {
+				button.focus({ preventScroll: true });
+				return;
+			}
+			menu.setAttribute("aria-label", topicButton ? "This topic" : "This link");
+			menu.dataset.row = topicButton ? "topic" : "1";
+			button.setAttribute("aria-expanded", "true");
+			showAppMenu(menu, anchor, itemsFor(anchor), { start: anchor === topicButton, point });
+		};
+
 		button.onclick = (event) => {
 			event.stopPropagation();
-			openAppRowMenu(row, button, doc);
+			open();
 		};
 		row.oncontextmenu = (event) => {
 			if (event.defaultPrevented) return;
@@ -46959,26 +47063,21 @@ ${readingListShareHTML()}
 				if (!appState.bulk.entries.size) beginAppSelection(row, button);
 				openAppBulkMenu(appState.ui.shadow.getElementById("app-selection-actions"), point);
 			} else {
-				openAppRowMenu(row, button, doc, point);
+				open(topicButton && !button.contains(event.target) ? topicButton : button, point);
 			}
 		};
+		if (topicButton) {
+			topicButton.setAttribute("aria-keyshortcuts", "Shift+F10 ContextMenu");
+			topicButton.onkeydown = (event) => {
+				if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+				event.preventDefault();
+				event.stopPropagation();
+				open(topicButton);
+			};
+		}
 	}
 
-	function openAppRowMenu(row, button, doc = null, point = null) {
-		const shadow = appState?.ui.shadow;
-		const menu = shadow?.querySelector("#app-row-menu");
-
-		if (!menu) {
-			return;
-		}
-
-		if (!point && !menu.hidden && button.getAttribute("aria-expanded") === "true") {
-			closeAppRowMenu();
-			return;
-		}
-
-		closeAppRowMenu();
-		menu.setAttribute("aria-label", "This link");
+	function appLinkRowMenuItems(row, button, doc = null) {
 		const entry = appSelectionEntry(row);
 		const items = entry ? [
 			{ label: "Open", run: () => row.querySelector(".browse-title-link").click() },
@@ -46997,7 +47096,7 @@ ${readingListShareHTML()}
 			});
 		if (topicKey && (topicKey === sharedTopicURLKey(entry.frontRow?.story.url) || sharedTopicCache?.index?.pages.has(topicKey))) {
 			const url = canonicalSharedTopicURL(entry.url).href;
-			const header = shadow.getElementById("app-list-topic");
+			const header = row.getRootNode().getElementById("app-list-topic");
 			const topic = header.hidden ? "" : header.dataset.topicLabel;
 			contextual.push({
 				label: "Report incorrect topic…",
@@ -47018,22 +47117,23 @@ ${readingListShareHTML()}
 				{ label: "Select link", run: () => beginAppSelection(row, button) },
 			);
 		}
-		showAppMenu(menu, button, items, { point });
-		menu.dataset.row = "1";
-		button.setAttribute("aria-expanded", "true");
-
+		return items;
 	}
 
-	function openAppTopicMenu(button, group, point = null) {
-		const menu = appState.ui.shadow.getElementById("app-row-menu");
-		closeAppRowMenu();
-		menu.setAttribute("aria-label", "This topic");
-		showAppMenu(menu, button, [
+	function appTopicRowMenuItems(button, group, anchor) {
+		const id = publicTopicForReading(group, sharedTopicCache?.index);
+		const address = id && START_PAGE_ORIGIN + "/?" + new URLSearchParams({ topic: id });
+		return [
 			{ label: "Open", run: () => button.click() },
+			...(address ? [{ label: "Open in new tab", href: address }] : []),
 			{ rule: true },
+			{ label: "View links", run: () => openAppListTopic(group.id).catch(console.error) },
 			{ label: "Select links", run: () => selectAppTopicLinks(group).catch(console.error) },
-		], { start: true, point });
-		menu.dataset.row = "topic";
+			...(address ? [{ rule: true }, { label: "Copy link", run: () => {
+				anchor.focus({ preventScroll: true });
+				runCardAction("copy", { url: address }).catch(console.error);
+			} }] : []),
+		];
 	}
 
 	function openAppHeadingMenu(button) {
@@ -47696,8 +47796,11 @@ ${readingListShareHTML()}
 		if (!state) return;
 		const { shadow } = state.ui;
 		const app = shadow.getElementById("app");
-		const toggle = shadow.getElementById("app-bar-compose");
+		const toggle = state.phoneComposeToggle;
 		const bar = appIsPhone() && app.dataset.stage === "discussion" ? appPhoneComposer(shadow) : null;
+		const panel = shadow.getElementById(bar && state.topicArticle ? "app-topic-discussions" : "panel");
+		const actions = panel.querySelector(".app-discussion-actions");
+		if (toggle.parentElement !== actions) actions.append(toggle);
 		if (bar !== state.phoneComposeBar) {
 			state.phoneComposeObserver?.disconnect();
 			state.phoneComposeBar = bar;
@@ -51009,13 +51112,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	function appTopicArticleDiscussions() {
 		const aside = appTopicArticleNode("aside", "app-topic-discussions");
 		aside.id = "app-topic-discussions";
-		const header = appTopicArticleNode("div", "app-topic-discussion-head");
-		const heading = appTopicArticleNode("h2", "", "Discussions");
-		heading.id = "app-topic-discussions-heading";
-		aside.setAttribute("aria-labelledby", heading.id);
-		header.append(heading, appTopicArticleNode("div", "app-topic-controls"));
+		const titleId = "app-topic-discussions-heading";
+		aside.setAttribute("aria-labelledby", titleId);
 		const scroll = appTopicArticleNode("div", "app-topic-discussion-scroll");
-		scroll.append(header, appTopicArticleNode("div", "app-topic-feed"));
+		scroll.innerHTML = appDiscussionHeaderHTML("Discussions", "", { topic: true, titleId }) + '<div class="app-topic-feed"></div>';
 		aside.append(appTopicDiscussionDivider(aside), scroll);
 		return aside;
 	}
@@ -51267,6 +51367,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		state.listTopicPhotos = selection;
 		const pendingPhotos = [];
 		for (const group of topics) {
+			const row = appTopicArticleNode("div", "app-topic-list-row");
 			const button = document.createElement("button");
 			button.type = "button";
 			button.className = "app-topic-row";
@@ -51276,7 +51377,6 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			button.classList.toggle("is-unread", !visited);
 			button.setAttribute("aria-description", visited ? "Read" : "Unread");
 			button.dataset.sharedTopic = group.id;
-			button.setAttribute("aria-keyshortcuts", "Shift+F10 ContextMenu");
 			const labels = document.createElement("span");
 			const name = document.createElement("span");
 			name.className = "app-topic-name";
@@ -51284,28 +51384,14 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			const meta = document.createElement("span");
 			meta.className = "app-topic-meta";
 			paintAppTopicCounts(meta, group);
-			const chevron = document.createElement("span");
-			chevron.className = "app-topic-chevron";
-			chevron.setAttribute("aria-hidden", "true");
-			chevron.textContent = "›";
 			labels.append(name, meta);
 			const media = appTopicPicture(group, selection);
-			button.append(media, labels, chevron);
+			button.append(media, labels);
 			pendingPhotos.push({ group, media });
 			button.onclick = () => openAppTopicArticle(group);
-			button.oncontextmenu = (event) => {
-				if (event.defaultPrevented) return;
-				event.preventDefault();
-				const point = event.clientX || event.clientY ? { x: event.clientX, y: event.clientY } : null;
-				openAppTopicMenu(button, group, point);
-			};
-			button.onkeydown = (event) => {
-				if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-				event.preventDefault();
-				event.stopPropagation();
-				openAppTopicMenu(button, group);
-			};
-			list.append(button);
+			row.append(button);
+			mountAppRowMenu(row, (anchor) => appTopicRowMenuItems(button, group, anchor), { topicButton: button });
+			list.append(row);
 		}
 		hydrateAppTopicPhotos(pendingPhotos, selection).catch(console.error);
 	}
@@ -51668,7 +51754,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 			if (state.view === "unread") {
 				state.unreadTopic = group;
 				const read = shadow.querySelectorAll('.app-topic-row[aria-description="Read"]:not([aria-current])');
-				for (const previous of read) previous.remove();
+				for (const previous of read) previous.parentElement.remove();
 				if (read.length && !card) renderAppList().catch(console.error);
 			}
 			applyAppTopicVisits({ active: group }, () => appState === state).catch(console.error);
@@ -53456,7 +53542,7 @@ ${frontPageChooserHTML()}
 
 	function mountAppTopicControls(reading) {
 		const panel = reading.discussionPanel;
-		const controls = panel.scroller.querySelector(".app-topic-controls");
+		const controls = panel.scroller.querySelector(".app-discussion-actions");
 		const sort = commentSortControl("app-topic-comment-sort", (_, settings) => {
 			if (appState.topicArticle !== reading) return;
 			panel.pageFrom = null;

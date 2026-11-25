@@ -1,9 +1,57 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {launchApp,STORIES,waitFor} from './harness.mjs';
+import {frontPageHTML,launchApp,STORIES,waitFor} from './harness.mjs';
 
 const script=async()=> (await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8')).replace('const TOAST_BRIEF_MS = 1800;','const TOAST_BRIEF_MS = 300;').replace('const TOAST_DISMISS_MS = 5200;','const TOAST_DISMISS_MS = 300;');
+
+test('Reader starts one automatic sync for a stale feed on arrival', {timeout:15000}, async () => {
+  const lastAttemptAt = Date.now() - 6 * 60 * 1000;
+  const key = 'HNewhere:frontpage_feed:/hn/front/';
+  const feed = 'https://news.ycombinator.com/news';
+  const app = await launchApp({sharedStore:true,
+    settings:{sources:{hn:true},sourceRefreshMinutes:5,updateCheck:false},
+    values:{[key]:{timestamp:lastAttemptAt,status:'ok',stories:[{...STORIES[0],source:'hn'}]}},
+    responses:[{match:url=>url===feed,delay:1200,text:frontPageHTML(STORIES)}],
+  });
+  try {
+    await app.page.goto('https://backchnnl.app/');
+    const sync = app.page.locator('#app-list-sync');
+    await sync.waitFor();
+    assert(await waitFor(() => app.requests.some(({url})=>url===feed), 3000));
+    assert.equal(await sync.getAttribute('aria-busy'), 'true');
+    assert(await waitFor(() => app.store.get(key)?.lastSuccessAt > lastAttemptAt, 4000));
+    assert(await waitFor(async () => (await sync.getAttribute('aria-busy')) !== 'true', 4000));
+    await app.page.reload();
+    await app.page.locator('#app-list-sync').waitFor();
+    assert.equal(app.requests.filter(({url})=>url===feed).length, 1);
+  } finally {await app.browser.close();}
+});
+
+test('phone list sync refreshes the feed without rechecking the hidden article', {timeout:15000}, async () => {
+  const app = await launchApp({sharedStore:true,hasTouch:true,viewport:{width:390,height:844},
+    settings:{sources:{hn:true},sourceRefreshMinutes:0,updateCheck:false}});
+  try {
+    const {page} = app;
+    await page.emulateMedia({reducedMotion:'reduce'});
+    await page.goto('https://backchnnl.app/');
+    await page.locator('#app-list-heading-button').tap();
+    await page.getByRole('menuitem',{name:'Sync',exact:true}).tap();
+    await page.locator('#app-list-body .browse-title-link').first().tap();
+    await page.locator('#comments-content .comment').first().waitFor({state:'attached'});
+    await page.locator('#app-bar-back').tap();
+    await page.evaluate(() => {
+      const request = window.__gmXHR;
+      window.__gmXHR = options => options.url.includes('hn.algolia.com/api/v1/search') ?
+        {status:503,finalUrl:options.url,responseHeaders:'content-type: application/json',text:'{}'} : request(options);
+    });
+    await page.locator('#app-list-heading-button').tap();
+    await page.getByRole('menuitem',{name:'Sync',exact:true}).tap();
+    assert(await waitFor(async () => ['Synced','Partial sync'].includes(await page.locator('#toast').textContent()), 5000));
+    assert.equal(await page.locator('#toast').textContent(), 'Synced');
+    assert.equal(app.requests.filter(({url})=>url==='https://news.ycombinator.com/news').length, 2);
+  } finally {await app.browser.close();}
+});
 
 for(const failed of [false,true])test(`Reader shows transient sync progress followed by ${failed?'Partial sync':'Synced'}`,{timeout:15000},async()=>{
   const app=await launchApp({source:await script(),sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});

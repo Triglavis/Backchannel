@@ -5,11 +5,15 @@ import { launchApp, STORIES, waitFor } from "./harness.mjs";
 
 for (const mode of ['Reader', 'Sidebar']) test(`${mode} does not start a delayed automatic Reddit refresh after a manual sync`, { timeout: 45000 }, async () => {
   const original = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
-  const seam = 'const [accepted, cooldown] = await Promise.all([load(REDDIT_READ_NOTICE_KEY, false), load(REDDIT_POLL_KEY, null)]);';
-  assert(original.includes(seam));
-  const source = original.replace(seam, `if (!window.__autoRefreshPaused) { window.__autoRefreshPaused = true; await new Promise((resolve) => { window.__resumeAutoRefresh = resolve; }); }\n\t\t\t${seam}`);
-  const url = STORIES[0].url;
   const sidebar = mode === 'Sidebar';
+  const pause = 'if (!window.__autoRefreshPaused) { window.__autoRefreshPaused = true; await new Promise((resolve) => { window.__resumeAutoRefresh = resolve; }); }';
+  const seam = sidebar ?
+    'const [accepted, cooldown] = await Promise.all([load(REDDIT_READ_NOTICE_KEY, false), load(REDDIT_POLL_KEY, null)]);' :
+    'Boolean(await load(REDDIT_READ_NOTICE_KEY, false))';
+  assert(original.includes(seam));
+  const source = original.replace(seam, sidebar ? `${pause}\n\t\t\t${seam}` :
+    `await (async () => { ${pause} return ${seam}; })()`);
+  const url = STORIES[0].url;
   const app = await launchApp({ source, ...(sidebar ? { appHost: new URL(url).hostname } : {}), sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com'], settings: { sources: { hn: true, reddit: true }, autoOpenSidebar: sidebar, frontPageMode: 'sources', updateCheck: false }, values: { 'HNewhere:reddit_read_window_notice': 2 } });
   const opened = [];
   app.context.on('page', (page) => { if (page !== app.page) opened.push(page); });

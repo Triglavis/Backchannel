@@ -145,6 +145,7 @@ for (const sidebar of [true, false]) {
     t.after(()=>app.browser.close());
     const {page} = app;
     page.setDefaultTimeout(6000);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.goto(sidebar ? url : 'https://backchnnl.app/');
     if (!sidebar) {
       await page.locator('#app-list-body .browse-title-link').first().click();
@@ -153,7 +154,11 @@ for (const sidebar of [true, false]) {
     await settled(app);
     const banner = page.locator('#filter-banner');
     const focus = page.locator(`#comments-content .comment[data-comment-id="hn:${sidebar ? 900119 : 900100}"] .focus-link`);
-    await focus.click();
+    if (sidebar) {
+      await focus.scrollIntoViewIfNeeded();
+      assert(await page.locator('#comments').evaluate(node => node.scrollTop > 0), 'the focused comment starts below the title');
+    }
+    await focus.press('Enter');
     const close = banner.getByRole('button', {name: 'Show all comments', exact: true});
     await close.waitFor();
     const source = banner.getByRole('link', {name: 'Hacker News', exact: true});
