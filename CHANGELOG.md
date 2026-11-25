@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.19.3] — 2026-11-25
+
+### Changed
+
+- Best loads ranked comments in batches across enabled sources in Reader and
+  Sidebar. More replies can arrive while you read, and later discussions leave
+  the displayed order in place.
+- Lobsters Front Pages reuse saved results when the source confirms the feed is
+  unchanged.
+
+### Fixed
+
+- Front Pages share refresh timing for the same feed across Headlines and topic
+  views, including after returning to a tab.
+
 ## [1.6.19.2] — 2026-11-24
 
 ### Fixed
@@ -2938,6 +2953,7 @@ commit history. Entries for 1.4.7 through 1.5.3 are summarized from their releas
 commits rather than written at the time.
 
 [Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...main
+[1.6.19.3]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...tags/v1.6.19.3
 [1.6.19.2]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.1...tags/v1.6.19.2
 [1.6.19.1]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19...tags/v1.6.19.1
 [1.6.19]: https://github.com/twalichiewicz/Backchannel/compare/v1.6.18.5...v1.6.19
