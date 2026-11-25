@@ -143,7 +143,7 @@ async function expectTopicPhoto(group, subject) {
 	assert.match(await picture.getAttribute("title"), subject);
 }
 
-test("equivalent topics share one subject image and count each discussion once", async () => {
+test("equivalent topics share a cached source image and count each discussion once", async () => {
 	const articlePreview = "https://framed.example.com/article-preview.png";
 	const artwork = { url: topicPhoto, source: imageCredit, credit: "Example author · CC BY 4.0", subject: "Browser extension" };
 	const first = "topic:permissions";
@@ -185,9 +185,8 @@ test("equivalent topics share one subject image and count each discussion once",
 		await merged.getByText("9 comments across 3 discussions in 2 links", { exact: true }).waitFor();
 		assert.equal(await topic(list, "Browser privacy").count(), 0);
 		assert.equal(await list.getByRole("link", { name: guide.title, exact: true }).count(), 0);
-		const image = merged.locator("img");
+		const image = merged.locator('img[src="' + articlePreview + '"]');
 		await image.waitFor();
-		assert.equal(await image.getAttribute("src"), topicPhoto);
 		assert.equal(await image.getAttribute("referrerpolicy"), "no-referrer");
 		assert(await waitFor(() => image.evaluate((node) => node.naturalWidth > 0)));
 		assert.deepEqual(await image.evaluate((node) => [node.naturalWidth, node.getBoundingClientRect().width,
@@ -198,7 +197,7 @@ test("equivalent topics share one subject image and count each discussion once",
 		await list.getByRole("link", { name: report.title }).waitFor();
 		const heading = page.locator("#app-list-topic");
 		assert.equal(await heading.getByRole("link", { name: /image credit/i }).count(), 0);
-		assert.match(await heading.locator(".app-topic-picture").getAttribute("title"), /Example author/);
+		assert.match(await heading.locator(".app-topic-picture").getAttribute("title"), /framed\.example\.com/);
 		await heading.getByText("9 comments across 3 discussions in 2 links", { exact: true }).waitFor();
 		const firstLink = list.getByRole("link", { name: guide.title });
 		await firstLink.click({ modifiers: ["Shift"] });
@@ -275,12 +274,12 @@ test("a broken exact topic image gives way to a subject photo and its credit", a
 	}
 });
 
-test("topics always show an icon when a Commons photo is missing, repeated, or broken", async () => {
+test("specific story cards show an icon when the only artwork is generic or broken", async () => {
 	const topics = [
 		{ id: "story:trade", label: "First-day IPO trading for Oak Systems", kind: "story" },
 		{ id: "story:reporting", label: "Market operators adopt new accounting rules", kind: "story" },
 		{ id: "story:morning", label: "An unusual morning in Vardum", kind: "story", illustration: "4d".repeat(32) },
-		{ id: "story:change", label: "What happened to Lintrest", kind: "story",
+		{ id: "story:change", label: "What happened to Lintrest", kind: "story", imageCurated: true,
 			image: { url: topicPhoto, source: imageCredit, credit: "Example author · CC BY 4.0", subject: "Lintrest" } },
 	];
 	const pages = [];
@@ -313,10 +312,9 @@ test("topics always show an icon when a Commons photo is missing, repeated, or b
 		const broken = topic(list, topics[3].label);
 		await broken.locator("img.app-topic-picture").waitFor({ state: "detached" });
 		const pictures = list.locator(".app-topic-picture");
-		assert.equal(await pictures.count(), 1);
-		assert.match(await pictures.first().getAttribute("title"), /stock exchange/i);
+		assert.equal(await pictures.count(), 0);
 		const unknown = topic(list, topics[2].label);
-		for (const { label } of topics.slice(1)) {
+		for (const { label } of topics) {
 			const icon = topic(list, label).locator(".app-topic-media .app-topic-icon svg");
 			assert.equal(await icon.isVisible(), true);
 		}
@@ -332,7 +330,7 @@ test("topics always show an icon when a Commons photo is missing, repeated, or b
 	}
 });
 
-test("Reader gets a Wikipedia image for a locally grouped topic and caches its credit", async () => {
+test("Reader gets a Wikipedia image for a published subject topic and caches its credit", async () => {
 	const url = "https://thumb.wikimedia.org/wikipedia/commons/thumb/b/be/Flag_of_Iran_%28official%29.svg/250px-Flag_of_Iran_%28official%29.svg.png";
 	const file = "File:Flag of Iran (official).svg";
 	const source = "https://commons.wikimedia.org/wiki/File:Flag_of_Iran_(official).svg";
@@ -342,6 +340,11 @@ test("Reader gets a Wikipedia image for a locally grouped topic and caches its c
 		{ ...guide, url: "https://framed.example.com/post/271?key=private-query", title: "Iran war escalates after renewed air strikes", topic: "technology" },
 		{ ...report, url: "https://plain.example.org/post/272", title: "Airstrikes intensify as Iran war enters a new phase", topic: "technology" },
 	];
+	const id = "topic:iran-war";
+	const subjectCatalog = { ...catalog,
+		topics: [{ id, label: "Iran War", kind: "topic", curated: true }],
+		pages: stories.map(({ url }) => ({ key: url.replace(/^https:\/\//, ""), topicIds: [id] })),
+	};
 	const isQuery = (value, host, title) => {
 		const request = new URL(value);
 		return request.hostname === host && request.searchParams.get("titles")?.split("|").includes(title);
@@ -353,7 +356,7 @@ test("Reader gets a Wikipedia image for a locally grouped topic and caches its c
 			"HNewhere:frontpage_feed:technology/lemmy/community/technology@lemmy.world": { timestamp: now * 1000, stories: [] },
 		},
 		responses: [
-			{ match: (url) => url === catalogURL, json: { ...catalog, topics: [], pages: [] } },
+			{ match: (url) => url === catalogURL, json: subjectCatalog },
 			{ match: (url) => isQuery(url, "en.wikipedia.org", subject), json: { query: { pages: [
 				{ ns: 0, pageid: 14579, title: "Iran", pageimage: "Flag_of_Iran_(official).svg" },
 				{ ns: 0, title: "List of wars involving Iran" },
@@ -2625,6 +2628,7 @@ test("Topics put separate developments under specific headlines with or without 
 		try {
 			const { page } = app;
 			await page.goto("https://backchnnl.app/");
+			await rail(page, "all").click();
 			const list = page.locator("#app-list-body");
 			const expected = [[0, 1, 76], [3, 2, 37], [5, 6, 115]];
 			for (const [lead, other, count] of expected) {
@@ -3206,6 +3210,8 @@ test("a locally visited event stays read after its members become part of wider 
 	online = true;
 	app.store.set(key, feed(stories));
 	await page.goto("https://backchnnl.app/");
+	await page.locator("#app-list-body").getByText("All caught up.", { exact: true }).waitFor();
+	await rail(page, "all").click();
 	await card.waitFor();
 	assert.equal(await card.getAttribute("data-shared-topic"), originalDecision.id);
 	assert.equal(await card.getAttribute("aria-description"), "Read");
@@ -3415,6 +3421,8 @@ test("opening a topic clears its unread dot across Reader views and reloads whil
 		await checkView("queue", "Queue");
 		await checkView("collection", "Collection");
 		await page.reload();
+		await list.getByText("All caught up.", { exact: true }).waitFor();
+		await rail(page, "all").click();
 		await expectTopicStatus(group, "Read");
 		assert.equal(await rail(page, "unread").locator(".rail-badge").textContent(), "2");
 		await page.evaluate(() => {
@@ -3492,9 +3500,9 @@ test("direct and search visits mark their own topics independently of earlier ar
 		const list = page.locator("#app-list-body");
 		await page.goto("https://backchnnl.app/?topic=topic:permissions");
 		await topicHeading(page).getByText("Extension permissions").waitFor();
+		await rail(page, "all").click();
 		await page.getByRole("tab", { name: "By topic" }).click();
 		await expectTopicStatus(topic(list, "Extension permissions"), "Read");
-		await rail(page, "all").click();
 		const other = topic(list, observatory.label);
 		await expectTopicStatus(other, "Unread");
 		await page.locator("#app-rail-search").click();
@@ -3505,7 +3513,7 @@ test("direct and search visits mark their own topics independently of earlier ar
 		assert(await waitFor(() => !slowSets.armed));
 		await page.keyboard.press("Escape");
 		await rail(page, "unread").click();
-		await topic(list, "Extension permissions").waitFor();
+		await list.getByText("All caught up.", { exact: true }).waitFor();
 		await rail(page, "all").click();
 		await expectTopicStatus(other, "Read");
 		releaseVisit();
@@ -3545,11 +3553,14 @@ test("a visited local story keeps its read state when the same coverage is publi
 		await expectTopicStatus(group, "Read");
 		online = true;
 		await page.reload();
+		await list.getByText("All caught up.", { exact: true }).waitFor();
+		await rail(page, "all").click();
 		assert.equal(await group.getAttribute("data-shared-topic"), published.id);
 		await expectTopicStatus(group, "Read");
 		published.label = "Browser adds hardware passkeys for secure logins";
 		app.store.delete(catalogKey);
 		await page.reload();
+		await rail(page, "all").click();
 		await expectTopicStatus(topic(list, published.label), "Read");
 		const different = { ...published, id: "story:passkey-followup" };
 		const another = { ...second, id: 9364, url: "https://plain.example.org/new-coverage", title: "Researchers audit shared accounts" };
@@ -3592,6 +3603,8 @@ test("overlapping topic visits from two Reader tabs preserve both read indicator
 		await first.keyboard.press("Escape");
 		await first.waitForURL((url) => !url.searchParams.has("topic"));
 		await first.reload();
+		await firstList.getByText("All caught up.", { exact: true }).waitFor();
+		await rail(first, "all").click();
 		await expectTopicStatus(topic(firstList, "Extension permissions"), "Read");
 		await expectTopicStatus(topic(firstList, observatory.label), "Read");
 		assert.deepEqual(app.errors, []);

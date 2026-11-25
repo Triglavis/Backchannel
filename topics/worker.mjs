@@ -726,9 +726,15 @@ async function generateArticle(request, env, id, input, owner, claim) {
   let body = claim.body;
   let retry = true;
   try {
+    const now = Date.now();
+    const previous = await db.prepare(`SELECT body FROM topic_articles
+      WHERE topic_id = ? AND revision <> ? AND body IS NOT NULL AND retry_at = 0 AND expires_at > ?
+        AND json_extract(body, '$.generatedAt') < ?
+      ORDER BY json_extract(body, '$.generatedAt') DESC, revision LIMIT 1`)
+      .bind(input.topic.id, input.revision, now, iso(now)).first("body");
     let status;
     const article = await buildTopicArticle(input.topic, input.pages, {
-      ai: env.AI, fetcher: fetch, now: Date.now(), onStatus: (value) => { status = value; },
+      ai: env.AI, fetcher: fetch, now, previous: previous && JSON.parse(previous), onStatus: (value) => { status = value; },
     });
     for (const source of article.sources) source.discussions = [];
     const content = JSON.stringify(article);

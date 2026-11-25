@@ -20,6 +20,10 @@ const REPORTING_VERB = /^(?:claim(?:s|ed)?|conclud(?:es?|ed)|confirm(?:s|ed)?|fi
 const SUBJECT_QUALIFIERS = new Set(["extended", "generalized", "modified", "strong", "weak"]);
 const MARKET_WORDS = new Set(["dow", "ipo", "market", "nasdaq", "share", "stock", "wall", "street"]);
 const PRICE_DECLINES = new Set(["bust", "decline", "dip", "dive", "drop", "fall", "fell", "plunge", "selloff", "sink", "slide", "slump", "tank", "tumble", "wipeout"]);
+const MARKET_INDEX = /\b(?:ASX|CAC|DAX|Dow|FTSE|Hang Seng|Nasdaq|Nikkei|S&P|TSX)\b/gi;
+const IPO = /\b(?:IPO|initial public offering)\b/i;
+const TRADING_DAY = /\b(first|second|third|fourth|fifth)\s+(day(?: of trading)?|trading session)\b/i;
+const PROSPECTIVE_SELL_OFF = /\?|\b(?:could|if|may|might|never|not|perhaps|risks?|whether|would)\b/i;
 const EVENT_ACTIONS = new Map([
   ["blockade", "blockade"], ["blockad", "blockade"],
   ["airstrike", "strike"], ["bomb", "strike"], ["strike", "strike"],
@@ -365,6 +369,58 @@ function offeringStage(title) {
   return stage ? stage[1].toLowerCase() + "ing" : "";
 }
 
+function ipoSelloff(title) {
+  if (PROSPECTIVE_SELL_OFF.test(title)) return null;
+  const ipo = IPO.test(title);
+  const issuers = new Map();
+  for (const stock of title.matchAll(/\b(?:shares|stock)\b/gi)) {
+    const name = RETURN_LAST.exec(title.slice(0, stock.index).trimEnd().replace(/[’']s$/i, ""))?.[1];
+    if (!name) continue;
+    const after = title.slice(stock.index + stock[0].length).split(/[,;:]/u, 1)[0];
+    const move = /^\s+(?:(?:price|have|has)\s+)?(\p{L}+)/iu.exec(after)?.[1].toLowerCase();
+    const term = move && eventWord(move);
+    const session = TRADING_DAY.exec(after);
+    const down = PRICE_DECLINES.has(term) || PRICE_DECLINES.has(term + "e") ||
+      /^\s+(?:clos(?:e[ds]?|ing)|end(?:s|ed|ing)?)\s+down\b/i.test(after);
+    if (down && (ipo || session && session[2].toLowerCase() !== "day")) {
+      issuers.set(name.toLowerCase(), session?.[1].toLowerCase());
+    }
+  }
+  for (const impact of title.matchAll(/\bsell[ -]?off\s+(?:dampens?|hits?|hobbles?|mars?|weighs? on)\s+/gi)) {
+    const affected = title.slice(impact.index + impact[0].length);
+    const name = RETURN_FIRST.exec(affected)?.[1];
+    const ownership = name && /^[’']s\s+/i.exec(affected.slice(name.length));
+    const session = ownership && TRADING_DAY.exec(affected.slice(name.length + ownership[0].length));
+    if (session?.index === 0) issuers.set(name.toLowerCase(), session[1].toLowerCase());
+  }
+  if (issuers.size !== 1) return null;
+  const [[issuer, session]] = issuers;
+  return { issuer, session, ipo };
+}
+
+function pageIPOSelloff(title, posts, terms, marketMove) {
+  const headline = ipoSelloff(title);
+  if (headline || !marketMove || PROSPECTIVE_SELL_OFF.test(title)) return headline;
+  const indices = new Set(Array.from(title.matchAll(MARKET_INDEX), ([name]) => name.toLowerCase()));
+  if (!indices.size) return null;
+  const headlineTerms = new Set(terms);
+  let corroborated = null;
+  for (const { title: other } of posts) {
+    if (!other || other === title) continue;
+    if (![...other.matchAll(MARKET_INDEX)].some(([name]) => indices.has(name.toLowerCase()))) continue;
+    const otherTerms = new Set(eventWords(titleWords(eventSpelling(other))));
+    if (sharedCount(headlineTerms, otherTerms) < 3) continue;
+    const candidate = ipoSelloff(other);
+    if (!candidate) continue;
+    if (corroborated && (candidate.issuer !== corroborated.issuer ||
+      candidate.session && corroborated.session && candidate.session !== corroborated.session)) return null;
+    corroborated = corroborated ? {
+      ...candidate, session: candidate.session || corroborated.session, ipo: candidate.ipo || corroborated.ipo,
+    } : candidate;
+  }
+  return corroborated;
+}
+
 function eventSpelling(title) {
   return title.replace(/\bUnited States(?: of America)?\b|\bU\.S(?:\.A)?\b\.?|\bUSA\b/gi, "US")
     .replace(/\bsell[ -]off\b/gi, "selloff");
@@ -490,13 +546,15 @@ function eventPage(page) {
   for (const number of otherWords.filter((word) => /^\d+$/.test(word))) contextEvidence.add(number);
   const status = statusChange(normalized);
   const leadership = pageLeadershipReturn({ ...page, title });
-  const eventAt = [page.publishedAt, (status || leadership) && datedArticlePath(page.url), page.firstPostedAt, page.postedAt]
+  const selloff = pageIPOSelloff(title, posts, terms, marketMove);
+  const eventAt = [page.publishedAt, (status || leadership || selloff) && datedArticlePath(page.url), page.firstPostedAt, page.postedAt]
     .map((value) => typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN).find(Number.isFinite);
   const years = new Set(Array.from(title.matchAll(/\b(?:in|during)\s+(?:\p{L}+\s+)?((?:19|20)\d{2})\b|[[(]((?:19|20)\d{2})[)\]]\s*$/giu),
     ([, described, dated]) => described || dated));
   return {
     ...item, articleKey: publisherArticleKey(page.url), heading: item.lower.join(" "),
     eventTerms, actions, details, contextTerms, marketMove, marketNames, versions,
+    selloff,
     names: headline.names, incident, stage: offeringStage(title), status, leadership, hasOffice: Boolean(title.match(RETURN_ROLE)),
     eventAt, years, instructional: INSTRUCTIONAL.test(title),
     headlineTerms, contextEvidence, namedEvidence, qualified: QUALIFIED_CLAIM.test(title),
@@ -554,6 +612,12 @@ function eventScore(left, right) {
   if (sameHeadline) return 2;
   if (left.domain === right.domain && (!left.articleKey || left.articleKey !== right.articleKey)) return 0;
   if (left.stage && right.stage && left.stage !== right.stage) return 0;
+  if (left.stage && right.selloff || right.stage && left.selloff) return 0;
+  if (left.selloff && right.selloff) {
+    const a = left.selloff, b = right.selloff;
+    if (a.issuer !== b.issuer || a.session && b.session && a.session !== b.session) return 0;
+    if ((a.ipo || b.ipo) && elapsed <= 86_400_000) return 0.9;
+  }
   if ((left.hasOffice || right.hasOffice) && sharedCount(left.names, right.names) >= 2 &&
     ![...left.eventTerms].some((term) => right.eventTerms.has(term) && !left.names.has(term) && !right.names.has(term) && !OFFICE_TERMS.has(term))) return 0;
 
