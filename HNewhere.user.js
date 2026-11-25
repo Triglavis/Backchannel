@@ -7068,7 +7068,7 @@ ${
 		}
 	}
 
-	function syncReaderViews(onThreadsLoaded = null) {
+	function syncReaderViews(onThreadsLoaded = null, redditReady = null) {
 		let feedDone = false;
 		let discussionDone = false;
 		let released = false;
@@ -7080,12 +7080,12 @@ ${
 		const finishDiscussion = () => { discussionDone = true; return finishRead(); };
 		const state = appState;
 		const discussion = state?.discussionSync
-			? state.discussionSync(finishDiscussion)
+			? state.discussionSync(finishDiscussion, redditReady)
 			: state?.open && canReconcileDiscussion(state.ui)
-				? syncDiscussions(state.ui, renderedDiscussions, finishDiscussion)
-				: state?.open ? openAppDiscussion(state.open.row, { onThreadsLoaded: finishDiscussion, force: !sharedRefreshSince }) : Promise.resolve();
+				? syncDiscussions(state.ui, renderedDiscussions, finishDiscussion, { redditReady })
+				: state?.open ? openAppDiscussion(state.open.row, { onThreadsLoaded: finishDiscussion, force: !sharedRefreshSince, redditReady }) : Promise.resolve();
 		return Promise.allSettled([
-			renderAppList({ force: !sharedRefreshSince }).finally(finishFeed),
+			renderAppList({ force: !sharedRefreshSince, redditReady }).finally(finishFeed),
 			Promise.resolve(discussion).finally(finishDiscussion),
 		]);
 	}
@@ -7296,7 +7296,7 @@ ${
 		paintAppDiscussionSync();
 	}
 
-	function beginSyncOperation(kind, target = openPageKey()) {
+	function beginSyncOperation(kind, { target = openPageKey(), redditReady = null } = {}) {
 		const parent = [...syncOperations.values()].filter((entry) => entry.kind === "sync" || entry.target === target).at(-1);
 		const operation = { id: ++syncOperationSequence, kind, target, startedAt: Date.now(), status: "running", results: new Map(), cancellations: new Set() };
 		const outcome = () => [...operation.results.values()].some((result) => !["ok", "empty", "cached"].includes(result.status)) ? "partial" : "ok";
@@ -7304,6 +7304,8 @@ ${
 		paintSyncOperations();
 		const handle = {
 			operation,
+			redditReady,
+			cacheEpoch: sourceCacheEpoch,
 			outcome,
 			attach(cancel) { operation.cancellations.add(cancel); return () => operation.cancellations.delete(cancel); },
 			record(key, result) { operation.results.set(key, result); },
@@ -7350,13 +7352,14 @@ ${
 		let partial = true;
 		if (isSidebarVisible() && (appState || !isBrowsing(sidebarUI))) showToast("Syncing…", { kind: "system", loading: true });
 		const execute = options.allowHelper === false ? (action) => Promise.resolve().then(() => action(() => Promise.resolve(), readActionId)) : (action) => runRedditReadAction(action, options);
-		return execute(async (releaseRead, actionId) => {
+		return execute(async (releaseRead, actionId, redditReady = null) => {
 			completedActionId = actionId;
 			await clearPendingReadHelpers({ retry: !options.automatic });
 			await clearClosedXHelpers({ retry: !options.automatic });
 			const batch = usesRedditReadWindow() && redditReadSourceOn && !redditReadBatch?.closing ? redditReadBatch : null;
 			const untapped = Boolean(batch && !batch.popup && !batch.tab && !batch.activated);
-			const result = await task(releaseRead);
+			const result = await task(releaseRead, redditReady);
+			if (redditReady) await redditReady;
 			await clearClosedXHelpers();
 			await clearPendingReadHelpers();
 			const runs = Array.isArray(result) ? result : [{ status: "fulfilled", value: result }];
@@ -7506,7 +7509,7 @@ ${
 		})();
 	}
 
-	function runRedditReadActionLocal(task, { automatic = false, feedOnly = false, reuseFresh = false, outcome = null, abandoned = null, onOpened = null, onCleaned = null, actionId = redditReadActionId } = {}) {
+	function runRedditReadActionLocal(task, { automatic = false, feedOnly = false, reuseFresh = false, overlapReddit = false, outcome = null, abandoned = null, onOpened = null, onCleaned = null, actionId = redditReadActionId } = {}) {
 		if (!usesRedditReadWindow() || !redditReadSourceOn || redditReadWaitUntil > Date.now()) return Promise.resolve().then(() => task(() => Promise.resolve(), actionId));
 		let batch = redditReadBatch;
 
@@ -7535,21 +7538,24 @@ ${
 			}
 			return releaseResult;
 		};
+		const overlap = overlapReddit && !batch.connected;
+		const ready = batch.preparing.then((result) => {
+			if (result.error && result.error !== "not-needed" && result.error !== "no-gesture" && !batch.reported) {
+				batch.reported = true;
+				if (result.error === "timeout" || result.error === "window-unavailable") batch.unresponsive = true;
+				reportRedditReadNotice(batch, "unresponsive");
+			}
+		});
 		return (async () => {
 			try {
-				const ready = await batch.preparing;
-
-				if (ready.error && ready.error !== "not-needed" && ready.error !== "no-gesture" && !batch.reported) {
-					batch.reported = true;
-					if (ready.error === "timeout" || ready.error === "window-unavailable") batch.unresponsive = true;
-					if (batch.unresponsive && isSidebarVisible()) reportRedditReadNotice(batch, "unresponsive");
-					else reportRedditReadNotice(batch, "unresponsive");
-				}
+				if (overlap) return await task(() => ready.then(releaseRead), actionId, ready);
+				await ready;
 				return await task(releaseRead, actionId);
 			} catch (error) {
 				batch.failed = true;
 				throw error;
 			} finally {
+				if (overlap) await batch.preparing;
 				await releaseRead();
 				if (outcome) {
 					outcome.ok = Boolean(batch.connected && !batch.failed && !batch.cancelled);
@@ -10639,8 +10645,16 @@ button {
 		return typeof value?.getComment === "function";
 	}
 
-	function sourceReadJob(source, capability, target, work, { timeout = DISCOVER_CEILING_MS, onPartial = null, operation = null } = {}) {
+	async function sourceReadJob(source, capability, target, work, { timeout = DISCOVER_CEILING_MS, onPartial = null, operation = null } = {}) {
 		const key = JSON.stringify([source, capability, target]);
+		if (source === "reddit" && operation?.redditReady) {
+			await operation.redditReady;
+			if (operation.cacheEpoch !== sourceCacheEpoch || !syncOperations.has(operation.operation.id) || !sourceReadEnabled?.has(source)) {
+				const result = { status: "cancelled", attempted: false };
+				operation.record(key, result);
+				return result;
+			}
+		}
 		let job = sourceReadJobs.get(key);
 		if (!job) {
 			const controller = new AbortController();
@@ -10903,6 +10917,7 @@ button {
 
 	const THREAD_CEILING_MS = 20000;
 	const DISCUSSION_ROOT_SAMPLE_SIZE = 8;
+	const DISCUSSION_COMMENT_CONCURRENCY = 6;
 
 	// #region hnewhere-test-export
 	const THREAD_TTL = 5 * 60 * 1000;
@@ -11215,44 +11230,80 @@ button {
 
 	function prepareThreadReader(reader, current, onPreview) {
 		const comments = new Map();
-		const queued = new Set(reader.rootKeys || []);
+		const roots = reader.rootKeys || [];
+		const queued = new Set(roots);
 		const pending = [...queued];
 		const sample = onPreview ? pending.slice(0, DISCUSSION_ROOT_SAMPLE_SIZE) : [];
 		const pendingSample = new Set(sample);
-		const sampled = new Map();
+		let previewTimer = 0;
+		let includeReadyRoots = false;
 		let missing = false;
 		const prepared = {
 			...reader,
+			renderComments: comments,
 			get incomplete() { return Boolean(reader.incomplete || missing || comments.size < queued.size); },
 			async getComment(key) { return comments.has(key) ? comments.get(key) : queued.has(key) ? null : reader.getComment(key); },
 		};
-		const ready = (async () => {
-			while (pending.length && current()) {
-				await Promise.all(pending.splice(0, 6).map(async (key) => {
-					let comment = null;
-					try { comment = await reader.getComment(key); }
-					catch (error) {
-						prepared.readStatus = error?.readStatus || "partial";
-						prepared.retryAt = Math.max(prepared.retryAt || 0, Number(error?.retryAt) || 0);
-					}
-					if (!current()) return;
-					comments.set(key, comment);
-					if (!comment) missing = true;
-					for (const child of comment?.replyKeys || []) if (!queued.has(child)) { queued.add(child); pending.push(child); }
-				if (pendingSample.delete(key)) {
-					if (comment && !comment.deleted) sampled.set(key, { ...comment, more: null });
-					if (sampled.size) onPreview({
-						checking: true,
-						sampleReady: pendingSample.size === 0,
-						rootKeys: sample.filter((root) => sampled.has(root)),
-						rootTimes: new Map(reader.rootTimes),
-						async getComment(root) { return sampled.get(root) || null; },
-					});
-					}
-				}));
+		const stopPreview = () => { clearTimeout(previewTimer); };
+		const publishPreview = () => {
+			if (!current()) return;
+			const rootKeys = (includeReadyRoots ? roots : sample).filter((key) => {
+				const comment = comments.get(key);
+				return comment && !comment.deleted;
+			});
+			if (!rootKeys.length) return;
+			const renderComments = new Map(comments);
+			for (const [key, comment] of renderComments) {
+				if (comment?.more) renderComments.set(key, { ...comment, more: null });
 			}
-		})();
-		return { reader: prepared, ready };
+			onPreview({
+				checking: true,
+				sampleReady: pendingSample.size === 0,
+				rootKeys,
+				rootTimes: new Map(reader.rootTimes),
+				renderComments,
+				async getComment(key) { return renderComments.get(key) || null; },
+			});
+		};
+		const recordFailure = (error) => {
+			if (!current()) return;
+			prepared.readStatus = error?.readStatus || "partial";
+			prepared.retryAt = Math.max(prepared.retryAt || 0, Number(error?.retryAt) || 0);
+		};
+		const read = async (key) => {
+			let comment = null;
+			try { comment = await reader.getComment(key); }
+			catch (error) { recordFailure(error); }
+			if (!current()) return;
+			comments.set(key, comment);
+			if (!comment) missing = true;
+			for (const child of comment?.replyKeys || []) if (!queued.has(child)) {
+				queued.add(child);
+				pending.push(child);
+			}
+			if (pendingSample.delete(key)) publishPreview();
+			else if (onPreview && comment && !comment.deleted && !previewTimer) {
+				previewTimer = setTimeout(() => {
+					previewTimer = 0;
+					includeReadyRoots = true;
+					publishPreview();
+				}, DISCUSSION_BATCH_WAIT_MS);
+			}
+		};
+		let next = 0;
+		let active = 0;
+		const ready = new Promise((resolve) => {
+			const refill = () => {
+				while (current() && active < DISCUSSION_COMMENT_CONCURRENCY && next < pending.length) {
+					active++;
+					read(pending[next++]).then(releaseSlot, (error) => { recordFailure(error); releaseSlot(); });
+				}
+				if (!active) resolve();
+			};
+			const releaseSlot = () => { active--; refill(); };
+			refill();
+		});
+		return { reader: prepared, ready, stopPreview };
 	}
 
 	function loadThreadWithCeiling(story, signal = null, onPreview = null) {
@@ -11264,6 +11315,7 @@ button {
 			const finish = (reader) => {
 				if (settled) return;
 				settled = true;
+				prepared?.stopPreview();
 				clearTimeout(timer);
 				clearTimeout(queueTimer);
 				signal?.removeEventListener("abort", cancel);
@@ -11750,7 +11802,7 @@ button {
 		});
 	}
 
-	function loadTopicFeed(feed, force, settings, legacy = null, { cachedOnly = false } = {}) {
+	function loadTopicFeed(feed, force, settings, legacy = null, { cachedOnly = false, redditReady = null } = {}) {
 		const key = frontPageFeedKey(feed);
 		const existing = frontPageJobs.get(key);
 		if (!cachedOnly && existing && (!force || existing.force)) return existing.promise;
@@ -11759,11 +11811,14 @@ button {
 		const request = ++frontPageRequestId;
 		if (!cachedOnly) frontPageLoads.set(key, request);
 		job.promise = (async () => {
+			const waitForReddit = !cachedOnly && feed.source === "reddit" && redditReady;
+			if (waitForReddit) await redditReady;
 			const previous = await readFrontPageFeedCache(feed, legacy);
 			const cached = previous ? { ...previous, stories: tagCachedFrontPageStories(previous.stories, feed), status: previous.status || "ok" } : null;
 			const now = Date.now();
 			const savedResult = () => ({ stories: Array.isArray(cached?.stories) ? cached.stories : [], status: cached?.status || "ok", cached: Boolean(cached?.status && cached.status !== "ok" && cached.stories?.length), attempted: false, lastAttemptAt: cached?.lastAttemptAt ?? cached?.timestamp ?? 0, lastSuccessAt: cached?.lastSuccessAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), dataFetchedAt: cached?.dataFetchedAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), retryAt: cached?.retryAt || 0 });
-			if (epoch !== frontPageCacheEpoch || !cachedOnly && frontPageLoads.get(key) !== request) return { stories: [], status: "cancelled", attempted: false };
+			if (epoch !== frontPageCacheEpoch || !cachedOnly && frontPageLoads.get(key) !== request ||
+				waitForReddit && !sourceReadEnabled?.has(feed.source)) return { stories: [], status: "cancelled", attempted: false };
 			const transportReady = feed.source === "reddit" && cached?.status === "window" && redditReadBatch?.connected && !redditReadBatch.closing && !redditReadBatch.cancelled;
 			if (cachedOnly || !transportReady && (!force && frontPageNextAttempt(cached, settings, now) > now || cached?.retryAt > now)) return savedResult();
 			const cooldown = feed.source === "reddit" ? await load(REDDIT_POLL_KEY, null) : null;
@@ -18721,7 +18776,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			loadSettings().then((settings) => {
 				if (message.isConnected) mountSidebarComposer(ui, false, Boolean(settings.notepad));
 			}).catch(console.error);
-			ui.syncStatus = { ...(ui.syncStatus || {}), onSync: (releaseRead) => syncDiscussions(ui, [], releaseRead) };
+			ui.syncStatus = { ...(ui.syncStatus || {}), onSync: (releaseRead, redditReady) => syncDiscussions(ui, [], releaseRead, { redditReady }) };
 			ui.syncAgeDismissed = true;
 			paintSidebarSyncButton(ui);
 		}
@@ -19439,7 +19494,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			}
 
 			try {
-				await runSync((releaseRead) => (isBrowsing(ui) ? renderBrowseView(ui, { force: !sharedRefreshSince }) : Promise.resolve(ui.syncStatus?.onSync?.(releaseRead))), { feedOnly: browsing });
+				await runSync((releaseRead, redditReady) => isBrowsing(ui)
+					? renderBrowseView(ui, { force: !sharedRefreshSince, redditReady })
+					: ui.syncStatus?.onSync?.(releaseRead, redditReady), { feedOnly: browsing, overlapReddit: true });
 			} catch (error) {
 				console.error(error);
 			}
@@ -19581,7 +19638,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			}
 			return { feedStates };
 		};
-		return loadFrontPageView(view, settings, { force: options.force, automatic: options.automatic }, paint);
+		return loadFrontPageView(view, settings, { force: options.force, automatic: options.automatic, redditReady: options.redditReady }, paint);
 	}
 
 	async function renderBrowseView(ui, options = {}) {
@@ -28851,6 +28908,12 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		parentKey = null,
 	) {
 		const batchSize = 5;
+		if (thread.checking && thread.renderComments) {
+			replyKeys = replyKeys.filter((key) => {
+				const comment = thread.renderComments.get(key);
+				return comment && !comment.deleted;
+			});
+		}
 
 		for (let i = 0; i < replyKeys.length; i += batchSize) {
 			if (generation !== sidebarGeneration) return;
@@ -29670,16 +29733,19 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		return (b.score ?? 0) - (a.score ?? 0) || commentReplyCount(b) - commentReplyCount(a);
 	}
 
-	async function blendDiscussionRoots(stories, threads, seenTimes, settings) {
+	async function blendDiscussionRoots(stories, threads, seenTimes, settings, rankedRoots = new Map()) {
 		const options = { sort: settings.commentSort, arrivedFrom: arrivalSource(), unreadFirst: Boolean(settings.newCommentsFirst) };
 		const best = (options.sort || "best") === "best";
 		const groups = await Promise.all(stories.map(async (story, index) => {
 			const thread = threads[index];
 			let rootKeys = thread?.rootKeys || [];
 			if (best && story.source === "bsky") {
-				const roots = await Promise.all(rootKeys.map(async (key) => ({ key, comment: await thread.getComment(key) })));
-				rootKeys = roots.filter(({ comment }) => comment && !comment.deleted)
-					.sort((a, b) => compareCommentEngagement(a.comment, b.comment)).map(({ key }) => key);
+				if (!rankedRoots.has(story.key)) {
+					const roots = await Promise.all(rootKeys.map(async (key) => ({ key, comment: await thread.getComment(key) })));
+					rankedRoots.set(story.key, roots.filter(({ comment }) => comment && !comment.deleted)
+						.sort((a, b) => compareCommentEngagement(a.comment, b.comment)).map(({ key }) => key));
+				}
+				rootKeys = rankedRoots.get(story.key);
 			}
 			return { discussionKey: story.key, rootKeys, story, thread, seenTime: seenTimes.get(story.key) || 0 };
 		}));
@@ -29711,6 +29777,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		let revision = 0;
 		let paintedRevision = 0;
 		let painted = false;
+		let previousPaint = null;
 		let discovering = true;
 		let progress = null;
 		const best = (settings?.commentSort || "best") === "best";
@@ -29769,8 +29836,13 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				paintInterrupted = false;
 				const readyReaders = new Map(readers);
 				try {
-					if (!reset && canReconcileDiscussion(ui)) await syncDiscussions(ui, ready, null, { found: ready, refresh: false, readers: readyReaders, streaming: true });
-					else await renderDiscussionSnapshot(ready, ui, { arrival, readers: readyReaders });
+					if (!reset && canReconcileDiscussion(ui)) {
+						let retainedPaint;
+						previousPaint = await reconcileDiscussionSnapshot(ui, ready, readyReaders, previousPaint, (state) => { retainedPaint = state; });
+						if (!previousPaint && paintInterrupted && retainedPaint?.generation + 1 === sidebarGeneration && retainedPaint.run + 1 === discussionRenderRun) {
+							previousPaint = { ...retainedPaint, generation: sidebarGeneration, run: discussionRenderRun };
+						}
+					} else previousPaint = await renderDiscussionSnapshot(ready, ui, { arrival, readers: readyReaders });
 				} finally { paintingActive = false; }
 				for (const [key, reader] of readers) if (reader.incomplete || reader.refreshFailed) operation?.record("thread:" + key, { status: "partial" });
 				updateProgress();
@@ -30004,7 +30076,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				stories.map((story) => story.key),
 				Date.now(),
 			),
-			onSync: (releaseRead) => syncDiscussions(ui, renderedDiscussions, releaseRead),
+			onSync: (releaseRead, redditReady) => syncDiscussions(ui, renderedDiscussions, releaseRead, { redditReady }),
 		});
 
 		liveDiscussions.clear();
@@ -30114,7 +30186,9 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			]),
 		);
 
-		const entries = await blendDiscussionRoots(stories, threads, seenTimes, settings);
+		const rankedRoots = new Map();
+		const paint = readers && discussionPaintState(stories, threads, readers, rankedRoots, generation, run);
+		const entries = await blendDiscussionRoots(stories, threads, seenTimes, settings, rankedRoots);
 		if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
 
 		const liveRunEnd =
@@ -30197,7 +30271,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		for (const [index, story] of stories.entries()) if (threads[index].incomplete && !loadStatus.has(story.key)) { loadStatus.set(story.key, discussionStatus("incomplete", threads[index])); changedStatus = true; }
 		if (changedStatus) syncDiscussionHeader(ui, stories, settings, loadStatus);
 		const checkedStories = stories.filter((story, index) => !threads[index].checking);
-		await persistSharedThreads(checkedStories).catch(console.error);
+		const persisted = await persistSharedThreads(checkedStories).then(() => true, (error) => { console.error(error); return false; });
 		if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
 		if (reconcileWholeThreads(stories, ui, threads)) syncDiscussionHeader(ui, stories, settings, loadStatus);
 		if (activeCommentFilter?.type === "discussion") applyDiscussionSelection(activeCommentFilter.keys, { animate: false, scroll: false });
@@ -30240,6 +30314,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				setComposeLoading(composer, false);
 				for (const control of (sortRow || ui.shadow?.querySelector("#app-discussion-sort"))?.querySelectorAll("select, button") || []) control.disabled = false;
 				clearSidebarStage(ui);
+				if (paint && persisted) return { ...paint, comments: renderedComments.length, annotations: appState ? null : discussionAnnotationState(settings) };
 			}
 		}
 	}
@@ -36107,55 +36182,70 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 		crossFadeCommentsView(comments, render);
 	}
 
-	function updateSyncedComment(rendered, comment, story) {
+	function syncedCommentLabel(story) {
+		return sidebarSourceKeys.size > 1 && story.label ? (liveDiscussions.has(story.key) ? story.baseLabel || story.label : story.label) : "";
+	}
+
+	function updateSyncedCommentPresentation(rendered, label, canVote) {
+		if (label !== undefined && rendered.parentId === null) {
+			const meta = rendered.element.querySelector(":scope > .comment-layout > .comment-main > .meta");
+			const age = meta?.querySelector(":scope > .item-age");
+			let badge = meta?.querySelector(":scope > .comment-source");
+			if (label && !badge && age) {
+				badge = document.createElement("span");
+				badge.className = "comment-source";
+				age.before(badge, document.createTextNode(" "));
+			}
+			if (badge && label) {
+				if (badge.textContent !== label) badge.textContent = label;
+				badge.title = label;
+			} else badge?.remove();
+		}
+		if (canVote !== undefined) {
+			const voteSlot = rendered.element.querySelector(":scope > .comment-layout > .comment-vote-slot");
+			voteSlot?.classList.toggle("comment-vote-slot-empty", !canVote || Boolean(rendered.comment?.local));
+		}
+	}
+
+	function updateSyncedComment(rendered, comment, story, syncPresentation) {
 		const previous = rendered.comment || {};
 		const textChanged = rendered.textHTML !== comment.bodyHTML;
+		const authorChanged = previous.author !== comment.author || previous.authorName !== comment.authorName;
+		const timeChanged = previous.createdAt !== comment.createdAt;
 		if (textChanged) {
 			rendered.textElement.innerHTML = sanitizeHTML(comment.bodyHTML, { images: commentImagesPreference }) || "";
 			foldQuoteBlocks(rendered.textElement);
 			wrapLooseCommentText(rendered.textElement);
 			rendered.textHTML = comment.bodyHTML;
 		}
-		const meta = rendered.element.querySelector(":scope > .comment-layout > .comment-main > .meta");
-		const author = meta?.querySelector(":scope > .comment-author");
-		if (author && (previous.author !== comment.author || previous.authorName !== comment.authorName)) {
-			author.innerHTML = authorLinkHTML(comment.source, comment.author, comment.authorName);
-			author.title = comment.authorName || comment.author || "";
-		}
-		const age = meta?.querySelector(":scope > .item-age");
-		if (age && previous.createdAt !== comment.createdAt) {
-			age.title = timeAgo(comment.createdAt);
-			age.textContent = commentAgeLabel(age.title);
-		}
-		const save = meta?.querySelector('[data-item-action="save"]');
-		if (save) {
-			if (textChanged) {
-				save.dataset.saveTitle = textExcerpt(comment.bodyHTML, EXCERPT_CHARS);
-				save.dataset.saveText = textExcerpt(comment.bodyHTML, SAVED_TEXT_CHARS);
+		if (authorChanged || timeChanged || textChanged) {
+			const meta = rendered.element.querySelector(":scope > .comment-layout > .comment-main > .meta");
+			const author = authorChanged && meta?.querySelector(":scope > .comment-author");
+			if (author) {
+				author.innerHTML = authorLinkHTML(comment.source, comment.author, comment.authorName);
+				author.title = comment.authorName || comment.author || "";
 			}
-			if (previous.author !== comment.author || previous.authorName !== comment.authorName) save.dataset.saveBy = comment.authorName || comment.author || "";
-			if (previous.createdAt !== comment.createdAt) save.dataset.saveTime = String(comment.createdAt || "");
-		}
-		let badge = meta?.querySelector(":scope > .comment-source");
-		const label = rendered.parentId === null && sidebarSourceKeys.size > 1 && story.label ? (liveDiscussions.has(story.key) ? story.baseLabel || story.label : story.label) : "";
-		if (label && !badge && age) {
-			badge = document.createElement("span");
-			badge.className = "comment-source";
-			age.before(badge, document.createTextNode(" "));
-		}
-		if (badge) {
-			if (label) {
-				if (badge.textContent !== label) badge.textContent = label;
-				badge.title = label;
+			const age = timeChanged && meta?.querySelector(":scope > .item-age");
+			if (age) {
+				age.title = timeAgo(comment.createdAt);
+				age.textContent = commentAgeLabel(age.title);
 			}
-			else badge.remove();
+			const save = meta?.querySelector('[data-item-action="save"]');
+			if (save) {
+				if (textChanged) {
+					save.dataset.saveTitle = textExcerpt(comment.bodyHTML, EXCERPT_CHARS);
+					save.dataset.saveText = textExcerpt(comment.bodyHTML, SAVED_TEXT_CHARS);
+				}
+				if (authorChanged) save.dataset.saveBy = comment.authorName || comment.author || "";
+				if (timeChanged) save.dataset.saveTime = String(comment.createdAt || "");
+			}
 		}
-		const voteSlot = rendered.element.querySelector(":scope > .comment-layout > .comment-vote-slot");
-		voteSlot?.classList.toggle("comment-vote-slot-empty", !renderedSourcesCanVote() || Boolean(comment.local));
 		rendered.author = comment.author;
 		rendered.time = comment.createdAt;
-		if (previous.createdAt !== comment.createdAt) rendered.element.dataset.createdAt = String(comment.createdAt || 0);
+		if (timeChanged) rendered.element.dataset.createdAt = String(comment.createdAt || 0);
 		rendered.comment = { ...comment, replyKeys: [...(comment.replyKeys || [])] };
+		if (syncPresentation || previous.local !== comment.local) updateSyncedCommentPresentation(rendered, syncedCommentLabel(story), renderedSourcesCanVote());
+		return textChanged || authorChanged || timeChanged || previous.local !== comment.local;
 	}
 
 	function syncedAnchor(container, keys, index, lookup, discussionKey = "") {
@@ -36181,6 +36271,27 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 		mountMoreReplies(mergeMoreReplies(null, more, shown, story.source), thread, container, story, context);
 	}
 
+	function changedDiscussionBranches(previous, current) {
+		const before = previous?.renderComments;
+		const after = current.renderComments;
+		if (!before || !after) return null;
+		const parents = new Map();
+		const changed = new Set();
+		for (const [key, comment] of before) {
+			for (const child of comment?.replyKeys || []) parents.set(child, key);
+			if (!after.has(key)) changed.add(key);
+		}
+		for (const [key, comment] of after) {
+			for (const child of comment?.replyKeys || []) parents.set(child, key);
+			const old = before.get(key);
+			if (old === comment) continue;
+			if (!old || !comment || Object.keys(old).length !== Object.keys(comment).length || Object.keys(comment).some((field) => comment[field] !== old[field])) changed.add(key);
+		}
+		const branches = new Set(changed);
+		for (const key of branches) if (parents.has(key)) branches.add(parents.get(key));
+		return { changed, branches };
+	}
+
 	async function reconcileSyncedComment(key, thread, story, container, context, anchor = null) {
 		if (context.generation !== sidebarGeneration || context.run !== discussionRenderRun) return;
 		const comment = await thread.getComment(key);
@@ -36200,6 +36311,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 				});
 				return;
 			}
+			if (renderedComments.length > start) context.annotationChanges.changed = true;
 			for (const entry of renderedComments.slice(start)) {
 				if (activeCommentFilter) entry.element.classList.add("comment-filter-hidden");
 				context.lookup.set(entry.discussionKey + "\0" + entry.id, entry);
@@ -36208,12 +36320,15 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			if (added?.parentElement === holder) container.insertBefore(added, anchor?.parentElement === container ? anchor : null);
 			return;
 		}
-		updateSyncedComment(rendered, comment, story);
+		if (!context.changes || context.changes.changed.has(key)) {
+			if (updateSyncedComment(rendered, comment, story, !context.incremental)) context.annotationChanges.changed = true;
+		}
 		const children = rendered.element.querySelector(":scope > .comment-layout > .comment-main > .comment-content > .children");
 		if (!children) return;
 		const keys = comment.replyKeys || [];
+		const next = { ...context, parentKey: comment.key };
 		for (let index = 0; index < keys.length; index++) {
-			const next = { ...context, parentKey: comment.key };
+			if (context.changes && !context.changes.branches.has(keys[index])) continue;
 			const anchor = context.lookup.has(story.key + "\0" + keys[index]) ? null : syncedAnchor(children, keys, index, context.lookup, story.key);
 			await reconcileSyncedComment(keys[index], thread, story, children, next, anchor);
 		}
@@ -36325,9 +36440,8 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 		return null;
 	}
 
-	async function syncDiscussions(ui, stories, onThreadsLoaded = null, { found: alreadyFound = null, refresh = true, readers = null, streaming = false } = {}) {
-		if (streaming) return reconcileDiscussionSnapshot(ui, stories, null, { found: alreadyFound, refresh, readers, streaming });
-		const operation = beginSyncOperation("discussion");
+	async function syncDiscussions(ui, stories, onThreadsLoaded = null, { found: alreadyFound = null, refresh = true, redditReady = null } = {}) {
+		const operation = beginSyncOperation("discussion", { redditReady });
 		setSidebarStage(ui, "discussion");
 		try {
 			await flushComposerDrafts(ui.shadow);
@@ -36346,61 +36460,66 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 		} finally { operation.finish(); }
 	}
 
-	async function reconcileDiscussionSnapshot(ui, stories, onThreadsLoaded = null, { found: alreadyFound = null, refresh = true, readers = null, streaming = false } = {}) {
-		if (!streaming) discussionStreamRun++;
-		const operation = streaming ? null : beginSyncOperation("discussion");
+	function discussionAnnotationState(settings) {
+		const article = appState?.article;
+		return { article, mode: article?.mode, visible: shouldShowArticleAnnotations(settings), enabled: Boolean(settings.annotations), controller: annotationController };
+	}
+
+	function discussionPaintState(stories, threads, readers, rankedRoots, generation, run) {
+		return { generation, run, rankedRoots, readers: new Map(stories.map((story, index) =>
+			[story.key, { reader: readers.get(story.key), thread: threads[index], cached: threadCache.get(story.key) }])) };
+	}
+
+	async function reconcileDiscussionSnapshot(ui, nextStories, readers, previousPaint, onRetained) {
+		if (previousPaint?.generation !== sidebarGeneration || previousPaint?.run !== discussionRenderRun) previousPaint = null;
 		const comments = ui.body.querySelector(":scope > .top-level-comments");
-		const preserve = canReconcileDiscussion(ui);
-		const displayed = new Set(renderedDiscussions.map((story) => story.key));
-		const savedEntries = new Map(stories.map((story) => [story.key, threadCache.get(story.key)]));
-		const saved = new Map(stories.map((story) => [story.key, displayed.has(story.key) ? snapshotRenderedThread(story, savedEntries.get(story.key)?.reader) : null]));
+		const displayed = new Map(renderedDiscussions.map((story) => [story.key, syncedCommentLabel(story)]));
+		const previousCanVote = renderedSourcesCanVote();
+		const savedEntries = new Map(nextStories.map((story) => [story.key, threadCache.get(story.key)]));
+		const retained = new Map();
+		const changes = new Map();
+		const rankedRoots = new Map();
+		const saved = new Map();
+		for (const story of nextStories) {
+			const key = story.key;
+			const prior = previousPaint?.readers.get(key);
+			const reader = readers.get(key);
+			const entry = savedEntries.get(key);
+			if (prior && prior.reader === reader && prior.cached === entry && !reader.checking && !reader.incomplete && !reader.refreshFailed && !reader.empty) {
+				retained.set(key, prior.thread);
+				if (previousPaint.rankedRoots.has(key)) rankedRoots.set(key, previousPaint.rankedRoots.get(key));
+				continue;
+			}
+			if (prior && (prior.cached === entry || prior.reader?.checking && entry?.reader === reader)) {
+				const branchChanges = changedDiscussionBranches(prior.reader, reader);
+				if (branchChanges) changes.set(key, branchChanges);
+			}
+			saved.set(key, displayed.has(key) ? snapshotRenderedThread(story, entry?.reader) : null);
+		}
 		const page = openPageKey();
 		const generation = ++sidebarGeneration;
 		const run = ++discussionRenderRun;
 		const current = () => generation === sidebarGeneration && run === discussionRenderRun && sidebarUI === ui && openPageKey() === page;
+		if (retained.size) onRetained({
+			generation, run, presentationUnknown: true, rankedRoots,
+			readers: new Map([...retained.keys()].map((key) => [key, previousPaint.readers.get(key)])),
+		});
 		const sortControls = [...ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button, #comments-content > .page-sort select, #comments-content > .page-sort button")];
-		if (preserve) for (const control of sortControls) control.disabled = true;
+		for (const control of sortControls) control.disabled = true;
 		for (const button of ui.body.querySelectorAll(".more-replies")) if (button._hnewhereMoreContext) button._hnewhereMoreContext.generation = generation;
 		setSidebarStage(ui, "discussion");
-		let progress = null;
 		try {
 			await flushComposerDrafts(ui.shadow);
 			if (!current()) return;
 			const settings = await loadSettings();
 			if (!current()) return;
-			const stable = streaming && (settings.commentSort || "best") === "best";
-			if (refresh) forgetSyncedItems(stories);
-			const found = alreadyFound || await discoverAll(pageAddresses(), settings, { force: !sharedRefreshSince, operation });
-			if (!current()) return;
-			const nextStories = disambiguateLabels(dedupeDiscussions([...found, ...stories]).sort(compareStoriesByDiscussion));
-			if (refresh) forgetSyncedItems(nextStories);
-			if (!preserve) {
-				forgetThreads(nextStories);
-				setSidebarStage(ui, "comments");
-				return await renderDiscussions(nextStories, ui, { onThreadsLoaded });
-			}
+			const stable = (settings.commentSort || "best") === "best";
 			comments.querySelector(":scope > .discussion-loading")?.remove();
 			comments.classList.remove("discussion-entering", "is-visible");
-			for (const story of nextStories) if (!saved.has(story.key)) {
-				const entry = threadCache.get(story.key);
-				savedEntries.set(story.key, entry);
-				saved.set(story.key, snapshotRenderedThread(story, entry?.reader));
-			}
-			if (!streaming) progress = startDiscussionProgress(ui);
-			let completed = 0;
-			const updateProgress = () => {
-				if (!current()) return;
-				const text = "loading discussions (" + completed + " of " + nextStories.length + ")…";
-				if (ui.headerSubtitle) setSidebarLoadingLabel(ui, text);
-				else if (progress) progress.querySelector(".discussion-progress-label").textContent = "Loading discussions (" + completed + " of " + nextStories.length + ")…";
-			};
-			updateProgress();
-			const fresh = await Promise.all(nextStories.map((story) => Promise.resolve(readers?.get(story.key) || loadThread(story, { force: refresh, operation })).then((reader) => { completed++; updateProgress(); return reader; })));
-			if (current()) rememberRedditPage(nextStories, fresh, redditReadBatch);
-			onThreadsLoaded?.()?.catch(console.error);
-			finishDiscussionProgress(progress);
-			if (!current()) return;
+			const fresh = nextStories.map((story) => readers.get(story.key));
+			rememberRedditPage(nextStories, fresh, redditReadBatch);
 			const threads = nextStories.map((story, index) => {
+				if (retained.has(story.key)) return retained.get(story.key);
 				const previous = saved.get(story.key);
 				const merged = mergeThreadReaders(previous, fresh[index], story);
 				const at = fresh[index].empty || fresh[index].checking || fresh[index].refreshFailed
@@ -36409,6 +36528,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 				if (!story.local && !fresh[index].checking && merged && !merged.empty) rememberThread(threadCache, story.key, merged, at);
 				return merged;
 			});
+			const paint = discussionPaintState(nextStories, threads, readers, rankedRoots, generation, run);
 			const loadStatus = new Map(nextStories.flatMap((story, index) => fresh[index].checking ? [[story.key, "checking"]] : fresh[index].refreshFailed ? [[story.key, discussionStatus("refresh-failed", fresh[index])]] : fresh[index].empty && Number(story.commentCount) > 0
 				? [[story.key, discussionStatus(saved.get(story.key) ? "refresh-failed" : "unavailable", fresh[index])]]
 				: fresh[index].incomplete && !fresh[index].empty ? [[story.key, discussionStatus(saved.get(story.key) ? "refresh-incomplete" : "incomplete", fresh[index])]] : []));
@@ -36419,6 +36539,10 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			const now = Math.floor(Date.now() / 1000);
 			nextStories.forEach((story, index) => { if (!story.local && isDiscussionLive(threads[index], now)) liveDiscussions.set(story.key, story.baseLabel || story.label || ""); });
 			const restoreScroll = stable && preserveDiscussionScroll(comments);
+			const annotationChanges = { changed: previousPaint?.comments !== renderedComments.length };
+			const canVote = renderedSourcesCanVote();
+			const labels = new Map(nextStories.map((story) => [story.key, syncedCommentLabel(story)]).filter(([key, label]) => previousPaint?.presentationUnknown || displayed.get(key) !== label));
+			const vote = previousPaint?.presentationUnknown || canVote !== previousCanVote ? canVote : undefined;
 			setSidebarLoadingLabel(ui, "rendering comments…");
 			syncDiscussionHeader(ui, nextStories, settings, loadStatus);
 			for (const control of ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button, #comments-content > .page-sort select, #comments-content > .page-sort button")) control.disabled = true;
@@ -36426,10 +36550,17 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			if (!current()) return;
 			const seenTimes = new Map(await Promise.all(nextStories.map(async (story) => [story.key, await visitSeenTime(story.key)])));
 			if (!current()) return;
-			const entries = await blendDiscussionRoots(nextStories, threads, seenTimes, settings);
+			const entries = await blendDiscussionRoots(nextStories, threads, seenTimes, settings, rankedRoots);
 			if (!current()) return;
-			const lookup = new Map(renderedComments.map((entry) => [entry.discussionKey + "\0" + entry.id, entry]));
+			const lookup = new Map();
 			const source = new Map(nextStories.map((story, index) => [story.key, { story, thread: threads[index] }]));
+			for (const entry of renderedComments) {
+				lookup.set(entry.discussionKey + "\0" + entry.id, entry);
+				if (previousPaint && source.has(entry.discussionKey)) {
+					const label = labels.get(entry.discussionKey);
+					if ((label !== undefined && entry.parentId === null) || vote !== undefined) updateSyncedCommentPresentation(entry, label, vote);
+				}
+			}
 			if (stable) {
 				const order = new Map([...comments.children].map((node, index) => [node, index]));
 				const position = (entry) => order.get(lookup.get(entry.discussionKey + "\0" + entry.key)?.element) ?? Infinity;
@@ -36444,20 +36575,30 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 				while (node?.parentElement && node.parentElement !== comments) node = node.parentElement;
 				if (node?.parentElement === comments) nextRoot = node;
 			}
+			let visited = 0;
 			for (let index = 0; index < entries.length; index++) {
 				if (!current()) return;
 				const entry = entries[index];
+				if (retained.has(entry.discussionKey)) continue;
+				const branchChanges = changes.get(entry.discussionKey);
+				if (branchChanges && !branchChanges.branches.has(entry.key) && lookup.has(entry.discussionKey + "\0" + entry.key)) continue;
 				const held = source.get(entry.discussionKey);
 				const anchor = stable ? rootMore : anchors[index] || syncedAnchor(comments, [], 0, lookup);
-				await reconcileSyncedComment(entry.key, held.thread, held.story, comments, { generation, run, lookup, collapsedKeys, seenTime: seenTimes.get(entry.discussionKey) || 0, parentKey: null }, anchor);
-				if (index % 10 === 9) await new Promise(requestAnimationFrame);
+				await reconcileSyncedComment(entry.key, held.thread, held.story, comments, {
+					generation, run, lookup, collapsedKeys, seenTime: seenTimes.get(entry.discussionKey) || 0, parentKey: null,
+					changes: branchChanges, incremental: Boolean(previousPaint), annotationChanges,
+				}, anchor);
+				if (++visited % 10 === 0) await new Promise(requestAnimationFrame);
 			}
 			if (!current()) return;
-			for (let index = 0; index < nextStories.length; index++) syncMoreReplies(threads[index]?.rootMore, threads[index], comments, nextStories[index], { seenTime: seenTimes.get(nextStories[index].key) || 0, collapsedKeys, generation, parentKey: null });
+			for (let index = 0; index < nextStories.length; index++) {
+				const story = nextStories[index];
+				if (!retained.has(story.key)) syncMoreReplies(threads[index]?.rootMore, threads[index], comments, story, { seenTime: seenTimes.get(story.key) || 0, collapsedKeys, generation, parentKey: null });
+			}
 			syncDiscussionBookends(comments, entries, settings, lookup);
 			if (restoreScroll) restoreScroll();
 			const checkedStories = nextStories.filter((story, index) => !fresh[index].checking);
-			await persistSharedThreads(checkedStories).catch(console.error);
+			const persisted = await persistSharedThreads(checkedStories.filter((story) => !retained.has(story.key))).then(() => true, (error) => { console.error(error); return false; });
 			if (!current()) return;
 			if (reconcileWholeThreads(nextStories, ui, fresh)) syncDiscussionHeader(ui, nextStories, settings, loadStatus);
 			ui.shadow.getElementById("sort-new-first")?.setAttribute("aria-checked", String(Boolean(settings.newCommentsFirst)));
@@ -36473,14 +36614,15 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 				hydrateVoteControlsForStory(story.id, votes);
 				hydrateDisplayAges(story.id);
 			}
-			if (appState || settings.annotations && shouldShowArticleAnnotations(settings)) await refreshArticleAnnotations();
+			const annotationState = discussionAnnotationState(settings);
+			const annotations = appState || annotationState.visible;
+			if (annotations && (annotationChanges.changed || previousPaint?.comments !== renderedComments.length || Object.keys(annotationState).some((key) => annotationState[key] !== previousPaint?.annotations?.[key]))) await refreshArticleAnnotations();
 			if (!current()) return;
 			if (activeCommentFilter?.type === "discussion") applyDiscussionSelection(activeCommentFilter.keys, { animate: false, scroll: false });
 			else if (activeCommentFilter?.type === "comment") applyCommentFocus(activeCommentFilter.id, { animate: false, scroll: false });
-			setSidebarSyncStatus(ui, { checkedAt: threadsCheckedAt(threadCache, nextStories.map((story) => story.key), Date.now()), onSync: (releaseRead) => syncDiscussions(ui, renderedDiscussions, releaseRead) });
+			setSidebarSyncStatus(ui, { checkedAt: threadsCheckedAt(threadCache, nextStories.map((story) => story.key), Date.now()), onSync: (releaseRead, redditReady) => syncDiscussions(ui, renderedDiscussions, releaseRead, { redditReady }) });
+			if (persisted) return { ...paint, comments: renderedComments.length, annotations: annotations ? discussionAnnotationState(settings) : null };
 		} finally {
-			operation?.finish(current() ? operation.outcome() : "cancelled");
-			finishDiscussionProgress(progress);
 			if (current()) {
 				for (const control of sortControls) if (control.isConnected) control.disabled = false;
 				for (const control of ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button, #comments-content > .page-sort select, #comments-content > .page-sort button")) control.disabled = false;
@@ -45789,7 +45931,7 @@ ${readingListShareHTML()}
 		const syncButton = shadow.querySelector("#app-list-sync");
 
 		const syncList = async () => {
-			const runs = await runSync((releaseRead) => syncReaderViews(releaseRead), { feedOnly: !appState?.open });
+			const runs = await runSync(syncReaderViews, { feedOnly: !appState?.open, overlapReddit: true });
 			for (const run of runs || []) {
 				if (run.status === "rejected") console.error(run.reason);
 			}
@@ -51501,7 +51643,7 @@ ${frontPageChooserHTML()}
 		panel.hidden = false;
 	}
 
-	async function renderAppList({ force = false, automatic = false } = {}) {
+	async function renderAppList({ force = false, automatic = false, redditReady = null } = {}) {
 		const state = appState;
 		const ui = state.ui;
 		const list = ui.shadow.querySelector("#app-list-body");
@@ -51638,7 +51780,7 @@ ${frontPageChooserHTML()}
 				decorateAppRows(list);
 				await paintAppCounts();
 			};
-			await loadFrontPageView(view, cardSettings, { force, automatic }, paint);
+			await loadFrontPageView(view, cardSettings, { force, automatic, redditReady }, paint);
 		}
 
 		if (request !== state.listSeq) {
@@ -53326,14 +53468,14 @@ ${frontPageChooserHTML()}
 		return lists.flat();
 	}
 
-	async function openAppDiscussion(row, { focus = "", previousSeen = appState?.openSeen || {}, onThreadsLoaded = null, force = true } = {}) {
+	async function openAppDiscussion(row, { focus = "", previousSeen = appState?.openSeen || {}, onThreadsLoaded = null, force = true, redditReady = null } = {}) {
 		const state = appState;
 		const ui = state.ui;
 		const url = state.open?.url;
 		const generation = ++sidebarGeneration;
 		const opened = state.open;
 		const current = () => appState === state && state.open === opened;
-		const operation = beginSyncOperation("discussion");
+		const operation = beginSyncOperation("discussion", { redditReady });
 
 		clearArticleAnnotations();
 		stopObservingNewComments();

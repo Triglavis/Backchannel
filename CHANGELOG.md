@@ -15,6 +15,9 @@ use to detect updates, so every release bumps it.
 - Best loads ranked comments in batches across enabled sources in Reader and
   Sidebar. More replies can arrive while you read, and later discussions leave
   the displayed order in place.
+- Comment requests keep moving while individual replies are slow. Discussion
+  updates reuse the comment branches already on screen.
+- Other sources can start syncing while Safari prepares the Reddit helper tab.
 - Lobsters Front Pages reuse saved results when the source confirms the feed is
   unchanged.
 
