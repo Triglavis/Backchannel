@@ -7130,7 +7130,9 @@ ${
 		if (!batch.reuseFresh && (batch.feedOnly || appState || isBrowsing(sidebarUI))) {
 			const feeds = frontPageFeedsForView(settings, activeFrontPageView());
 			for (const feed of feeds.filter((feed) => feed.source === "reddit")) {
-				const cached = await load(frontPageFeedKey(feed), null);
+				const key = frontPageFeedKey(feed);
+				if (batch.dueFeedKeys && !batch.dueFeedKeys.has(key)) continue;
+				const cached = await load(key, null);
 				if (cached?.status !== "window" && cached?.retryAt > Date.now()) continue;
 				paths.push(feed.kind === "subreddits" ? `/r/${feed.target}.json?limit=100` : "/r/popular.json?limit=100");
 			}
@@ -7373,7 +7375,7 @@ ${
 			for (const feed of feeds) operation.record("feed:" + feed.source, feed);
 			const failed = runs.some((run) => run.status === "rejected") || feeds.some((feed) => feed.status !== "ok" && !waiting.includes(feed)) || operation.outcome() !== "ok";
 			const synced = feeds.length > 0 && !failed;
-			partial = failed || waiting.length > 0 || Boolean(batch?.failed || batch?.unresponsive || batch?.cancelled);
+			partial = failed || waiting.length > 0 || !options.feedOnly && Boolean(batch?.failed || batch?.unresponsive || batch?.cancelled);
 
 			if (batch && !untapped) {
 				if (synced && runId === syncRunId) {
@@ -7515,7 +7517,7 @@ ${
 		})();
 	}
 
-	function runRedditReadActionLocal(task, { automatic = false, feedOnly = false, reuseFresh = false, overlapReddit = false, outcome = null, abandoned = null, onOpened = null, onCleaned = null, actionId = redditReadActionId } = {}) {
+	function runRedditReadActionLocal(task, { automatic = false, feedOnly = false, dueFeedKeys = null, reuseFresh = false, overlapReddit = false, outcome = null, abandoned = null, onOpened = null, onCleaned = null, actionId = redditReadActionId } = {}) {
 		if (!usesRedditReadWindow() || !redditReadSourceOn || redditReadWaitUntil > Date.now()) return Promise.resolve().then(() => task(() => Promise.resolve(), actionId));
 		let batch = redditReadBatch;
 
@@ -7529,7 +7531,7 @@ ${
 				return Promise.resolve();
 			}
 
-			batch = { nonce, popup, tab, activated, feedOnly, reuseFresh, abandoned, onOpened, onCleaned, actionId, created: Date.now(), expires: Date.now() + SIGN_IN_TIMEOUT, startedSyncRun: syncRunId, connected: false, closing: false, cancelled: false, users: 0, sequence: 0 };
+			batch = { nonce, popup, tab, activated, feedOnly, dueFeedKeys, reuseFresh, abandoned, onOpened, onCleaned, actionId, created: Date.now(), expires: Date.now() + SIGN_IN_TIMEOUT, startedSyncRun: syncRunId, connected: false, closing: false, cancelled: false, users: 0, sequence: 0 };
 			redditReadBatch = batch;
 			batch.preparing = prepareRedditReadBatch(batch).catch(() => ({ error: "window-unavailable" }));
 		}
@@ -11962,9 +11964,10 @@ button {
 		}
 		frontPageRefreshRunning = true;
 		try {
+			const dueFeedKeys = new Set(due.map(frontPageFeedKey));
 			const task = async (_releaseRead, redditReady) => {
 				if (document.visibilityState === "hidden" || activeFrontPageUI() !== ui || activeFrontPageView() !== view) return;
-				const options = { automatic: true, redditReady };
+				const options = { automatic: true, redditReady, dueFeedKeys };
 				return appState ? renderAppList(options) : renderBrowseView(ui, options);
 			};
 			const redditDue = due.some((feed) => feed.source === "reddit");
@@ -11972,7 +11975,7 @@ button {
 				(!startup || !redditReadInitialAttempted) && usesManagerTabs() && Boolean(await load(REDDIT_READ_NOTICE_KEY, false));
 			if (previousSync !== syncRunId) return startup;
 			if (startup && redditDue) redditReadInitialAttempted = true;
-			await runSync(task, { automatic: true, feedOnly: true, allowHelper, overlapReddit: true });
+			await runSync(task, { automatic: true, feedOnly: true, dueFeedKeys, allowHelper, overlapReddit: true });
 			return true;
 		} finally {
 			frontPageRefreshRunning = false;
@@ -12007,7 +12010,9 @@ button {
 			? null : loadDefaultFrontPageList(defaultFeeds, settings);
 		const onUpdate = async (snapshot) => paint(snapshot, await defaultList);
 		const [snapshot] = await Promise.all([loadFrontPages({ ...options, feeds, settings, onUpdate }), defaultList]);
-		return onUpdate(snapshot);
+		const outcome = await onUpdate(snapshot);
+		if (!outcome || !options.dueFeedKeys) return outcome;
+		return { feedStates: outcome.feedStates.filter((_, index) => options.dueFeedKeys.has(frontPageFeedKey(feeds[index]))) };
 	}
 
 	async function loadFrontPagesRequest(options, request) {
@@ -12040,6 +12045,8 @@ button {
 		const cached = await load(cacheKey, null);
 		if (!options.cachedOnly) frontPageLoads.set(cacheKey, Math.max(frontPageLoads.get(cacheKey) || 0, request));
 		const legacyFor = (feed) => legacyFrontPageFeed(cached, feed);
+		const readFeed = (feed) => loadTopicFeed(feed, options.force, settings, legacyFor(feed),
+			options.dueFeedKeys && !options.dueFeedKeys.has(frontPageFeedKey(feed)) ? { cachedOnly: true } : options);
 		let results;
 		if (options.onUpdate && !options.cachedOnly) {
 			results = await Promise.all(feeds.map((feed) => loadTopicFeed(feed, false, settings, legacyFor(feed), { cachedOnly: true })));
@@ -12047,11 +12054,11 @@ button {
 			const initial = frontPageSnapshot(feeds, results);
 			if (initial.rows.length) await options.onUpdate(initial);
 			await Promise.all(feeds.map(async (feed, index) => {
-				results[index] = await loadTopicFeed(feed, options.force, settings, legacyFor(feed), options);
+				results[index] = await readFeed(feed);
 				await options.onUpdate(frontPageSnapshot(feeds, results));
 			}));
 		} else {
-			results = await Promise.all(feeds.map((feed) => loadTopicFeed(feed, options.force, settings, legacyFor(feed), options)));
+			results = await Promise.all(feeds.map(readFeed));
 		}
 		const snapshot = frontPageSnapshot(feeds, results);
 
@@ -19671,7 +19678,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			}
 			return { feedStates };
 		};
-		return loadFrontPageView(view, settings, { force: options.force, automatic: options.automatic, redditReady: options.redditReady }, paint);
+		return loadFrontPageView(view, settings, { force: options.force, automatic: options.automatic, redditReady: options.redditReady, dueFeedKeys: options.dueFeedKeys }, paint);
 	}
 
 	async function renderBrowseView(ui, options = {}) {
@@ -24212,9 +24219,9 @@ ${
 `;
 	}
 
-	function appDiscussionHeaderHTML(title, actions, { topic = false, titleId = "" } = {}) {
+	function appDiscussionHeaderHTML(actions, { topic = false, titleId = "" } = {}) {
 		return `<header class="app-discussion-header${topic ? " app-topic-discussion-head" : ""}">
-<div class="app-discussion-title"><h2 class="header-static-title"${titleId ? ` id="${escapeHTML(titleId)}"` : ""}>${escapeHTML(title)}</h2></div>
+<div class="app-discussion-title"><h2 class="header-static-title"${titleId ? ` id="${escapeHTML(titleId)}"` : ""}>Discussion</h2></div>
 <div class="app-discussion-actions ${topic ? "app-topic-controls" : "header-actions"}">${actions}</div>
 </header>`;
 	}
@@ -27335,7 +27342,7 @@ ${appMode ? appShellOpenHTML() : ""}<div id="panel"${appMode ? ' class="app-dock
 
 <div id="resize-handle" aria-hidden="true"></div>
 
-${appMode ? appDiscussionHeaderHTML("Discussion", `
+${appMode ? appDiscussionHeaderHTML(`
 <span id="app-discussion-sort" class="app-discussion-sort"></span><span id="app-discussion-meta" class="app-discussion-meta"></span>
 <button id="app-discussion-sync-empty" class="app-head-icon" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>
 <button id="app-bar-compose" class="app-head-icon" type="button" aria-label="Comment and note composer" aria-expanded="false" title="Comment and note composer" hidden>${APP_ICON('<path fill="currentColor" d="M3 2h6v1.5H3.5v9h9V7H14v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM12.3 1.7l2 2-6.7 6.7-2.5.5.5-2.5z"/>')}</button>
@@ -41306,7 +41313,6 @@ ${READER_LIST_CSS}
 #app-bar-save[aria-pressed="true"],
 #app-bar-like[aria-pressed="true"],
 #app-bar-discussion[aria-pressed="true"],
-#app-bar-compose[aria-expanded="true"],
 #app-bar-view[aria-expanded="true"],
 #app #app-article .app-article-disc:is(.item-action-on, [aria-expanded="true"]) {
 	background:var(--rail-bg);
@@ -42116,7 +42122,13 @@ header .item-action-link {
 	}
 
 	#app > .toast-viewport {
+		display:contents;
 		--toast-bottom:calc(76px + env(safe-area-inset-bottom, 0px));
+	}
+
+	#app > .toast-viewport > .toast {
+		position:fixed;
+		z-index:2147483647;
 	}
 
 	:host {
@@ -51116,7 +51128,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const titleId = "app-topic-discussions-heading";
 		aside.setAttribute("aria-labelledby", titleId);
 		const scroll = appTopicArticleNode("div", "app-topic-discussion-scroll");
-		scroll.innerHTML = appDiscussionHeaderHTML("Discussions", "", { topic: true, titleId }) + '<div class="app-topic-feed"></div>';
+		scroll.innerHTML = appDiscussionHeaderHTML("", { topic: true, titleId }) + '<div class="app-topic-feed"></div>';
 		aside.append(appTopicDiscussionDivider(aside), scroll);
 		return aside;
 	}
@@ -51933,7 +51945,7 @@ ${frontPageChooserHTML()}
 		panel.hidden = false;
 	}
 
-	async function renderAppList({ force = false, automatic = false, redditReady = null } = {}) {
+	async function renderAppList({ force = false, automatic = false, redditReady = null, dueFeedKeys = null } = {}) {
 		const state = appState;
 		const ui = state.ui;
 		const list = ui.shadow.querySelector("#app-list-body");
@@ -52017,7 +52029,6 @@ ${frontPageChooserHTML()}
 				const topics = view === "unread" && state.topicsMode && !projection.active && hasTopics
 					? appUnreadTopics(projection.topics, state) : projection.topics;
 				const topicsCaughtUp = hasTopics && !topics.length;
-				outcome = { feedStates };
 				state.rows = rows;
 				state.rowsView = view;
 				state.frontPageRows = defaultList?.rows || rows;
@@ -52073,8 +52084,9 @@ ${frontPageChooserHTML()}
 				refreshSaveControls().catch(console.error);
 				decorateAppRows(list);
 				await paintAppCounts();
+				return { feedStates };
 			};
-			await loadFrontPageView(view, cardSettings, { force, automatic, redditReady }, paint);
+			outcome = await loadFrontPageView(view, cardSettings, { force, automatic, redditReady, dueFeedKeys }, paint);
 		}
 
 		if (request !== state.listSeq) {

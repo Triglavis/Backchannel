@@ -28,15 +28,126 @@ test('Reader starts one automatic sync for a stale feed on arrival', {timeout:15
   } finally {await app.browser.close();}
 });
 
+const phone={hasTouch:true,viewport:{width:390,height:844}};
+const hnURL='https://news.ycombinator.com/news';
+const hnKey='HNewhere:frontpage_feed:/hn/front/';
+const redditKey='HNewhere:frontpage_feed:/reddit/front/';
+const notices={'HNewhere:reddit_read_window_notice':2};
+
+async function syncResult(app){
+  const toast=app.page.locator('#toast');
+  assert(await waitFor(async()=>['Synced','Partial sync'].includes(await toast.textContent()),6000));
+  return toast.textContent();
+}
+
+for(const fail of [false,true]) test(`automatic phone Sync reports ${fail?'a fresh failure':'success'} despite an old feed failure`,{timeout:12000},async()=>{
+  const now=Date.now();
+  const stale=now-6*60_000;
+  const app=await launchApp({...phone,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],
+    settings:{sources:{hn:true,reddit:true},sourceRefreshMinutes:5,updateCheck:false},values:{...notices,
+      [hnKey]:{timestamp:stale,status:'ok',stories:[{...STORIES[0],source:'hn'}]},
+      [redditKey]:{timestamp:now,status:'unavailable',stories:[],retryAt:now+60_000},
+    },responses:[{match:url=>url===hnURL,status:fail?503:200,text:fail?'Unavailable':frontPageHTML(STORIES)}]});
+  try{
+    await app.page.goto('https://backchnnl.app/');
+    assert(await waitFor(()=>app.store.get(hnKey)?.lastAttemptAt>stale,4000),'Hacker News was attempted');
+    assert.equal(app.store.get(redditKey)?.timestamp,now,'Reddit was still in its retry interval');
+    assert.equal(app.context.pages().length,1);
+    assert.equal(await syncResult(app),fail?'Partial sync':'Synced');
+    assert.deepEqual(app.errors,[]);
+  }finally{await app.browser.close()}
+});
+
+async function syncPhoneList(page){
+  await page.locator('#app-list-heading-button').tap();
+  await page.getByRole('menuitem',{name:'Sync',exact:true}).tap();
+}
+
+const post={id:'fresh123',url:'https://framed.example.com/reddit',title:'A current Reddit feed story',author:'fixture',subreddit:'news',permalink:'/r/news/comments/fresh123/article/',num_comments:2,created_utc:Math.floor(Date.now()/1000)-60,score:20};
+const listing={data:{children:[{kind:'t3',data:post}]}};
+
+test('manual phone Sync reports successful Reddit and then an actual feed failure',{timeout:20000},async()=>{
+  const app=await launchApp({...phone,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],
+    settings:{sources:{hn:true,reddit:true},sourceRefreshMinutes:0,updateCheck:false},values:notices});
+  let fail=false;
+  let redditFeedReads=0;
+  await app.context.route('https://www.reddit.com/**',route=>{
+    const path=new URL(route.request().url()).pathname;
+    if(path==='/') return route.fulfill({status:200,contentType:'text/html',body:'<title>Reddit fixture</title>'});
+    if(path==='/api/me.json') return route.fulfill({status:200,json:{data:{name:'fixture'}}});
+    assert.equal(path,'/r/popular.json');
+    redditFeedReads++;
+    return route.fulfill({status:fail?503:200,json:fail?{message:'Unavailable'}:listing});
+  });
+  try{
+    await app.page.goto('https://backchnnl.app/');
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Synced');
+    assert.equal(await app.page.locator('#app-list-body .browse-title-link',{hasText:post.title}).count(),1);
+    assert(await waitFor(()=>app.context.pages().length===1,5000),'the successful helper closed');
+    fail=true;
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Partial sync');
+    assert.equal(redditFeedReads,2,'both manual Syncs attempted Reddit');
+    assert.equal(await app.page.locator('#app-list-body .browse-title-link',{hasText:post.title}).count(),1,'saved Reddit articles stay visible after a failed refresh');
+    assert.deepEqual(app.errors,[]);
+  }finally{await app.browser.close()}
+});
+
+test('manual phone list Sync succeeds while an earlier Reddit discussion lookup fails',{timeout:22000},async()=>{
+  const original=await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8');
+  const seam='else batch.failed = true;';
+  assert(original.includes(seam));
+  const source=original.replace(seam, 'else { batch.failed = true; if (response.status === 404) window.__articleLookupFailed = true; }');
+  const saved=Date.now();
+  const app=await launchApp({...phone,source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],
+    settings:{sources:{hn:true,reddit:true},sourceRefreshMinutes:0,updateCheck:false},values:{...notices,
+      [hnKey]:{timestamp:saved,status:'ok',stories:[{...STORIES[0],source:'hn'}]},
+    }});
+  let releaseArticle,releaseFeed;
+  const articleGate=new Promise(resolve=>{releaseArticle=resolve});
+  const feedGate=new Promise(resolve=>{releaseFeed=resolve});
+  let articleRead=false;
+  let feedRead=false;
+  await app.context.route('https://www.reddit.com/**',async route=>{
+    const url=new URL(route.request().url());
+    if(url.pathname==='/')return route.fulfill({status:200,contentType:'text/html',body:'<title>Reddit fixture</title>'});
+    if(url.pathname==='/api/me.json')return route.fulfill({status:200,json:{data:{name:'fixture'}}});
+    if(url.pathname==='/r/popular.json'){
+      feedRead=true;await feedGate;
+      return route.fulfill({status:200,json:listing});
+    }
+    if(url.pathname==='/api/info.json'&&url.searchParams.get('url')===STORIES[0].url){
+      articleRead=true;await articleGate;
+      return route.fulfill({status:404,json:{message:'Not found'}});
+    }
+    return route.fulfill({status:200,json:{data:{children:[]}}});
+  });
+  try{
+    await app.page.emulateMedia({reducedMotion:'reduce'});
+    await app.page.goto('https://backchnnl.app/');
+    await app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).tap();
+    assert(await waitFor(()=>articleRead,5000),'the visible article started a Reddit discussion lookup');
+    await app.page.locator('#app-bar-back').tap();
+    await syncPhoneList(app.page);
+    assert(await waitFor(()=>feedRead,5000),'the manual list Sync read the actual Reddit feed');
+    releaseArticle();
+    await app.page.waitForFunction(()=>window.__articleLookupFailed,null,{timeout:4000});
+    releaseFeed();
+    assert.equal(await syncResult(app),'Synced');
+    assert.equal(await app.page.locator('#app-list-body .browse-title-link',{hasText:post.title}).count(),1);
+    assert.deepEqual(app.errors,[]);
+  }finally{releaseArticle();releaseFeed();await app.browser.close()}
+});
+
 test('phone list sync refreshes the feed without rechecking the hidden article', {timeout:15000}, async () => {
-  const app = await launchApp({sharedStore:true,hasTouch:true,viewport:{width:390,height:844},
+  const app = await launchApp({...phone,sharedStore:true,
     settings:{sources:{hn:true},sourceRefreshMinutes:0,updateCheck:false}});
   try {
     const {page} = app;
     await page.emulateMedia({reducedMotion:'reduce'});
     await page.goto('https://backchnnl.app/');
-    await page.locator('#app-list-heading-button').tap();
-    await page.getByRole('menuitem',{name:'Sync',exact:true}).tap();
+    await syncPhoneList(page);
     await page.locator('#app-list-body .browse-title-link').first().tap();
     await page.locator('#comments-content .comment').first().waitFor({state:'attached'});
     await page.locator('#app-bar-back').tap();
@@ -45,11 +156,10 @@ test('phone list sync refreshes the feed without rechecking the hidden article',
       window.__gmXHR = options => options.url.includes('hn.algolia.com/api/v1/search') ?
         {status:503,finalUrl:options.url,responseHeaders:'content-type: application/json',text:'{}'} : request(options);
     });
-    await page.locator('#app-list-heading-button').tap();
-    await page.getByRole('menuitem',{name:'Sync',exact:true}).tap();
-    assert(await waitFor(async () => ['Synced','Partial sync'].includes(await page.locator('#toast').textContent()), 5000));
+    await syncPhoneList(page);
+    assert(await waitFor(() => app.requests.filter(({url})=>url===hnURL).length===2, 5000));
+    assert(await waitFor(async () => await page.locator('#app-list-sync').getAttribute('aria-busy')!=='true', 5000));
     assert.equal(await page.locator('#toast').textContent(), 'Synced');
-    assert.equal(app.requests.filter(({url})=>url==='https://news.ycombinator.com/news').length, 2);
   } finally {await app.browser.close();}
 });
 

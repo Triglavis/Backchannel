@@ -147,9 +147,28 @@ for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its 
 	const compose = topicHeader.getByRole("button", { name: "Comment and note composer" });
 	await compose.waitFor({ timeout: 3000 });
 	assert((await compose.boundingBox()).x > (await sources.boundingBox()).x);
+	const iconStyle = (button) => button.evaluate((element) => {
+		const { backgroundColor, boxShadow, color } = getComputedStyle(element);
+		return { backgroundColor, boxShadow, color };
+	});
 	const topicMetrics = await measure(topicHeader);
 	assert.deepEqual([topicMetrics.width, topicMetrics.height, topicMetrics.titleX, topicMetrics.fontSize], [width, 36, 20, "13px"]);
 	if (verifyPaint) await assertPaintedDivider(topicHeader, width);
+	const idle = await iconStyle(compose);
+	await sources.tap();
+	assert.equal(await sources.getAttribute("aria-expanded"), "true");
+	const pressed = await iconStyle(sources);
+	await sources.tap();
+	await compose.tap();
+	const composer = page.locator(".app-topic-discussions .composer-text");
+	await composer.waitFor();
+	assert.equal(await compose.getAttribute("aria-expanded"), "true");
+	assert.notDeepEqual(pressed, idle);
+	assert.deepEqual(await iconStyle(compose), pressed);
+	await compose.tap();
+	await composer.waitFor({ state: "hidden" });
+	assert.deepEqual(await iconStyle(compose), idle);
+	assert.equal(await topicHeader.getByRole("heading").textContent(), "Discussion");
 	await page.locator("#app-bar-discussion").tap();
 	await page.locator("#app-bar-back").tap();
 	await page.getByRole("tab", { name: "By link", exact: true }).tap();

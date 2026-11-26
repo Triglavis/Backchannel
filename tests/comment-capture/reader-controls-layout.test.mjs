@@ -220,11 +220,14 @@ for(const width of [390])test(`${width}px Reader retains its bottom-right mobile
     await app.page.goto('https://backchnnl.app/');
     const row = app.page.locator('#app-list-body .app-row').filter({hasText: story.title});
     const more = row.getByRole('button', {name: 'More', exact: true});
-    await more.waitFor();
-    const menuBox = await more.evaluate(button => {
-      const {width, right} = button.getBoundingClientRect();
-      return {width, rightMargin: button.closest('.app-row').getBoundingClientRect().right - right};
-    });
+    let menuBox;
+    assert(await waitFor(async () => {
+      menuBox = await more.evaluate(button => {
+        const {width, right} = button.getBoundingClientRect();
+        return {width, rightMargin: button.closest('.app-row').getBoundingClientRect().right - right};
+      });
+      return menuBox.width > 0;
+    }, 4000), 'the row menu is visible before measuring its spacing');
     assert.deepEqual(menuBox, {width: 24, rightMargin: 16});
     await row.locator('.browse-title-link').click();
     const like=app.page.locator('#app-bar-like');
@@ -268,4 +271,62 @@ for(const width of [390])test(`${width}px Reader retains its bottom-right mobile
     assert.equal(await field.inputValue(), 'Keep the draft between openings');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
+});
+
+test('phone Reader keeps the viewport edges clear while pulling to sync', {timeout: 15000}, async t => {
+  const app = await launchApp({
+    sharedStore: true, hasTouch: true, viewport: {width: 390, height: 844},
+    settings: {sources: {hn: true}, frontPageMode: 'sources', sourceRefreshMinutes: 0, updateCheck: false},
+    values: {
+      'HNewhere:frontpage_feed:/hn/front/': {
+        timestamp: Date.now(), stories: STORIES.map(story => ({...story, source: 'hn', descendants: story.comments})),
+      },
+    },
+  });
+  t.after(() => app.browser.close());
+  const {page} = app;
+  await page.emulateMedia({reducedMotion: 'reduce'});
+  await page.goto('https://backchnnl.app/');
+  await page.locator('#app-list-body .browse-title-link').first().waitFor();
+  const viewport = page.locator('#app > .toast-viewport');
+  const boxes = () => viewport.evaluate(node => node.getClientRects().length);
+  assert.equal(await boxes(), 0, 'the notification wrapper adds no box on initial load');
+  await page.evaluate(() => {
+    const request = window.__gmXHR;
+    window.__gmXHR = async options => {
+      if (options.url === 'https://news.ycombinator.com/news') {
+        await new Promise(resolve => { window.releasePullFeed = resolve; });
+      }
+      return request(options);
+    };
+  });
+  const list = page.locator('#app-list');
+  const canceled = await list.evaluate(node => {
+    const touch = (type, y) => {
+      const event = new Event(type, {bubbles: true, cancelable: true, composed: true});
+      const point = {clientX: 120, clientY: y};
+      Object.defineProperties(event, {
+        touches: {value: type === 'touchend' ? [] : [point]},
+        changedTouches: {value: [point]},
+      });
+      return node.dispatchEvent(event);
+    };
+    touch('touchstart', 150);
+    const canceled = !touch('touchmove', 280);
+    touch('touchend', 280);
+    return canceled;
+  });
+  assert(canceled, 'the Reader handles the pull gesture');
+  await page.waitForFunction(() => typeof window.releasePullFeed === 'function');
+  const toast = viewport.locator('#toast');
+  assert.equal(await toast.textContent(), 'Syncing…');
+  assert(await waitFor(() => toast.evaluate(node => {
+    const {top, width} = node.getBoundingClientRect();
+    return getComputedStyle(node).position === 'fixed' && top > 0 && width < innerWidth * 0.9;
+  }), 2000), 'the visible toast is inset and compact');
+  assert.equal(await boxes(), 0, 'Sync feedback leaves the viewport edges clear');
+  await page.evaluate(() => window.releasePullFeed());
+  assert(await waitFor(async () => await toast.textContent() === 'Synced', 5000));
+  assert.equal(await boxes(), 0, 'the viewport stays clear when pull Sync finishes');
+  assert.deepEqual(app.errors, []);
 });

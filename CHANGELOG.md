@@ -14,12 +14,15 @@ use to detect updates, so every release bumps it.
 
 - Phone Reader list menus use consistent sizing and spacing. Topic Article
   cards offer actions for opening the article and managing its links.
-- Regular and Topic Articles share the Discussion header layout. On a phone,
-  the composer toggle sits beside Sources, and the floating controls run
-  bottom to top as Discussion, Save, and Aa.
+- Regular and Topic Articles use the same Discussion title and header layout.
+  On a phone, the composer toggle sits beside Sources and uses the same pressed
+  style. The floating controls run bottom to top as Discussion, Save, and Aa.
+- Phone Reader keeps list content visible beneath its navigation and Safari’s
+  controls after opening the page or pulling down to Sync.
 - Reader refreshes stale feeds on arrival according to the Sync schedule.
   Sync from the phone list refreshes the feeds without rechecking the
-  previously opened article's discussion.
+  previously opened article's discussion. The result reflects the current
+  refresh, so an earlier source or article failure stays with its own check.
 - Check for updates shows a checkmark and confirms when Backchannel is
   up to date.
 
