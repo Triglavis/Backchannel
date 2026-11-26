@@ -198,6 +198,7 @@ test('recent search queries are reusable in Reader and private from Sidebar host
   const recent = (page, root) => page.locator(`${root} .app-search-group`).filter({ has: page.locator('.app-search-group-name', { hasText: /^Recent searches$/ }) });
   try {
     await app.page.goto('https://backchnnl.app/');
+    await app.page.locator('#app-list-body').getByRole('link', { name: 'Fixture story 8', exact: true }).waitFor({ timeout: 10000 });
     await app.page.locator('#app-rail-search').click();
     const input = app.page.locator('#app-search-input');
     await input.fill('fixture story 8');
