@@ -167,8 +167,9 @@ for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its 
 	assert.deepEqual(await iconStyle(compose), pressed);
 	await compose.tap();
 	await composer.waitFor({ state: "hidden" });
+	assert.equal(await compose.getAttribute("aria-expanded"), "false");
+	await topicHeader.getByRole("heading", { name: "Discussion", exact: true }).tap();
 	assert.deepEqual(await iconStyle(compose), idle);
-	assert.equal(await topicHeader.getByRole("heading").textContent(), "Discussion");
 	await page.locator("#app-bar-discussion").tap();
 	await page.locator("#app-bar-back").tap();
 	await page.getByRole("tab", { name: "By link", exact: true }).tap();
