@@ -24,8 +24,12 @@ use to detect updates, so every release bumps it.
   Sync from the phone list refreshes the feeds without rechecking the
   previously opened article's discussion. The result reflects the current
   refresh, so an earlier source or article failure stays with its own check.
+- Reader and Sidebar report the correct Sync result when you switch between
+  Unread and All while feeds are loading.
 - Combined Reddit topic feeds now load in mobile Safari. A network cooldown
   shows Reddit as unavailable and keeps saved articles visible.
+- Reddit links that have already loaded appear even when another feed hits a
+  rate limit during the same Sync.
 - Reddit discussion redirects leave other Reddit reads available. Sync honors
   retry delays per host and distinguishes an outage from a rate limit.
 - Check for updates shows a checkmark and confirms when Backchannel is

@@ -11852,8 +11852,13 @@ button {
 				!transportReady && (!force && frontPageNextAttempt(cached, refreshSettings, now) > now || cached?.retryAt > now)) return savedResult();
 			const cooldown = feed.source === "reddit" ? await load(REDDIT_POLL_KEY, null) : null;
 			if (cooldown?.until > now) {
-				const saved = savedResult();
-				return { ...saved, status: cooldown.status === "limited" ? "limited" : "unavailable", cached: saved.stories.length > 0, retryAt: cooldown.until };
+				const batch = redditReadBatch;
+				const staged = batch?.connected && !batch.closing && !batch.cancelled &&
+					batch.pathIds?.has(redditFrontPagePath(feed.target));
+				if (!staged) {
+					const saved = savedResult();
+					return { ...saved, status: cooldown.status === "limited" ? "limited" : "unavailable", cached: saved.stories.length > 0, retryAt: cooldown.until };
+				}
 			}
 			if (scheduled && (document.visibilityState === "hidden" || !scheduledUI || activeFrontPageUI() !== scheduledUI ||
 				!frontPageFeedsForView(refreshSettings, activeFrontPageView()).some((active) => frontPageFeedKey(active) === key))) return savedResult();
@@ -12030,9 +12035,10 @@ button {
 			? null : loadDefaultFrontPageList(defaultFeeds, settings);
 		const onUpdate = async (snapshot) => paint(snapshot, await defaultList);
 		const [snapshot] = await Promise.all([loadFrontPages({ ...options, feeds, settings, onUpdate }), defaultList]);
-		const outcome = await onUpdate(snapshot);
-		if (!outcome || !options.dueFeedKeys) return outcome;
-		return { feedStates: outcome.feedStates.filter((_, index) => options.dueFeedKeys.has(frontPageFeedKey(feeds[index]))) };
+		await onUpdate(snapshot);
+		const { feedStates = [] } = snapshot;
+		if (!options.dueFeedKeys) return { feedStates };
+		return { feedStates: feedStates.filter((_, index) => options.dueFeedKeys.has(frontPageFeedKey(feeds[index]))) };
 	}
 
 	async function loadFrontPagesRequest(options, request) {
@@ -19696,7 +19702,6 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 				renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view, hasHeadlines);
 			}
-			return { feedStates };
 		};
 		return loadFrontPageView(view, settings, { force: options.force, automatic: options.automatic, redditReady: options.redditReady, dueFeedKeys: options.dueFeedKeys }, paint);
 	}
@@ -52102,22 +52107,19 @@ ${frontPageChooserHTML()}
 				refreshSaveControls().catch(console.error);
 				decorateAppRows(list);
 				await paintAppCounts();
-				return { feedStates };
 			};
 			outcome = await loadFrontPageView(view, cardSettings, { force, automatic, redditReady, dueFeedKeys }, paint);
 		}
 
-		if (request !== state.listSeq) {
-			return;
-		}
+		if (request !== state.listSeq) return outcome;
 		await appendAppTopicExtra(list, () => request === state.listSeq);
-		if (request !== state.listSeq) return;
+		if (request !== state.listSeq) return outcome;
 
 		state.listView = view;
 		decorateAppRows(list);
 		await paintAppCounts();
 		scheduleFrontPageRefresh();
-		return request === state.listSeq ? outcome : undefined;
+		return outcome;
 	}
 
 	function decorateAppRows(list) {

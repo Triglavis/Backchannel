@@ -35,10 +35,10 @@ const redditKey='HNewhere:frontpage_feed:/reddit/front/';
 const notices={'HNewhere:reddit_read_window_notice':2};
 const redditRefreshKey='HNewhere:reddit_shared_refresh';
 
-async function syncResult(app){
-  const toast=app.page.locator('#toast');
-  assert(await waitFor(async()=>['Synced','Partial sync'].includes(await toast.textContent()),6000));
-  return toast.textContent();
+async function syncResult(app, selector = '#toast'){
+  const status = app.page.locator(selector);
+  assert(await waitFor(async () => ['Synced','Partial sync'].includes(await status.textContent()), 6000));
+  return status.textContent();
 }
 
 for(const fail of [false,true]) test(`automatic phone Sync reports ${fail?'a fresh failure':'success'} despite an old feed failure`,{timeout:12000},async()=>{
@@ -63,6 +63,62 @@ async function syncPhoneList(page){
   await page.locator('#app-list-heading-button').tap();
   await page.getByRole('menuitem',{name:'Sync',exact:true}).tap();
 }
+
+for (const surface of ['phone Reader', 'desktop Reader', 'Sidebar']) test(`${surface} Sync reports a feed failure after switching from Unread to All`, {timeout:18000}, async () => {
+  const mobile = surface === 'phone Reader';
+  const sidebar = surface === 'Sidebar';
+  const readStory = STORIES[5];
+  const readURL = new URL(readStory.url);
+  const lastSuccessAt = Date.now() - 60_000;
+  const app = await launchApp({
+    ...(mobile && phone),
+    ...(sidebar && {appHost: new URL(STORIES[0].url).hostname}),
+    sharedStore: true,
+    settings: {sources: {hn: true}, sourceRefreshMinutes: 0, updateCheck: false, autoOpenSidebar: sidebar},
+    values: {
+      [hnKey]: {timestamp: lastSuccessAt, lastSuccessAt, status: 'ok', stories: [STORIES[0], readStory].map(story => ({...story, source: 'hn'}))},
+      'HNewhere:seen_comments': {['url:' + readURL.host + readURL.pathname]: Math.floor(lastSuccessAt / 1000)},
+    },
+  });
+  const {page} = app;
+  const sync = page.locator(sidebar ? '#browse-home-sync' : '#app-list-sync');
+  const list = page.locator(sidebar ? '#browse-list' : '#app-list-body');
+  const readRow = list.getByRole('link', {name: readStory.title, exact: true});
+  try {
+    await page.emulateMedia({reducedMotion: 'reduce'});
+    await page.goto(sidebar ? STORIES[0].url : 'https://backchnnl.app/');
+    if (sidebar) {
+      await page.locator('#comments-content .comment[data-comment-id]').first().waitFor();
+      await page.locator('#browse-toggle .wordmark-root').click();
+      await page.locator('#panel.browsing').waitFor({timeout:5000});
+    } else {
+      await list.getByRole('link', {name: STORIES[0].title, exact: true}).first().waitFor({timeout:5000});
+    }
+    assert.equal(await readRow.count(), 0, 'Unread hides the previously read link');
+    await page.evaluate(url => {
+      const request = window.__gmXHR;
+      window.__gmXHR = async options => {
+        if (options.url !== url) return request(options);
+        await new Promise(resolve => window.__releaseFeed = resolve);
+        return {status: 503, finalUrl: url, responseHeaders: 'content-type: text/html', text: 'Unavailable'};
+      };
+    }, hnURL);
+    if (mobile) await syncPhoneList(page);
+    else await sync.click();
+    await page.waitForFunction(() => typeof window.__releaseFeed === 'function', null, {timeout:5000});
+    assert.equal(await sync.getAttribute('aria-busy'), 'true');
+    const all = page.locator(sidebar ? '#browse-tab-all' : '#app-rail [data-app-view="all"]');
+    await all[mobile ? 'tap' : 'click']();
+    const selected = sidebar ? 'aria-selected' : 'aria-pressed';
+    assert(await waitFor(async () => await all.getAttribute(selected) === 'true', 4000));
+    await page.evaluate(() => window.__releaseFeed());
+    assert.equal(await syncResult(app, sidebar ? '#header-subtitle' : '#toast'), 'Partial sync');
+    assert.equal(app.store.get(hnKey).status, 'unavailable');
+    assert.equal(app.store.get(hnKey).lastSuccessAt, lastSuccessAt);
+    assert.equal(await readRow.count(), 1, 'the completed Sync preserves the All view');
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
+});
 
 const post={id:'fresh123',url:'https://framed.example.com/reddit',title:'A current Reddit feed story',author:'fixture',subreddit:'news',permalink:'/r/news/comments/fresh123/article/',num_comments:2,created_utc:Math.floor(Date.now()/1000)-60,score:20};
 const listing={data:{children:[{kind:'t3',data:post}]}};
@@ -144,6 +200,77 @@ test('phone Sync fetches combined Reddit topic feeds without redirecting to the 
     assert(await waitFor(()=>app.context.pages().length===1,5000),'the helper closes after delivering the listings');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
+});
+
+test('phone Sync keeps a completed Reddit listing when another listing hits a rate limit', {timeout:22000}, async () => {
+  const cooldownKey = 'HNewhere:reddit_poll';
+  const bridgeKey = /^HNewhere:bridge_result:[0-9a-f]{32}$/;
+  const replyKey = /^HNewhere:bridge_result:[0-9a-f]{32}:\d+$/;
+  const successPath = '/r/science%2Bspace.json';
+  const limitedPath = '/r/technology%2BFuturology.json';
+  const successKey = 'HNewhere:frontpage_feed:science/reddit/subreddits/science+space';
+  const app = await launchApp({
+    ...phone, sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com'],
+    settings: {sources: {hn: true, reddit: true}, frontPageMode: 'topics', frontPageTopics: ['science', 'technology'], sourceRefreshMinutes: 0, updateCheck: false},
+    values: notices,
+  });
+  const {page, context, store} = app;
+  const paths = [];
+  let helpers = 0;
+  context.on('page', () => helpers++);
+  let releaseReader;
+  const readerReady = new Promise(resolve => releaseReader = resolve);
+  await context.exposeFunction('__waitForRedditReplies', () => readerReady);
+  await page.addInitScript(pattern => {
+    const readyKey = new RegExp(pattern);
+    const getStore = window.__gmStore;
+    window.__gmStore = async (op, key, value) => {
+      if (op === 'get' && readyKey.test(key)) await window.__waitForRedditReplies();
+      return getStore(op, key, value);
+    };
+  }, bridgeKey.source);
+  await context.route('https://www.reddit.com/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/') return route.fulfill({status: 200, contentType: 'text/html', body: '<title>Reddit fixture</title>'});
+    if (path === '/api/me.json') return route.fulfill({status: 200, json: {data: {name: 'fixture'}}});
+    paths.push(path);
+    if (path === successPath) return route.fulfill({status: 200, json: listing});
+    assert.equal(path, limitedPath);
+    return route.fulfill({status: 429, headers: {'Retry-After': '60'}, json: {message: 'Rate limited'}});
+  });
+  try {
+    await page.emulateMedia({reducedMotion: 'reduce'});
+    await page.goto('https://backchnnl.app/');
+    await syncPhoneList(page);
+    const replies = () => [...store].filter(([key, value]) => replyKey.test(key) && value.phase === 'response').map(([, value]) => value.response);
+    assert(await waitFor(() => replies().length === 2 && store.get(cooldownKey)?.until > Date.now(), 7000),
+      'the helper publishes both listings before Reader consumes them');
+    assert.deepEqual(replies().map(response => response.status).sort(), [200, 429]);
+    assert(replies().some(response => response.ok && response.json?.data?.children?.[0]?.data?.title === post.title));
+    const cooldown = store.get(cooldownKey);
+    releaseReader();
+
+    const article = page.locator('#app-list-body').getByRole('link', {name: post.title, exact: true});
+    assert.equal(await syncResult(app), 'Partial sync');
+    assert.equal(await article.count(), 1, 'Reader shows the successful listing during the cooldown');
+    assert(store.get(successKey).stories.some(story => story.title === post.title), 'the successful listing is cached');
+    assert.deepEqual(store.get(cooldownKey), cooldown, 'reading the listing preserves the provider cooldown');
+    assert(await waitFor(() => store.get(redditRefreshKey)?.state === 'done' && context.pages().length === 1, 5000));
+
+    await page.locator('#toast').evaluate(node => {
+      window.__syncMessages = [];
+      new MutationObserver(() => window.__syncMessages.push(node.textContent)).observe(node, {childList: true, characterData: true, subtree: true});
+    });
+    await syncPhoneList(page);
+    assert(await waitFor(() => page.evaluate(() => window.__syncMessages.includes('Syncing…') && window.__syncMessages.includes('Partial sync')), 5000));
+    assert.equal(await article.count(), 1);
+    assert.deepEqual(paths.sort(), [successPath, limitedPath].sort(), 'a second Sync during the cooldown makes no listing request');
+    assert.equal(helpers, 1, 'the second Sync does not open a new Reddit helper');
+    assert.deepEqual(app.errors, []);
+  } finally {
+    releaseReader();
+    await app.browser.close();
+  }
 });
 
 test('a Reddit discussion redirect leaves Popular available for the next phone Sync',{timeout:22000},async()=>{
