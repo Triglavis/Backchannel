@@ -102,11 +102,11 @@ async function assertPaintedMenuDots(trigger) {
 	assert.equal(columns.filter((ink, column) => ink && !columns[column - 1]).length, 3, "the ellipsis paints three distinct dots");
 }
 
-async function assertPaintedDivider(header, viewportWidth) {
+async function assertPaintedDivider(header, viewportWidth, color) {
 	const { width, height, pixels } = await screenshotPixels(header);
 	assert.equal(width, viewportWidth);
 	const rule = pixels.slice((height - 1) * width * 4);
-	assert(rule.every((channel, index) => channel === [221, 221, 221, 255][index % 4]), "the light header divider is painted across the full crop");
+	assert(rule.every((channel, index) => channel === color[index % 4]), "the theme's divider is painted across the full header");
 }
 
 for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its own menu and matches the article discussion header`, async (t) => {
@@ -136,9 +136,9 @@ for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its 
 	await page.locator("#app-bar-discussion").tap();
 	const measure = (header) => header.evaluate((element) => {
 		const { width, height, x } = element.getBoundingClientRect();
-		const { borderBottomWidth, borderBottomColor } = getComputedStyle(element);
+		const { borderBottomWidth } = getComputedStyle(element);
 		const title = element.querySelector("h2");
-		return { width, height, x, borderBottomWidth, borderBottomColor,
+		return { width, height, x, borderBottomWidth,
 			titleX: title.getBoundingClientRect().x, fontSize: getComputedStyle(title).fontSize };
 	});
 	const topicHeader = page.locator(".app-topic-discussion-head");
@@ -153,7 +153,7 @@ for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its 
 	});
 	const topicMetrics = await measure(topicHeader);
 	assert.deepEqual([topicMetrics.width, topicMetrics.height, topicMetrics.titleX, topicMetrics.fontSize], [width, 36, 20, "13px"]);
-	if (verifyPaint) await assertPaintedDivider(topicHeader, width);
+	if (verifyPaint) await assertPaintedDivider(topicHeader, width, [220, 220, 210, 255]);
 	const idle = await iconStyle(compose);
 	await sources.tap();
 	assert.equal(await sources.getAttribute("aria-expanded"), "true");
@@ -183,7 +183,35 @@ for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its 
 	const articleHeader = page.locator("#panel > header");
 	await articleHeader.getByRole("heading", { name: "Discussion", exact: true }).waitFor();
 	assert.deepEqual(topicMetrics, await measure(articleHeader));
-	if (verifyPaint) await assertPaintedDivider(articleHeader, width);
+	if (verifyPaint) await assertPaintedDivider(articleHeader, width, [221, 221, 221, 255]);
+	assert.deepEqual(app.errors, []);
+});
+
+test("the phone Topic Article Discussion divider follows the selected Style theme", async (t) => {
+	const width = 390;
+	const app = await openReader({ phone: true, phoneWidth: width });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+	await page.goto(base);
+	await card(page, 0).tap();
+	await articlePane(page).waitFor();
+	await page.locator("#app-bar-discussion").tap();
+	const header = page.locator(".app-topic-discussion-head");
+	const style = page.locator("#app-bar-view");
+	for (const [theme, channels] of [
+		["Gray", [97, 97, 100]], ["Night", [44, 44, 44]], ["Sepia", [224, 211, 180]],
+		["White", [228, 228, 228]], ["Paper", [220, 220, 210]], ["Auto", [44, 44, 44]],
+	]) {
+		await style.tap();
+		await page.locator("#app-view-menu").getByRole("button", { name: theme, exact: true }).tap();
+		await style.tap();
+		const color = await header.evaluate((node) => getComputedStyle(node).borderBottomColor);
+		assert.equal(color, "rgb(" + channels.join(", ") + ")", theme + " colors the Discussion divider");
+		if (theme === "Gray" && process.env.ENGINE === "webkit") {
+			await assertPaintedDivider(header, width, [...channels, 255]);
+		}
+	}
 	assert.deepEqual(app.errors, []);
 });
 

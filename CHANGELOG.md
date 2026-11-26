@@ -15,6 +15,7 @@ use to detect updates, so every release bumps it.
 - Phone Reader list menus use consistent sizing and spacing. Topic Article
   cards offer actions for opening the article and managing its links.
 - Regular and Topic Articles use the same Discussion title and header layout.
+  The Topic Article divider follows the selected Reader theme.
   On a phone, the composer toggle sits beside Sources and uses the same pressed
   style. The floating controls run bottom to top as Discussion, Save, and Aa.
 - Phone Reader keeps list content visible beneath its navigation and Safari’s

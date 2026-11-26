@@ -38783,7 +38783,6 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	--rail-column:50px;
 	--app-split:.6;
 	--app-ui-font:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
-	--app-discussion-header-rule:var(--border-soft);
 	display:grid;
 	grid-template-columns:var(--rail-column) min(var(--app-list-width, 300px), calc(100% - var(--rail-column) - 201px)) minmax(0, 1fr);
 	grid-template-rows:minmax(0, 1fr);
@@ -41917,7 +41916,6 @@ header .item-action-link {
 
 	.app-topic-discussion-head {
 		margin-inline:calc(-1 * var(--topic-discussion-gutter));
-		border-bottom-color:var(--app-discussion-header-rule);
 	}
 
 	#app-bar {
