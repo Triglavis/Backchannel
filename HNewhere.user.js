@@ -9971,6 +9971,7 @@ button {
 
 	function retireNotesSection(section) {
 		const body = section.querySelector(".notepad-body");
+		delete section.dataset.notesSection;
 
 		if (prefersReducedMotion()) {
 			section.remove();
@@ -9992,60 +9993,58 @@ button {
 		});
 	}
 
-	async function refreshNotepadInPlace() {
+	let notepadRender = Promise.resolve();
+
+	async function refreshNotepadInPlace({ ui = sidebarUI, settings, collapsedKeys } = {}) {
 		if (!appState) return true;
-		if (!sidebarUI?.body) {
-			return false;
-		}
+		if (!ui?.body) return false;
+		const generation = sidebarGeneration;
+		const run = discussionRenderRun;
+		const page = openPageKey();
+		const current = () => appState && sidebarUI === ui && generation === sidebarGeneration &&
+			run === discussionRenderRun && openPageKey() === page;
 
-		const settings = await loadSettings();
-		const notes = settings.notepad ? await loadNotes() : [];
-		let section = sidebarUI.body.querySelector("[data-notes-section]");
+		const render = async () => {
+			if (!current()) return true;
+			const preferences = settings || await loadSettings();
+			const notes = preferences.notepad ? await loadNotes() : [];
+			if (!current()) return true;
+			let section = ui.body.querySelector("[data-notes-section]");
 
-		if (!notes.length) {
-			if (section) {
-				renderedComments = renderedComments.filter(
-					(rendered) => !section.contains(rendered.element),
-				);
-				retireNotesSection(section);
+			if (!notes.length) {
+				if (section) {
+					discardDetachedComments(section);
+					retireNotesSection(section);
+				}
+				return true;
 			}
 
-			return true;
-		}
+			const collapsed = collapsedKeys || await loadCollapsed();
+			if (!current()) return true;
+			const added = section ? null : notesSection({ empty: false });
+			if (added) {
+				section = added.section;
+				placeNotesSection(ui, section);
+			}
+			const body = section.querySelector(".notepad-body");
+			const discussion = notesCollective(notes, pageAddress());
+			discardDetachedComments(body);
+			body.replaceChildren();
 
-		if (!section) {
-			section = notesSection({ empty: false }).section;
-			placeNotesSection(sidebarUI, section);
-		}
-
-		const body = section.querySelector(".notepad-body");
-		const discussion = notesCollective(notes, pageAddress());
-
-		renderedComments = renderedComments.filter(
-			(rendered) => !body.contains(rendered.element),
-		);
-		body.replaceChildren();
-
-		if (discussion) {
 			const thread = notesThread(discussion);
-			const collapsedKeys = await loadCollapsed();
-
 			for (const key of thread.rootKeys) {
-				await renderComment(
-					key,
-					thread,
-					body,
-					discussion,
-					0,
-					collapsedKeys,
-					sidebarGeneration,
-				);
+				await renderComment(key, thread, body, discussion, 0, collapsed, generation);
+				if (!current()) {
+					discardDetachedComments(body);
+					return true;
+				}
 			}
-		}
-
-		settleNotepad(body);
-
-		return true;
+			if (added) added.settle();
+			else settleNotepad(body);
+			return true;
+		};
+		notepadRender = notepadRender.then(render, render);
+		return notepadRender;
 	}
 
 	async function reopenForNotes() {
@@ -30210,35 +30209,10 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 		await paintCollectionTag(ui, stories, seenTimes, { counted: false });
 
-		const notes = appState && settings.notepad ? await loadNotes() : [];
-		const notesDiscussion = notesCollective(notes, pageAddress());
-
-		if (settings.notepad && notes.length) {
-			const held = notesSection({ empty: false });
-
-			placeNotesSection(ui, held.section);
-
-			if (notesDiscussion) {
-				const thread = notesThread(notesDiscussion);
-
-				for (const key of thread.rootKeys) {
-					if (generation !== sidebarGeneration || run !== discussionRenderRun) {
-						return;
-					}
-
-					await renderComment(
-						key,
-						thread,
-						held.body,
-						notesDiscussion,
-						0,
-						collapsedKeys,
-						generation,
-					);
-				}
-			}
-
-			held.settle();
+		if (appState) {
+			if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
+			await refreshNotepadInPlace({ ui, settings, collapsedKeys });
+			if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
 		}
 
 		const context = new Map(
