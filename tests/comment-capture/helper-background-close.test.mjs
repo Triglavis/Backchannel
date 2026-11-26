@@ -7,18 +7,17 @@ async function setup(lostOpen=false){
   const original=await readFile(new URL('../../HNewhere.user.js',import.meta.url),'utf8');
   const loop='if (!redditReadHelperLocation(nonce)) break;\n\t\t\t\t\tconst current = await readBridgePayload(nonce);';
   assert(original.includes(loop));
-  let source=original.replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;')
-    .replace('\t\tbatch.closing = true;','\t\tbatch.closing = true;\n\t\tif (globalThis.__holdHelperCleanup) await new Promise(resolve => { globalThis.__releaseHelperCleanup = resolve; });')
+  let source=original.replace('\t\tbatch.closing = true;','\t\tbatch.closing = true;\n\t\tif (globalThis.__holdHelperCleanup) await new Promise(resolve => { globalThis.__releaseHelperCleanup = resolve; });')
     .replace(loop,'if (!redditReadHelperLocation(nonce)) break;\n\t\t\t\t\tif (globalThis.__freezeRedditHelper) await new Promise(resolve => { globalThis.__resumeHelper = resolve; });\n\t\t\t\t\tconst current = await readBridgePayload(nonce);');
   if(lostOpen)source=source.replace('const REDDIT_OPEN_TIMEOUT_MS = 30000;','const REDDIT_OPEN_TIMEOUT_MS = 300;').replace('init().catch(console.error);',`if(location.hostname==='www.reddit.com')window.__freezeRedditHelper=true;else{const open=GM.openInTab;GM.openInTab=async(...args)=>{await open(...args);return new Promise(()=>{})}}init().catch(console.error);`);
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2}});
+  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2}});
   const opened=[];app.context.on('page',page=>opened.push(page));
   await app.context.route('https://www.reddit.com/**',async route=>{
     const path=new URL(route.request().url()).pathname;
     const body=path==='/'?'<title>Reddit fixture</title>':path==='/api/me.json'?JSON.stringify({data:{name:'fixture'}}):JSON.stringify({data:{children:[]}});
     await route.fulfill({status:200,contentType:path==='/'?'text/html':'application/json',body}).catch(()=>{});
   });
-  await app.page.goto('https://backchnnl.app/');await app.page.locator('#app-list-body .browse-title-link').first().waitFor();
+  await app.page.goto('https://backchnnl.app/');await app.page.locator('#app-list-sync').waitFor();
   await app.page.evaluate(()=>{window.__holdHelperCleanup=true});await app.page.locator('#app-list-sync').click();
   assert(await waitFor(async()=>await app.page.evaluate(()=>typeof window.__releaseHelperCleanup==='function')&&opened.length===1,15000));
   const helper=opened[0];await helper.evaluate(()=>{window.__freezeRedditHelper=true});

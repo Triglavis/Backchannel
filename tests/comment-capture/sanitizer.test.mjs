@@ -8,7 +8,16 @@ const position = source.indexOf("function redditReadPath(");
 const start = source.lastIndexOf("// #region hnewhere-test-export", position);
 const end = source.indexOf("// #endregion hnewhere-test-export", position);
 assert(start >= 0 && end > start, "Reddit transport test exports are missing");
-const { publicRedditJSON } = new Function(`${source.slice(start, end)}; return { publicRedditJSON };`)();
+const { publicRedditJSON, redditReadPath } = new Function(`${source.slice(start, end)}; return { publicRedditJSON, redditReadPath };`)();
+
+test("the Reddit bridge normalizes combined listings without enlarging the allowed paths", () => {
+  const expected = "/r/science%2Bspace.json?limit=100";
+  assert.equal(redditReadPath("/r/science+space.json?limit=100"), expected);
+  assert.equal(redditReadPath("/r/science%2bspace.json?limit=100"), expected);
+  assert.equal(redditReadPath(expected), expected);
+  assert.equal(redditReadPath("/r/science%252Bspace.json?limit=100"), null);
+  assert.equal(redditReadPath("/r/science%2Fspace.json?limit=100"), null);
+});
 
 test("the signed-in bridge preserves deeply nested discussion replies", () => {
   let node = { kind: "t1", data: { id: "leaf", body: "deep reply", author: "reader", replies: "" } };

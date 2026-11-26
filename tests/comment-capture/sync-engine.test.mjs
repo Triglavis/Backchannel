@@ -282,19 +282,44 @@ test('thread requests retain a provider cooldown after the loader returns a fail
   }finally{await app.browser.close()}
 });
 
-test('concurrent rate limits keep the longest provider Retry-After',{timeout:15000},async()=>{
-  const app=await launchApp({source:original.replace(seam,'window.__jobs={sourceReadJob};'),sharedStore:true,settings:{sources:{hn:true},updateCheck:false}});
+test('concurrent rate limits keep the longest Retry-After for the same host',{timeout:15000},async()=>{
+  const app=await launchApp({source:original.replace(seam,'window.__jobs={sourceReadJob,checkedSourceJSON};'),sharedStore:true,settings:{sources:{hn:true},updateCheck:false}});
   try{
     await app.page.goto('https://backchnnl.app/');await app.page.waitForFunction(()=>window.__jobs);
     const result=await app.page.evaluate(async()=>{
-      const releases=[];const long=Date.now()+120000,short=Date.now()+30000;
-      const limited=(target,retryAt)=>__jobs.sourceReadJob('hn','discover',target,()=>new Promise((resolve,reject)=>releases.push(()=>reject(Object.assign(new Error('limited'),{readStatus:'limited',retryAt})))));
-      const one=limited('one',long),two=limited('two',short);
-      while(releases.length<2)await Promise.resolve();releases[0]();await one;releases[1]();await two;
-      let attempted=false;const next=await __jobs.sourceReadJob('hn','feed','later',async()=>{attempted=true;return []});
-      return {attempted,status:next.status,retryAt:next.retryAt,expected:long};
+      const feedHost='https://public.api.bsky.app';
+      const searchHost='https://constellation.microcosm.blue';
+      const releases=new Map();
+      const nativeRequest=window.__gmXHR;
+      const requested=[];
+      window.__gmXHR=async options=>{
+        const url=new URL(options.url);
+        if(!url.pathname.startsWith('/retry-fixture/'))return nativeRequest(options);
+        requested.push(url.pathname);
+        const seconds=Number(url.pathname.split('/').at(-1));
+        if(!seconds)return {status:200,finalUrl:options.url,text:'[]'};
+        return new Promise(resolve=>releases.set(seconds,()=>resolve({
+          status:429,finalUrl:options.url,responseHeaders:'Retry-After: '+seconds,text:'{}',
+        })));
+      };
+      const read=(host,key)=>__jobs.sourceReadJob('bsky','discover',host+key,
+        ()=>__jobs.checkedSourceJSON(host+'/retry-fixture/'+key,Array.isArray));
+      const one=read(feedHost,120),two=read(feedHost,30);
+      while(releases.size<2)await Promise.resolve();
+      releases.get(120)();
+      const first=await one;
+      releases.get(30)();
+      await two;
+      const sameHost=await read(feedHost,'feed');
+      const otherHost=await read(searchHost,'search');
+      return {attempted:sameHost.attempted,status:sameHost.status,retryAt:sameHost.retryAt,
+        expected:first.retryAt,otherStatus:otherHost.status,requested};
     });
-    assert.deepEqual(result,{attempted:false,status:'limited',retryAt:result.expected,expected:result.expected});
+    assert.equal(result.attempted,false);
+    assert.equal(result.status,'limited');
+    assert.equal(result.retryAt,result.expected);
+    assert.equal(result.otherStatus,'ok');
+    assert.deepEqual(result.requested.sort(),['/retry-fixture/120','/retry-fixture/30','/retry-fixture/search']);
   }finally{await app.browser.close()}
 });
 

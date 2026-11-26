@@ -256,28 +256,46 @@ for (const sidebar of [true, false]) test(`${sidebar ? 'Sidebar' : 'Reader'} res
 });
 
 test("Reader shows the bird loader and aligned loading hint without a progress bar", { timeout: 45000 }, async () => {
-  const fixture = discussionFixture(url);
+  const fixture = discussionFixture(url, { rootCount: 4, replyRoots: 0 });
+  const first = STORIES[0];
+  const timestamp = Date.now();
   const app = await launchApp({
     sharedStore: true,
     handler: "Tampermonkey",
-    settings: { sources: { hn: true, reddit: true }, frontPageMode: "sources", updateCheck: false },
-    values: { "HNewhere:reddit_tier": { tier: "archive", timestamp: Date.now() } },
-    responses: [
-      { match: (path) => path.includes('/api/posts/search'), delay: 800, json: { data: fixture.posts } },
-      ...fixture.posts.map((post) => ({ match: (path) => path.includes('/api/comments/tree') && new URL(path).searchParams.get('link_id') === `t3_${post.id}`, delay: 600, json: { data: fixture.trees.get(post.id) } })),
-      ...fixture.responses,
-    ],
+    settings: { sources: { hn: true, reddit: true }, frontPageMode: "sources", sourceRefreshMinutes: 0, updateCheck: false, annotations: false },
+    values: {
+      "HNewhere:reddit_tier": { tier: "archive", timestamp },
+      "HNewhere:frontpage_feed:/hn/front/": { timestamp, stories: [{ ...first, source: "hn", descendants: first.comments }] },
+    },
+    responses: fixture.responses,
   });
   try {
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-list-body .browse-title-link', { hasText: STORIES[0].title }).first().click();
+    const story = app.page.locator('#app-list-body').getByRole('link', { name: first.title, exact: true });
+    await story.waitFor();
+    await app.page.evaluate((storyId) => {
+      const request = window.__gmXHR;
+      const hn = new Promise(resolve => window.__releaseFixtureHN = resolve);
+      const reddit = new Promise(resolve => window.__releaseFixtureReddit = resolve);
+      window.__gmXHR = async (options) => {
+        const { hostname, pathname } = new URL(options.url);
+        if (hostname === 'hn.algolia.com' || (hostname === 'hacker-news.firebaseio.com' && pathname === `/v0/item/${storyId}.json`)) await hn;
+        if (pathname === '/api/posts/search') await reddit;
+        return request(options);
+      };
+    }, first.id);
+    await story.click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading .discussion-bird').count() > 0, 3000), "the bird loader appears during discovery");
     assert.match(await app.page.locator('#panel.app-docked > .discussion-progress-strip').textContent(), /checking sources/i, 'the loading hint appears during discovery');
     assert(await app.page.locator('#app-discussion-compose .composer-text').isVisible(), 'the bottom composer is visible while discovery is still pending');
-    assert(await app.page.locator('#app-discussion-meta .page-header-disclosure').isVisible(), 'the Sources control is visible while discovery is still pending');
-    await app.page.locator('#app-discussion-meta .page-header-disclosure').click();
-    assert.equal(Math.round((await app.page.locator('#app-discussion-meta .source-menu').boundingBox()).width), 300, 'the Sources menu is 300px wide');
-    await app.page.locator('#app-discussion-meta .page-header-disclosure').click();
+    const sources = app.page.locator('#app-discussion-meta .page-header-disclosure');
+    assert(await sources.isVisible(), 'the Sources control is visible while discovery is still pending');
+    await sources.click();
+    const menu = app.page.locator('#app-discussion-meta .source-menu');
+    await menu.waitFor();
+    assert.equal(Math.round((await menu.boundingBox()).width), 300, 'the Sources menu is 300px wide');
+    await sources.click();
+    await menu.waitFor({ state: 'hidden' });
     assert(await app.page.locator('#app-discussion-compose .compose-send-comment').isDisabled(), 'submitting remains disabled while discovering discussions');
     await app.page.locator('.compose-box .composer-text').fill('Reader draft while loading');
     assert.doesNotMatch(await app.page.locator('#comments-content').textContent(), /Finding what people said/);
@@ -301,9 +319,12 @@ test("Reader shows the bird loader and aligned loading hint without a progress b
     const composer = app.page.locator('#panel .compose-box');
     assert.equal(await composer.count(), 1);
     assert.equal(await composer.locator('.composer-text').inputValue(), 'Reader draft while loading', 'the early draft is kept when discovered sources arrive');
+    await app.page.evaluate(() => window.__releaseFixtureHN());
     assert(await waitFor(async()=>await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').count()>0,10000),'a ready discussion appears before slower sources finish');
     assert(!(await composer.locator('.compose-send-note').isDisabled()),'notes become available with the ready discussion');
     assert(!(await composer.locator('.compose-send-comment').isDisabled()),'a slow source does not prevent replying to an available source');
+    await app.page.evaluate(() => window.__releaseFixtureReddit());
+    await app.page.locator('#comments-content .comment[data-comment-id="reddit:root0"]').waitFor();
     const loading = app.page.locator('#comments-content .discussion-loading');
     assert(await waitFor(async () => await loading.count() === 0, 20000), 'Reader removes the initial loader while ready comments remain visible');
     assert(await app.page.locator('#comments-content .comment[data-comment-id] .text').first().textContent(), 'the real comment text remains available');

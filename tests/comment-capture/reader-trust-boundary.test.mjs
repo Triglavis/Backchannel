@@ -290,7 +290,14 @@ test("A PDF note handed off to Reader keeps its page and joins existing notes fo
 	const key = "HNewhere:notes:pdf:edition-archive-test";
 	const other = "HNewhere:notes:pdf:edition-other-test";
 	const previousNote = "Page six from an earlier reading";
+	const original = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const beforeNotes = "await paintCollectionTag(ui, stories, seenTimes, { counted: false });";
+	assert(original.includes(beforeNotes));
+	const source = original.replace(beforeNotes, "if (appState) await window.__holdInitialDiscussion();\n\t\t" + beforeNotes);
+	const discussion = Promise.withResolvers();
+	let initialRenderWaiting = false;
 	const app = await launchApp({
+		source,
 		topHosts: ["edition.example.org"], sharedStore: true, extraStories: [{ url, title }],
 		settings: { autoOpenSidebar: true, updateCheck: false },
 		pages: { [url]: { html: `<title>${title}</title><article><div class="pdfViewer"><div class="page" data-page-number="7"><div class="textLayer"><p>A long passage in the seventh page of the paper.</p></div></div></div></article>` } },
@@ -304,6 +311,10 @@ test("A PDF note handed off to Reader keeps its page and joins existing notes fo
 		},
 	});
 	try {
+		await app.context.exposeFunction("__holdInitialDiscussion", () => {
+			initialRenderWaiting = true;
+			return discussion.promise;
+		});
 		await app.context.addInitScript((pdfURL) => {
 			if (location.href !== pdfURL) return;
 			window.PDFViewerApplication = { pdfDocument: {
@@ -326,14 +337,21 @@ test("A PDF note handed off to Reader keeps its page and joins existing notes fo
 		]);
 		const composer = reader.locator("[data-hnewhere-note-composer]");
 		await composer.getByRole("textbox", { name: "Your note" }).fill(privateNote);
+		assert(await waitFor(() => initialRenderWaiting, 6000), "initial Discussion rendering is still in progress");
 		await composer.getByRole("button", { name: "Save note" }).click();
-		await reader.locator("[data-notes-section]").getByText(privateNote).waitFor({ timeout: 6000 });
+		const notepad = reader.locator("[data-notes-section]");
+		await notepad.getByText(privateNote, { exact: true }).waitFor({ timeout: 6000 });
+		discussion.resolve();
+		await reader.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor();
+		assert.equal(await notepad.count(), 1, "initial rendering reuses the Notepad populated by the save");
+		assert.equal(await notepad.getByText(privateNote, { exact: true }).count(), 1);
 		const notes = app.store.get(key).notes;
 		assert.deepEqual(notes.map(({ text, page }) => [text, page]), [[previousNote, 6], [privateNote, 7]]);
 		assert.equal(app.store.get(other).notes.length, 1);
 		assert.equal(app.store.has("HNewhere:notes:pdf:edition-viewer-test"), false);
 		assert.equal(app.store.has("HNewhere:notes:url:edition.example.org/research.pdf"), false);
 	} finally {
+		discussion.resolve();
 		await app.browser.close();
 	}
 });

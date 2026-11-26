@@ -42,7 +42,7 @@ function responseFor(i, more = []) {
 	};
 }
 
-async function openReader({ phone, hidden, more = [], responses = [], local = reports, catalogTopics = topics, byTopic = true,
+async function openReader({ phone, phoneWidth = 320, hidden, more = [], responses = [], local = reports, catalogTopics = topics, byTopic = true,
 	redirects, sourceEnabled = true, seen = {} } = {}) {
 	const pages = reports.map(({ url, topic }) => ({ key: url.slice(8), topicIds: [topics[topic].id] }));
 	for (const story of local.filter(({ topic }) => topic >= topics.length)) {
@@ -51,7 +51,7 @@ async function openReader({ phone, hidden, more = [], responses = [], local = re
 	for (const { url } of more) pages.push({ key: url.slice(8), topicIds: [topics[0].id] });
 	const fixture = { version: 1, generatedAt: new Date().toISOString(), topics: catalogTopics, pages, redirects };
 	const app = await launchApp({
-		...(phone && { viewport: { width: 320, height: 720 }, hasTouch: true }),
+		...(phone && { viewport: { width: phoneWidth, height: 720 }, hasTouch: true }),
 		settings: {
 			sources: { hn: sourceEnabled }, updateCheck: false, sourceRefreshMinutes: 0,
 			frontPageMode: "topics", frontPageTopics: ["technology"],
@@ -73,6 +73,147 @@ async function openReader({ phone, hidden, more = [], responses = [], local = re
 	app.page.setDefaultTimeout(8000);
 	return app;
 }
+
+async function screenshotPixels(locator) {
+	const screenshot = await locator.screenshot({ animations: "disabled", scale: "css" });
+	return locator.page().evaluate(async (png) => {
+		const image = new Image();
+		image.src = "data:image/png;base64," + png;
+		await image.decode();
+		const canvas = document.createElement("canvas");
+		canvas.width = image.naturalWidth;
+		canvas.height = image.naturalHeight;
+		const context = canvas.getContext("2d");
+		context.drawImage(image, 0, 0);
+		const { width, height } = canvas;
+		return { width, height, pixels: Array.from(context.getImageData(0, 0, width, height).data) };
+	}, screenshot.toString("base64"));
+}
+
+async function assertPaintedMenuDots(trigger) {
+	const { width, height, pixels } = await screenshotPixels(trigger.locator("svg"));
+	const columns = Array.from({ length: width }, (_, column) => {
+		for (let row = 0; row < height; row++) {
+			const offset = (row * width + column) * 4;
+			if (Math.abs(pixels[offset] - pixels[0]) >= 24) return true;
+		}
+		return false;
+	});
+	assert.equal(columns.filter((ink, column) => ink && !columns[column - 1]).length, 3, "the ellipsis paints three distinct dots");
+}
+
+async function assertPaintedDivider(header, viewportWidth, color) {
+	const { width, height, pixels } = await screenshotPixels(header);
+	assert.equal(width, viewportWidth);
+	const rule = pixels.slice((height - 1) * width * 4);
+	assert(rule.every((channel, index) => channel === color[index % 4]), "the theme's divider is painted across the full header");
+}
+
+for (const width of [320, 390]) test(`a ${width}px phone topic card exposes its own menu and matches the article discussion header`, async (t) => {
+	const app = await openReader({ phone: true, phoneWidth: width });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	const verifyPaint = width === 320 && process.env.ENGINE === "webkit";
+	await page.emulateMedia({ reducedMotion: "reduce" });
+	await page.goto(base);
+	const topic = card(page, 0);
+	await topic.waitFor();
+	const more = topic.locator("..").getByRole("button", { name: "More", exact: true });
+	const sizeAndInset = (button) => button.evaluate((element) => {
+		const { width, height, right } = element.getBoundingClientRect();
+		return [width, height, element.parentElement.getBoundingClientRect().right - right];
+	});
+	await more.waitFor();
+	assert.deepEqual(await sizeAndInset(more), [24, 24, 16]);
+	assert.equal(await more.getAttribute("aria-controls"), "app-row-menu");
+	if (verifyPaint) await assertPaintedMenuDots(more);
+	await more.tap({ timeout: 3000 });
+	const menu = page.getByRole("menu", { name: "This topic" });
+	await menu.waitFor();
+	assert.deepEqual(await menu.getByRole("menuitem").allTextContents(), ["Open", "Open in new tab", "View links", "Select links", "Copy link"]);
+	await menu.getByRole("menuitem", { name: "Open", exact: true }).tap();
+	await articlePane(page).waitFor();
+	await page.locator("#app-bar-discussion").tap();
+	const measure = (header) => header.evaluate((element) => {
+		const { width, height, x } = element.getBoundingClientRect();
+		const { borderBottomWidth } = getComputedStyle(element);
+		const title = element.querySelector("h2");
+		return { width, height, x, borderBottomWidth,
+			titleX: title.getBoundingClientRect().x, fontSize: getComputedStyle(title).fontSize };
+	});
+	const topicHeader = page.locator(".app-topic-discussion-head");
+	await topicHeader.waitFor();
+	const sources = topicHeader.getByRole("button", { name: "Discussion sources" });
+	const compose = topicHeader.getByRole("button", { name: "Comment and note composer" });
+	await compose.waitFor({ timeout: 3000 });
+	assert((await compose.boundingBox()).x > (await sources.boundingBox()).x);
+	const iconStyle = (button) => button.evaluate((element) => {
+		const { backgroundColor, boxShadow, color } = getComputedStyle(element);
+		return { backgroundColor, boxShadow, color };
+	});
+	const topicMetrics = await measure(topicHeader);
+	assert.deepEqual([topicMetrics.width, topicMetrics.height, topicMetrics.titleX, topicMetrics.fontSize], [width, 36, 20, "13px"]);
+	if (verifyPaint) await assertPaintedDivider(topicHeader, width, [220, 220, 210, 255]);
+	const idle = await iconStyle(compose);
+	await sources.tap();
+	assert.equal(await sources.getAttribute("aria-expanded"), "true");
+	const pressed = await iconStyle(sources);
+	await sources.tap();
+	await compose.tap();
+	const composer = page.locator(".app-topic-discussions .composer-text");
+	await composer.waitFor();
+	assert.equal(await compose.getAttribute("aria-expanded"), "true");
+	assert.notDeepEqual(pressed, idle);
+	assert.deepEqual(await iconStyle(compose), pressed);
+	await compose.tap();
+	await composer.waitFor({ state: "hidden" });
+	assert.equal(await compose.getAttribute("aria-expanded"), "false");
+	await topicHeader.getByRole("heading", { name: "Discussion", exact: true }).tap();
+	assert.deepEqual(await iconStyle(compose), idle);
+	await page.locator("#app-bar-discussion").tap();
+	await page.locator("#app-bar-back").tap();
+	await page.getByRole("tab", { name: "By link", exact: true }).tap();
+	const link = page.locator("#app-list-body .browse-title-link").first();
+	const linkMore = page.locator("#app-list-body .browse-row").first().getByRole("button", { name: "More", exact: true });
+	await linkMore.waitFor();
+	assert.deepEqual(await sizeAndInset(linkMore), [24, 24, 16]);
+	if (verifyPaint) await assertPaintedMenuDots(linkMore);
+	await link.tap();
+	await page.locator("#app-bar-discussion").tap();
+	const articleHeader = page.locator("#panel > header");
+	await articleHeader.getByRole("heading", { name: "Discussion", exact: true }).waitFor();
+	assert.deepEqual(topicMetrics, await measure(articleHeader));
+	if (verifyPaint) await assertPaintedDivider(articleHeader, width, [221, 221, 221, 255]);
+	assert.deepEqual(app.errors, []);
+});
+
+test("the phone Topic Article Discussion divider follows the selected Style theme", async (t) => {
+	const width = 390;
+	const app = await openReader({ phone: true, phoneWidth: width });
+	t.after(() => app.browser.close());
+	const { page } = app;
+	await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+	await page.goto(base);
+	await card(page, 0).tap();
+	await articlePane(page).waitFor();
+	await page.locator("#app-bar-discussion").tap();
+	const header = page.locator(".app-topic-discussion-head");
+	const style = page.locator("#app-bar-view");
+	for (const [theme, channels] of [
+		["Gray", [97, 97, 100]], ["Night", [44, 44, 44]], ["Sepia", [224, 211, 180]],
+		["White", [228, 228, 228]], ["Paper", [220, 220, 210]], ["Auto", [44, 44, 44]],
+	]) {
+		await style.tap();
+		await page.locator("#app-view-menu").getByRole("button", { name: theme, exact: true }).tap();
+		await style.tap();
+		const color = await header.evaluate((node) => getComputedStyle(node).borderBottomColor);
+		assert.equal(color, "rgb(" + channels.join(", ") + ")", theme + " colors the Discussion divider");
+		if (theme === "Gray" && process.env.ENGINE === "webkit") {
+			await assertPaintedDivider(header, width, [...channels, 255]);
+		}
+	}
+	assert.deepEqual(app.errors, []);
+});
 
 test("opening a topic keeps the Reader list in place and only marks that topic read", async (t) => {
 	const app = await openReader();
@@ -227,7 +368,7 @@ for (const phone of [false, true]) {
 		await filter.click();
 		const target = page.locator('[data-shared-topic="' + moreTopics[12].id + '"]');
 		await target.scrollIntoViewIfNeeded();
-		const offset = () => target.evaluate((node, phone) => phone ? window.scrollY : node.parentElement.scrollTop, phone);
+		const offset = () => target.evaluate((node, phone) => phone ? window.scrollY : node.closest("#app-list-body").scrollTop, phone);
 		const before = await offset();
 		assert(before > 0);
 		await target.press("Enter");

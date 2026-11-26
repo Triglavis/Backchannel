@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {launchApp, STORIES, waitFor} from './harness.mjs';
 
 function feedFixture() {
@@ -61,6 +62,58 @@ test('an entirely unavailable front page still explains why no articles are show
   } finally {await app.browser.close()}
 });
 
+test('Reader reports an active Reddit network backoff as unavailable', {timeout:15000}, async()=>{
+  const now=Date.now();
+  const app=await launchApp({handler:'Userscripts',tabs:true,sharedStore:true,
+    settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},
+    values:{
+      'HNewhere:reddit_read_window_notice':2,
+      'HNewhere:reddit_poll':{until:now+60000,status:'unavailable',failures:5,httpStatus:0},
+      'HNewhere:frontpage_feed:/reddit/front/':{timestamp:now,status:'ok',stories:[{...STORIES[0],source:'reddit'}]},
+    },
+  });
+  try {
+    await app.page.goto('https://backchnnl.app/');
+    await app.page.locator('#app-rail [data-app-view="source:reddit"]').click();
+    await app.page.locator('#app-list-sync').click();
+    const message=app.page.locator('#app-list-body .browse-feed-status');
+    await message.waitFor();
+    assert.match(await message.textContent(),/Reddit is unavailable.*Showing saved articles/);
+    assert(await waitFor(async()=>await app.page.locator('#toast').textContent()==='Partial sync',4000));
+    assert.equal(app.context.pages().length,1,'the backoff prevents another Reddit request');
+  } finally {await app.browser.close()}
+});
+
+test('a Lemmy 503 cooldown stays unavailable when Reader skips a feed on the same host', {timeout:20000}, async()=>{
+  const script=await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8');
+  const source=script.replace('init().catch(console.error);',
+    'window.__hasCooldown=()=>sourceReadCooldowns.size>0;init().catch(console.error);');
+  const isFeed=url=>url.startsWith('https://lemmy.world/api/v3/post/list?');
+  const app=await launchApp({source,sharedStore:true,settings:{
+    sources:{hn:true,lemmy:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false,
+  },responses:[
+    {match:url=>url.startsWith('https://lemmy.world/api/v3/search?'),status:503,headers:'Retry-After: 60',json:{error:'unavailable'}},
+    {match:isFeed,status:200,json:{posts:[]}},
+  ]});
+  try {
+    const {page}=app;
+    await page.goto('https://backchnnl.app/');
+    const sync=page.locator('#app-list-sync');
+    await sync.click();
+    assert(await waitFor(async()=>await page.locator('#toast').textContent()==='Synced',5000));
+    const initialFeeds=app.requests.filter(({url})=>isFeed(url)).length;
+    assert.equal(initialFeeds,1);
+    await page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
+    await page.waitForFunction(()=>window.__hasCooldown(),null,{timeout:6000});
+    await page.locator('#app-rail [data-app-view="source:lemmy"]').click();
+    await sync.click();
+    assert(await waitFor(async()=>await page.locator('#toast').textContent()==='Partial sync',5000));
+    const warning=page.locator('#app-list-body').getByText(/Lemmy (is unavailable|requests are temporarily limited)/);
+    assert.match(await warning.textContent(),/Lemmy is unavailable right now/);
+    assert.equal(app.requests.filter(({url})=>isFeed(url)).length,initialFeeds,'Sync honors the retry delay for the same host');
+  } finally {await app.browser.close()}
+});
+
 test('Reader does not report a complete outage when one source returns a valid empty feed', {timeout:20000}, async()=>{
   const app=await launchApp({sharedStore:true,settings:{sources:{lobsters:true,lemmy:true},frontPageMode:'sources',updateCheck:false},
     responses:[
@@ -94,6 +147,51 @@ test('a topic containing a failed source does not headline that source in the to
     assert(await waitFor(async()=>/lemmy.*unavailable/i.test(await list.innerText()),10000));
     assert.deepEqual(app.errors,[]);
   } finally {await app.browser.close()}
+});
+
+for (const surface of ['Reader', 'Sidebar']) test(`${surface} distinguishes a complete topic outage from a valid empty topic`, {timeout:20000}, async () => {
+  const sidebar = surface === 'Sidebar';
+  const url = sidebar ? STORIES[0].url : 'https://backchnnl.app/';
+  const businessKey = 'HNewhere:frontpage_feed:business/bsky/feed/at://did:plc:cndfx4udwgvpjaakvxvh7wm5/app.bsky.feed.generator/flipboard-biz';
+  let healthy = false;
+  const app = await launchApp({
+    sharedStore: true,
+    ...(sidebar && {topHosts: [new URL(url).hostname]}),
+    settings: {sources: {hn: true, bsky: true}, frontPageMode: 'topics', frontPageTopics: ['business', 'technology'],
+      autoOpenSidebar: sidebar, updateCheck: false},
+    responses: [
+      {match: url => url.includes('/app.bsky.feed.getFeed') && url.includes('flipboard-biz'),
+        get status() { return healthy ? 200 : 503; },
+        get json() { return healthy ? {feed: []} : {error: 'fixture outage'}; }},
+      {match: url => url.includes('/app.bsky.feed.getFeed') && url.includes('flipboard-tech'), json: {feed: []}},
+    ],
+  });
+  const {page, store} = app;
+  try {
+    await page.clock.install();
+    await page.goto(url);
+    if (sidebar) {
+      await page.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor({timeout:10000});
+      await page.locator('#browse-toggle .wordmark-root').click();
+      await page.locator('#browse-tab-all').click();
+    }
+    const list = page.locator(sidebar ? '#browse-list' : '#app-list-body');
+    await list.getByRole('link', {name: STORIES[5].title, exact: true}).waitFor();
+    assert(await waitFor(() => store.get(businessKey)?.status === 'unavailable', 5000));
+
+    await page.locator(sidebar ? '#browse-home-filters [data-browse-view="topic:business"]' :
+      '#app-rail [data-app-view="topic:business"]').click();
+    const empty = list.locator('.browse-empty').filter({hasNotText: 'Loading Front Pages…'});
+    await empty.waitFor({timeout:5000});
+    assert.match(await empty.textContent(), /Could not load Front Pages/);
+
+    healthy = true;
+    await page.clock.fastForward(31_000);
+    await page.locator(sidebar ? '#browse-home-sync' : '#app-list-sync').click();
+    assert(await waitFor(() => store.get(businessKey)?.status === 'ok', 5000));
+    await list.getByText('Nothing here right now.', {exact: true}).waitFor();
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
 });
 
 test('Sidebar confines feed failure notices to the selected source', {timeout:30000}, async()=>{

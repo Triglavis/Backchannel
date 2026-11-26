@@ -210,7 +210,7 @@ for (const [width, scheme] of [[1280, "light"], [320, "dark"]]) {
 			assert.equal(await originals.getByRole("link", { name: issue.sources[0].title }).getAttribute("href"), issue.sources[0].url);
 			assert.match(await originals.innerText(), /Published Nov 18, 2026.*Shared Nov 19, 2026/);
 			assert.match(await originals.innerText(), /Shared Nov 20, 2026/);
-			const discussion = article.getByRole("complementary", { name: "Discussions", exact: true });
+			const discussion = article.getByRole("complementary", { name: "Discussion", exact: true });
 			if (width <= 700) await page.locator("#app-bar-discussion").click();
 			await discussion.getByRole("list", { name: "Comments across discussions" }).getByText(/Comment 1 on Control room handover/).waitFor();
 			assert.equal(await discussion.getByRole("link", { name: busiest.title, exact: true }).count(), 0);
@@ -313,7 +313,7 @@ test("the topic discussion divider fits the reading pane across resizing, text z
 	t.after(() => app.browser.close());
 	const { page } = app;
 	const article = page.locator("#app-article-body article");
-	const aside = article.getByRole("complementary", { name: "Discussions", exact: true });
+	const aside = article.getByRole("complementary", { name: "Discussion", exact: true });
 	const divider = article.getByRole("separator", { name: /discussions/i });
 	const fits = () => article.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 &&
 		el.parentElement.scrollWidth <= el.parentElement.clientWidth + 1);
@@ -455,8 +455,9 @@ test("thin coverage keeps titles in Sources and quotes only complete publisher d
 		assert.equal(await narrative.locator("p").count(), 1);
 		assert.equal(await narrative.locator(".bc-reader-byline, .app-topic-timeline").count(), 0);
 		assert.equal(await article.getByRole("list", { name: "Sources" }).getByRole("link").count(), 2);
-		await article.getByRole("complementary", { name: "Discussions" }).waitFor();
-		assert.equal(await article.getByRole("complementary", { name: "Discussions" }).getByRole("link", { name: "What changes for operators?" }).count(), 0);
+		const discussion = article.getByRole("complementary", { name: "Discussion", exact: true });
+		await discussion.waitFor();
+		assert.equal(await discussion.getByRole("link", { name: "What changes for operators?" }).count(), 0);
 		for (const publisher of issue.sources.map((s) => s.publisher)) {
 			await article.getByRole("list", { name: "Sources" }).getByRole("button", { name: new RegExp(publisher) }).click();
 			assert.equal(await page.getByRole("dialog").locator(".app-topic-source-excerpt").count(), 0);

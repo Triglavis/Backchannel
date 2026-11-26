@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.19.4] — 2026-11-25
+
+### Fixed
+
+- Phone Reader list menus use consistent sizing and spacing. Topic Article
+  cards offer actions for opening the article and managing its links.
+- Regular and Topic Articles use the same Discussion title and header layout.
+  The Topic Article divider follows the selected Reader theme.
+  On a phone, the composer toggle sits beside Sources and uses the same pressed
+  style. The floating controls run bottom to top as Discussion, Save, and Aa.
+- Phone Reader keeps list content visible beneath its navigation and Safari’s
+  controls after opening the page or pulling down to Sync.
+- Reader refreshes stale feeds on arrival according to the Sync schedule.
+  Sync from the phone list refreshes the feeds without rechecking the
+  previously opened article's discussion. The result reflects the current
+  refresh, so an earlier source or article failure stays with its own check.
+- Reader and Sidebar report the correct Sync result when you switch between
+  Unread and All while feeds are loading.
+- Combined Reddit topic feeds now load in mobile Safari. A network cooldown
+  shows Reddit as unavailable and keeps saved articles visible.
+- Reddit links that have already loaded appear even when another feed hits a
+  rate limit during the same Sync.
+- Reddit discussion redirects leave other Reddit reads available. Sync honors
+  retry delays per host and distinguishes an outage from a rate limit.
+- Queue and Notes keep edits made in separate tabs. Account sync preserves edits
+  made during an upload alongside changes already saved by other devices.
+- Topic Article Discussion keeps expanded replies, Focus, and the reading
+  position during Sync.
+- Reader and Sidebar show available replies when a Reddit archive response
+  leaves some out. Newly loaded replies follow the selected sort.
+- Automatic Reddit refresh waits until its helper can run and follows the Sync
+  schedule after a failed launch. Topic views show when their feeds are down.
+- Check for updates shows a checkmark and confirms when Backchannel is
+  up to date.
+
 ## [1.6.19.3] — 2026-11-25
 
 ### Changed
@@ -2968,6 +3003,7 @@ commit history. Entries for 1.4.7 through 1.5.3 are summarized from their releas
 commits rather than written at the time.
 
 [Unreleased]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...main
+[1.6.19.4]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.3...tags/v1.6.19.4
 [1.6.19.3]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.2...tags/v1.6.19.3
 [1.6.19.2]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19.1...tags/v1.6.19.2
 [1.6.19.1]: https://github.com/twalichiewicz/Backchannel/compare/tags/v1.6.19...tags/v1.6.19.1

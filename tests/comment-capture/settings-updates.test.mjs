@@ -116,6 +116,19 @@ test('a manual check replaces Check for updates with the available update action
   } finally { await app.browser.close(); }
 });
 
+test('a manual check confirms the current version with a checkmark on the button', {timeout: 15000}, async () => {
+  const app = await openUpdates({responses: [{match: url => url.startsWith(releasesAPI), json: []}]});
+  try {
+    const {group, action} = await expectStatus(app, false);
+    await action.click();
+    const confirmed = group.getByRole('button', {name: "You're up to date", exact: true});
+    await confirmed.waitFor({timeout: 3500});
+    assert.equal(await confirmed.locator('svg path').count(), 1);
+    await action.waitFor({timeout: 3500});
+    assert.equal(app.requests.filter(request => request.url.startsWith(releasesAPI)).length, 1);
+  } finally { await app.browser.close(); }
+});
+
 test('Userscripts Update opens the install-script fallback from the available card', {timeout: 15000}, async () => {
   const app = await openUpdates({found: true});
   try {
