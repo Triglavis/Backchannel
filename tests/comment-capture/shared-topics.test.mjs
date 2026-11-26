@@ -718,13 +718,15 @@ test("indexed headlines still contribute inferred subjects to Filters", async ()
 	try {
 		const { page } = app;
 		await page.goto("https://backchnnl.app/");
+		const list = page.locator("#app-list-body");
+		const headlineLink = list.getByRole("link", { name: headline.title, exact: true });
+		await headlineLink.waitFor();
 		const settings = await openTopicFilters(page);
 		await settings.getByRole("searchbox", { name: "Search topics" }).fill("Programming");
 		await settings.getByRole("button", { name: "Hide Programming", exact: true }).click({ timeout: 5000 });
 		await settings.getByRole("button", { name: "Close settings" }).click();
-		const list = page.locator("#app-list-body");
 		await list.getByRole("link", { name: report.title, exact: true }).waitFor();
-		assert.equal(await list.getByRole("link", { name: headline.title, exact: true }).count(), 0);
+		await headlineLink.waitFor({ state: "detached", timeout: 5000 });
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
