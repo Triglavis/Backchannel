@@ -6585,6 +6585,10 @@ ${
 	const REDDIT_RATE_FLOOR = 10;
 	const REDDIT_POLL_KEY = "HNewhere:reddit_poll";
 
+	function redditFrontPagePath(subreddits = "popular") {
+		return `/r/${encodeURIComponent(subreddits)}.json?limit=100`;
+	}
+
 	// #region hnewhere-test-export
 	function redditReadPath(path) {
 		if (typeof path !== "string" || path.length > 10000 || !path.startsWith("/") || path.startsWith("//") || /[\\#\s]/.test(path) || /%(?:2f|5c|2e)/i.test(path.split("?")[0])) return null;
@@ -6596,10 +6600,12 @@ ${
 		const only = (...allowed) => keys.every((key) => allowed.includes(key));
 		const limit = (max) => !params.has("limit") || /^\d+$/.test(params.get("limit")) && Number(params.get("limit")) > 0 && Number(params.get("limit")) <= max;
 		const article = (value) => { try { return /^https?:$/.test(new URL(value).protocol); } catch { return false; } };
-		let allowed = false;
+		if (/^\/r\/[a-z0-9_]+(?:(?:\+|%2b)[a-z0-9_]+)*\.json$/i.test(url.pathname)) {
+			return only("limit") && limit(100) ? url.pathname.replace(/\+|%2b/gi, "%2B") + url.search : null;
+		}
 
-		if (/^\/r\/[a-z0-9_+]+\.json$/i.test(url.pathname)) allowed = only("limit") && limit(100);
-		else if (url.pathname === "/api/info.json") allowed = only("url", "id") && keys.length === 1 && (article(params.get("url")) || /^t3_[a-z0-9]+$/i.test(params.get("id") || ""));
+		let allowed = false;
+		if (url.pathname === "/api/info.json") allowed = only("url", "id") && keys.length === 1 && (article(params.get("url")) || /^t3_[a-z0-9]+$/i.test(params.get("id") || ""));
 		else if (url.pathname === "/search.json") allowed = only("type", "limit", "q") && params.get("type") === "link" && limit(25) && params.get("q")?.startsWith("url:") && article(params.get("q").slice(4));
 		else if (/^\/(?:r\/[a-z0-9_]+\/)?comments\/[a-z0-9]+(?:\/[^/?#]+)?\/?\.json$/i.test(url.pathname)) allowed = only("limit", "sort") && limit(500) && (!params.has("sort") || params.get("sort") === "confidence");
 		else if (url.pathname === "/api/morechildren.json") allowed = only("api_type", "link_id", "sort", "children") && params.get("api_type") === "json" && /^t3_[a-z0-9]+$/i.test(params.get("link_id") || "") && (!params.has("sort") || params.get("sort") === "confidence") && /^[a-z0-9]+(?:,[a-z0-9]+)*$/i.test(params.get("children") || "") && params.get("children").split(",").length <= 100;
@@ -7134,7 +7140,7 @@ ${
 				if (batch.dueFeedKeys && !batch.dueFeedKeys.has(key)) continue;
 				const cached = await load(key, null);
 				if (cached?.status !== "window" && cached?.retryAt > Date.now()) continue;
-				paths.push(feed.kind === "subreddits" ? `/r/${feed.target}.json?limit=100` : "/r/popular.json?limit=100");
+				paths.push(redditFrontPagePath(feed.target));
 			}
 		}
 		if (!batch.feedOnly && openPageKey()) {
@@ -8217,7 +8223,7 @@ ${
 		},
 
 		async frontPage({ force = false } = {}) {
-			const result = await redditFetch("/r/popular.json?limit=100", null, { listing: true, retryAccess: force });
+			const result = await redditFetch(redditFrontPagePath(), null, { listing: true, retryAccess: force });
 
 			if (!Array.isArray(result?.json?.data?.children)) {
 				throw new Error("Reddit feed returned no listing");
@@ -11712,7 +11718,7 @@ button {
 				stories = details.stories;
 			} else stories = await source.frontPage({ force });
 		} else if (feed.kind === "subreddits") {
-			const result = await redditFetch(`/r/${feed.target}.json?limit=100`, null, { listing: true, retryAccess: force });
+			const result = await redditFetch(redditFrontPagePath(feed.target), null, { listing: true, retryAccess: force });
 
 			if (!Array.isArray(result?.json?.data?.children)) {
 				throw new Error("Reddit feed returned no listing");
@@ -11834,7 +11840,10 @@ button {
 			if (cachedOnly || scheduled && !sourceRefreshInterval(refreshSettings) ||
 				!transportReady && (!force && frontPageNextAttempt(cached, refreshSettings, now) > now || cached?.retryAt > now)) return savedResult();
 			const cooldown = feed.source === "reddit" ? await load(REDDIT_POLL_KEY, null) : null;
-			if (cooldown?.until > now) return { ...savedResult(), status: "limited", retryAt: cooldown.until };
+			if (cooldown?.until > now) {
+				const saved = savedResult();
+				return { ...saved, status: cooldown.status === "limited" ? "limited" : "unavailable", cached: saved.stories.length > 0, retryAt: cooldown.until };
+			}
 			if (scheduled && (document.visibilityState === "hidden" || !scheduledUI || activeFrontPageUI() !== scheduledUI ||
 				!frontPageFeedsForView(refreshSettings, activeFrontPageView()).some((active) => frontPageFeedKey(active) === key))) return savedResult();
 			const cachedETag = feed.source === "lobsters" && feed.kind === "front" && cached?.dataFetchedAt > 0 && Array.isArray(cached.stories) && validETag(cached.etag) ? cached.etag : "";

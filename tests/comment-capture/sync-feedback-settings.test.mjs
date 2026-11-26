@@ -66,6 +66,39 @@ async function syncPhoneList(page){
 const post={id:'fresh123',url:'https://framed.example.com/reddit',title:'A current Reddit feed story',author:'fixture',subreddit:'news',permalink:'/r/news/comments/fresh123/article/',num_comments:2,created_utc:Math.floor(Date.now()/1000)-60,score:20};
 const listing={data:{children:[{kind:'t3',data:post}]}};
 
+test('phone Sync fetches combined Reddit topic feeds without redirecting to the homepage',{timeout:20000},async()=>{
+  const topics=['entertainment','sports','science'];
+  const expected=[
+    '/r/entertainment%2Btelevision%2Bmovies%2Bgaming.json',
+    '/r/nfl%2Bnba%2Bsoccer%2BCFB%2Bformula1%2BMMA%2Bbaseball%2Bhockey%2Bsports.json',
+    '/r/science%2Bspace.json',
+    '/r/popular.json',
+  ];
+  const app=await launchApp({...phone,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],
+    settings:{sources:{hn:true,reddit:true},frontPageMode:'topics',frontPageTopics:topics,frontPageIncludeTopLinks:true,
+      sourceRefreshMinutes:0,updateCheck:false},values:notices});
+  const paths=[];
+  await app.context.route('https://www.reddit.com/**',route=>{
+    const path=new URL(route.request().url()).pathname;
+    if(path==='/') return route.fulfill({status:200,contentType:'text/html',body:'<title>Reddit fixture</title>'});
+    if(path==='/api/me.json') return route.fulfill({status:200,json:{data:{name:'fixture'}}});
+    paths.push(path);
+    // A redirect with redirect: "error" rejects fetch like an aborted request.
+    if(path.includes('+')) return route.abort();
+    return route.fulfill({status:200,json:listing});
+  });
+  try{
+    await app.page.goto('https://backchnnl.app/');
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Synced');
+    assert.deepEqual(paths.sort(),expected.sort(),'the helper makes one listing request per topic or Popular');
+    assert.equal(app.store.get('HNewhere:reddit_poll')?.until||0,0,'a good run leaves no source-wide retry delay');
+    assert(await app.page.locator('#app-list-body .browse-title-link',{hasText:post.title}).count()>0);
+    assert(await waitFor(()=>app.context.pages().length===1,5000),'the helper closes after delivering the listings');
+    assert.deepEqual(app.errors,[]);
+  }finally{await app.browser.close()}
+});
+
 test('manual phone Sync reports successful Reddit and then an actual feed failure',{timeout:20000},async()=>{
   const app=await launchApp({...phone,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],
     settings:{sources:{hn:true,reddit:true},sourceRefreshMinutes:0,updateCheck:false},values:notices});

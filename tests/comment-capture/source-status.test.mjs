@@ -61,6 +61,28 @@ test('an entirely unavailable front page still explains why no articles are show
   } finally {await app.browser.close()}
 });
 
+test('Reader reports an active Reddit network backoff as unavailable', {timeout:15000}, async()=>{
+  const now=Date.now();
+  const app=await launchApp({handler:'Userscripts',tabs:true,sharedStore:true,
+    settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},
+    values:{
+      'HNewhere:reddit_read_window_notice':2,
+      'HNewhere:reddit_poll':{until:now+60000,status:'unavailable',failures:5,httpStatus:0},
+      'HNewhere:frontpage_feed:/reddit/front/':{timestamp:now,status:'ok',stories:[{...STORIES[0],source:'reddit'}]},
+    },
+  });
+  try {
+    await app.page.goto('https://backchnnl.app/');
+    await app.page.locator('#app-rail [data-app-view="source:reddit"]').click();
+    await app.page.locator('#app-list-sync').click();
+    const message=app.page.locator('#app-list-body .browse-feed-status');
+    await message.waitFor();
+    assert.match(await message.textContent(),/Reddit is unavailable.*Showing saved articles/);
+    assert(await waitFor(async()=>await app.page.locator('#toast').textContent()==='Partial sync',4000));
+    assert.equal(app.context.pages().length,1,'the backoff prevents another Reddit request');
+  } finally {await app.browser.close()}
+});
+
 test('Reader does not report a complete outage when one source returns a valid empty feed', {timeout:20000}, async()=>{
   const app=await launchApp({sharedStore:true,settings:{sources:{lobsters:true,lemmy:true},frontPageMode:'sources',updateCheck:false},
     responses:[
