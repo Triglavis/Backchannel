@@ -3673,6 +3673,25 @@ ${links.join("\n")}
 		return response ? { ok: response.status >= 200 && response.status < 300, status: response.status, text: String(response.responseText || ""), retryAfterSeconds: parseRetryAfter(response.responseHeaders) } : { ok: false, status: 0, text: "", retryAfterSeconds: 0 };
 	}
 
+	const sourceReadCooldowns = new Map();
+
+	async function requestSource(url, { headers, anonymous = false, text = false } = {}) {
+		const origin = new URL(url).origin;
+		const cooldown = sourceReadCooldowns.get(origin);
+		if (cooldown?.retryAt > Date.now()) return { ok: false, ...cooldown, attempted: false };
+
+		const response = text ? await requestTextWithMeta(url, headers) : await requestWithMeta(url, headers, { anonymous });
+		if (response.ok || response.status === 304) return response;
+
+		const delay = Math.max(Number(response.retryAfterSeconds) || 0, response.status === 429 ? 30 : 0);
+		if (!delay) return response;
+		const retryAt = Date.now() + delay * 1000;
+		if (retryAt > (sourceReadCooldowns.get(origin)?.retryAt || 0)) {
+			sourceReadCooldowns.set(origin, { status: response.status, retryAt });
+		}
+		return { ...response, retryAt };
+	}
+
 	const UPDATE_RELEASES_URL = "https://api.github.com/repos/twalichiewicz/Backchannel/releases?per_page=30";
 	const UPDATE_SCRIPT_URL = "https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js";
 	const UPDATE_RELEASES_PAGE = "https://github.com/twalichiewicz/Backchannel/releases";
@@ -4348,7 +4367,7 @@ ${links.join("\n")}
 		if (!load) {
 			load = {};
 			itemLoads.set(key, load);
-			load.promise = requestWithMeta("https://hacker-news.firebaseio.com/v0/item/" + id + ".json", undefined, { anonymous }).then((response) => {
+			load.promise = requestSource("https://hacker-news.firebaseio.com/v0/item/" + id + ".json", { anonymous }).then((response) => {
 				if (response.ok && response.json && itemLoads.get(key) === load) itemCache.set(key, response.json);
 				return response;
 			}).finally(() => { if (itemLoads.get(key) === load) itemLoads.delete(key); });
@@ -6511,10 +6530,11 @@ ${
 			let answered = false;
 
 			for (const query of [url, target]) {
-				const result = await request(
+				const response = await requestSource(
 					"https://hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=" +
 						encodeURIComponent(query),
 				);
+				const result = response.ok ? response.json : null;
 
 				if (!result || typeof result.nbHits !== "number") {
 					continue;
@@ -6533,8 +6553,8 @@ ${
 		},
 
 		async frontPage() {
-			const response = await requestTextWithMeta(HN_ORIGIN + "/news");
-			if (!response.ok) throw Object.assign(sourceResponseError(response), { feedStatus: response.status === 429 ? "limited" : "unavailable" });
+			const response = await requestSource(HN_ORIGIN + "/news", { text: true });
+			if (!response.ok) throw sourceResponseError(response);
 			const stories = parseFrontPage(
 				new DOMParser().parseFromString(response.text, "text/html"),
 			).map(hnStory);
@@ -7099,6 +7119,10 @@ ${
 
 	function redditReadFailure(reason) {
 		return { ok: false, status: 0, json: null, rateLimit: null, localFailure: reason || "window-unavailable" };
+	}
+
+	function redditTransientFailure({ status, type }) {
+		return type !== "opaqueredirect" && (status === 0 || status === 429 || status >= 500);
 	}
 
 	async function waitRedditReadReply(batch, requestId, timeout = 20000) {
@@ -7797,9 +7821,11 @@ ${
 			if (cleaned.some(Boolean)) await save(BRIDGE_RESULT_PREFIX + nonce + ":cleanup", { source: REDDIT_READ_SOURCE, nonce, cleaned: cleaned.filter(Boolean), ts: Date.now() }).catch(() => {});
 			const fetchJSON = async (path) => {
 				let response;
-				try { response = await fetch(path, { credentials: "same-origin", cache: "no-store", redirect: path === "/api/me.json" ? "manual" : "error", signal: AbortSignal.timeout(10000) }); }
+				try { response = await fetch(path, { credentials: "same-origin", cache: "no-store", redirect: "manual", signal: AbortSignal.timeout(10000) }); }
 				catch { return { ok: false, status: 0, json: null, rateLimit: null }; }
-				if (response.type === "opaqueredirect") return { ok: false, status: 0, json: null, rateLimit: null, needsSignIn: true };
+				if (response.type === "opaqueredirect") {
+					return { ok: false, status: 0, json: null, rateLimit: null, type: response.type, needsSignIn: path === "/api/me.json" };
+				}
 				const text = await response.text();
 				let json = null;
 
@@ -7831,7 +7857,7 @@ ${
 								stopTitle.setPhase(path.includes("/comments/") || path.startsWith("/api/morechildren") ? "Loading comments" : /^\/r\/[^/]+\.json(?:\?|$)/.test(path) ? "Loading articles" : "Finding discussions");
 								response = await fetchJSON(path);
 								const exhausted = response.rateLimit?.remaining < REDDIT_RATE_FLOOR;
-								const transient = response.status === 0 || response.status === 429 || response.status >= 500;
+								const transient = redditTransientFailure(response);
 								const failures = Math.min(5, Math.max(0, Number(cooldown?.failures) || 0) + 1);
 								const pause = Math.max(response.retryAfterSeconds || 0, exhausted ? response.rateLimit.resetSeconds || 600 : response.status === 429 ? response.rateLimit?.resetSeconds || 0 : 0, transient ? Math.min(900, 60 * 2 ** (failures - 1)) : 0);
 								if (pause > 0) {
@@ -7864,7 +7890,7 @@ ${
 						stopTitle.setPhase("Checking sign-in");
 						const identity = await fetchJSON("/api/me.json");
 						const exhausted = identity.rateLimit?.remaining < REDDIT_RATE_FLOOR;
-						const transient = identity.status === 429 || identity.status >= 500 || identity.status === 0;
+						const transient = redditTransientFailure(identity);
 						const pause = Math.max(identity.retryAfterSeconds || 0, exhausted ? identity.rateLimit.resetSeconds || 600 : identity.status === 429 ? identity.rateLimit?.resetSeconds || 0 : 0, transient ? 60 : 0);
 
 						if (!(await loadSettings()).sources?.reddit) { await publish({ phase: "error", requestId: 0, error: "disabled" }); break; }
@@ -8037,7 +8063,7 @@ ${
 			if (tier !== "archive") {
 				const now = Date.now();
 				const exhausted = result.rateLimit?.remaining < REDDIT_RATE_FLOOR;
-				const transient = result.status === 0 || result.status === 429 || result.status >= 500;
+				const transient = redditTransientFailure(result);
 				const failures = Math.min(5, Math.max(0, Number(cooldown?.failures) || 0) + 1);
 				const pause = Math.max(
 					result.retryAfterSeconds || 0,
@@ -8376,14 +8402,9 @@ ${
 	const CONSTELLATION_UA = `Backchannel/${SCRIPT_VERSION || "dev"} (github.com/twalichiewicz/Backchannel)`;
 
 	async function bskyJSON(url, headers, { strict = false } = {}) {
-		const retryAt = sourceReadCooldowns.get("bsky") || 0;
-		if (retryAt > Date.now()) {
-			if (strict) throw Object.assign(new Error("Bluesky requests limited"), { readStatus: "limited", retryAt });
-			return null;
-		}
 		const attempt = async (sent) => {
 			try {
-				return await requestTextWithMeta(url, sent);
+				return await requestSource(url, { headers: sent, text: true });
 			} catch (error) {
 				console.warn("Backchannel bsky: request threw", url, error);
 
@@ -8404,9 +8425,7 @@ ${
 		}
 		const text = response.text;
 		if (!response.ok) {
-			const error = sourceResponseError(response);
-			if (error.retryAt) sourceReadCooldowns.set("bsky", Math.max(sourceReadCooldowns.get("bsky") || 0, error.retryAt));
-			if (strict) throw error;
+			if (strict) throw sourceResponseError(response);
 			return null;
 		}
 
@@ -8998,7 +9017,7 @@ ${
 
 		async frontPage({ etag = "" } = {}) {
 			const url = "https://lobste.rs/hottest.json";
-			const result = await requestWithMeta(url, etag ? { "If-None-Match": etag } : undefined);
+			const result = await requestSource(url, { headers: etag ? { "If-None-Match": etag } : undefined });
 			const validator = parseResponseHeaders(result.responseHeaders).get("etag");
 			if (etag && result.status === 304 && result.finalUrl === url) {
 				const sent = etag.replace(/^W\//, "");
@@ -9043,7 +9062,7 @@ ${
 	const WIKIPEDIA_THREAD_PAGES = 10;
 
 	async function wikipediaJSON(url) {
-		const result = await requestWithMeta(url);
+		const result = await requestSource(url);
 
 		return result.ok ? result.json : null;
 	}
@@ -10606,7 +10625,6 @@ button {
 	}
 
 	const sourceReadJobs = new Map();
-	const sourceReadCooldowns = new Map();
 	const sourceReadQueues = new Map();
 	const sourceReadActive = new Map();
 	let sourceReadScope = null;
@@ -10614,12 +10632,13 @@ button {
 
 	function sourceResponseError(response) {
 		const status = response?.status === 429 ? "limited" : "unavailable";
-		const seconds = Math.max(Number(response?.retryAfterSeconds) || 0, status === "limited" ? 30 : 0);
-		return Object.assign(new Error("Source response unavailable"), { readStatus: status, retryAt: seconds ? Date.now() + seconds * 1000 : 0 });
+		return Object.assign(new Error("Source response unavailable"), {
+			readStatus: status, retryAt: response?.retryAt || 0, feedAttempted: response?.attempted !== false,
+		});
 	}
 
 	async function checkedSourceJSON(url, valid, headers, options) {
-		const response = await requestWithMeta(url, headers, options);
+		const response = await requestSource(url, { headers, ...options });
 		if (!response.ok || !valid(response.json)) throw sourceResponseError(response);
 		return response.json;
 	}
@@ -10683,7 +10702,6 @@ button {
 					clearTimeout(timer);
 					clearTimeout(queueTimer);
 					if (sourceReadJobs.get(key) === job) sourceReadJobs.delete(key);
-					if (retryAt > Date.now()) sourceReadCooldowns.set(source, Math.max(sourceReadCooldowns.get(source) || 0, retryAt));
 					const finishedAt = Date.now();
 					resolve({ status, value, retryAt, attempted: job.attempted, queuedAt: job.queuedAt, startedAt: job.startedAt, finishedAt });
 					job.listeners.clear();
@@ -10705,8 +10723,6 @@ button {
 					if (timeout > 0) timer = setTimeout(() => { controller.abort(); settle("timeout", job.partial); }, timeout);
 					Promise.resolve().then(() => {
 						if (!job.active) return;
-						const retryAt = sourceReadCooldowns.get(source) || 0;
-						if (retryAt > Date.now()) { settle("limited", job.partial, retryAt); return; }
 						job.attempted = true;
 						return work({ signal: controller.signal, publish });
 					}).then(
@@ -11401,7 +11417,7 @@ button {
 
 		for (const query of queries) {
 			if (signal?.aborted) break;
-			const response = await requestWithMeta(
+			const response = await requestSource(
 				"https://hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=20&query=" +
 					encodeURIComponent(query),
 			);
@@ -11692,18 +11708,13 @@ button {
 	}
 
 	async function frontPageJSON(url, field = "") {
-		return frontPageListing(await requestWithMeta(url), field);
+		return frontPageListing(await requestSource(url), field);
 	}
 
 	function frontPageListing(result, field = "") {
 		const listing = field ? result.json?.[field] : result.json;
 
-		if (!result.ok || !Array.isArray(listing)) {
-			const error = new Error("Feed returned no listing");
-			error.feedStatus = result.status === 429 ? "limited" : "unavailable";
-			error.retryAt = result.retryAfterSeconds > 0 ? Date.now() + result.retryAfterSeconds * 1000 : 0;
-			throw error;
-		}
+		if (!result.ok || !Array.isArray(listing)) throw sourceResponseError(result);
 		return result.json;
 	}
 

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {launchApp, STORIES, waitFor} from './harness.mjs';
 
 function feedFixture() {
@@ -80,6 +81,36 @@ test('Reader reports an active Reddit network backoff as unavailable', {timeout:
     assert.match(await message.textContent(),/Reddit is unavailable.*Showing saved articles/);
     assert(await waitFor(async()=>await app.page.locator('#toast').textContent()==='Partial sync',4000));
     assert.equal(app.context.pages().length,1,'the backoff prevents another Reddit request');
+  } finally {await app.browser.close()}
+});
+
+test('a Lemmy 503 cooldown stays unavailable when Reader skips a feed on the same host', {timeout:20000}, async()=>{
+  const script=await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8');
+  const source=script.replace('init().catch(console.error);',
+    'window.__hasCooldown=()=>sourceReadCooldowns.size>0;init().catch(console.error);');
+  const isFeed=url=>url.startsWith('https://lemmy.world/api/v3/post/list?');
+  const app=await launchApp({source,sharedStore:true,settings:{
+    sources:{hn:true,lemmy:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false,
+  },responses:[
+    {match:url=>url.startsWith('https://lemmy.world/api/v3/search?'),status:503,headers:'Retry-After: 60',json:{error:'unavailable'}},
+    {match:isFeed,status:200,json:{posts:[]}},
+  ]});
+  try {
+    const {page}=app;
+    await page.goto('https://backchnnl.app/');
+    const sync=page.locator('#app-list-sync');
+    await sync.click();
+    assert(await waitFor(async()=>await page.locator('#toast').textContent()==='Synced',5000));
+    const initialFeeds=app.requests.filter(({url})=>isFeed(url)).length;
+    assert.equal(initialFeeds,1);
+    await page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
+    await page.waitForFunction(()=>window.__hasCooldown(),null,{timeout:6000});
+    await page.locator('#app-rail [data-app-view="source:lemmy"]').click();
+    await sync.click();
+    assert(await waitFor(async()=>await page.locator('#toast').textContent()==='Partial sync',5000));
+    const warning=page.locator('#app-list-body').getByText(/Lemmy (is unavailable|requests are temporarily limited)/);
+    assert.match(await warning.textContent(),/Lemmy is unavailable right now/);
+    assert.equal(app.requests.filter(({url})=>isFeed(url)).length,initialFeeds,'Sync honors the retry delay for the same host');
   } finally {await app.browser.close()}
 });
 

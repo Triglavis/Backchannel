@@ -33,6 +33,7 @@ const hnURL='https://news.ycombinator.com/news';
 const hnKey='HNewhere:frontpage_feed:/hn/front/';
 const redditKey='HNewhere:frontpage_feed:/reddit/front/';
 const notices={'HNewhere:reddit_read_window_notice':2};
+const redditRefreshKey='HNewhere:reddit_shared_refresh';
 
 async function syncResult(app){
   const toast=app.page.locator('#toast');
@@ -66,6 +67,52 @@ async function syncPhoneList(page){
 const post={id:'fresh123',url:'https://framed.example.com/reddit',title:'A current Reddit feed story',author:'fixture',subreddit:'news',permalink:'/r/news/comments/fresh123/article/',num_comments:2,created_utc:Math.floor(Date.now()/1000)-60,score:20};
 const listing={data:{children:[{kind:'t3',data:post}]}};
 
+for (const {provider,searchHost,feedURL,settings,listing} of [
+  {provider:'bsky',searchHost:'https://constellation.microcosm.blue/links/all?',
+    feedURL:'https://public.api.bsky.app/xrpc/app.bsky.feed.getFeed?',
+    settings:{frontPageMode:'topics',frontPageTopics:['technology']},listing:{feed:[]}},
+  {provider:'mastodon',searchHost:'https://www.tootfinder.ch/rest/api/search/',
+    feedURL:'https://mastodon.social/api/v1/trends/links?',settings:{frontPageMode:'sources'},listing:[]},
+]) test('phone Sync refreshes '+provider+' feeds while its discussion search is rate limited',{timeout:20000},async()=>{
+  const source=(await script()).replace('init().catch(console.error);',
+    'window.__hasCooldown=()=>sourceReadCooldowns.size>0;init().catch(console.error);');
+  const app=await launchApp({...phone,source,sharedStore:true,settings:{
+    sources:{hn:true,[provider]:true},sourceRefreshMinutes:0,updateCheck:false,...settings,
+  },responses:[
+    {match:url=>url.startsWith(searchHost),status:429,headers:'Retry-After: 60',json:{error:'rate limited'}},
+    {match:url=>url.startsWith(feedURL),status:200,json:listing},
+  ]});
+  try{
+    await app.page.emulateMedia({reducedMotion:'reduce'});
+    await app.page.goto('https://backchnnl.app/');
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Synced');
+    await app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().tap();
+    await app.page.waitForFunction(()=>window.__hasCooldown(),null,{timeout:6000});
+    assert.equal(app.requests.filter(({url})=>url.startsWith(searchHost)).length,1);
+    const initialFeeds=app.requests.filter(({url})=>url.startsWith(feedURL)).length;
+    await app.page.locator('#app-bar-back').tap();
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Synced');
+    assert.equal(app.requests.filter(({url})=>url.startsWith(feedURL)).length,initialFeeds+1);
+  }finally{await app.browser.close()}
+});
+
+test('a 429 with no Retry-After defers queued reads from the same feed host',{timeout:16000},async()=>{
+  const isBlueskyFeed=url=>url.startsWith('https://public.api.bsky.app/xrpc/app.bsky.feed.getFeed?');
+  const app=await launchApp({...phone,sharedStore:true,settings:{
+    sources:{hn:true,bsky:true},frontPageMode:'topics',frontPageTopics:['world','us','technology','entertainment','sports','science'],
+    sourceRefreshMinutes:0,updateCheck:false,
+  },responses:[{match:isBlueskyFeed,status:429,json:{error:'rate limited'}}]});
+  try{
+    await app.page.goto('https://backchnnl.app/');
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Partial sync');
+    const requests=app.requests.filter(({url})=>isBlueskyFeed(url));
+    assert(requests.length>0&&requests.length<=3,'expected at most three in-flight reads, saw '+requests.length);
+  }finally{await app.browser.close()}
+});
+
 test('phone Sync fetches combined Reddit topic feeds without redirecting to the homepage',{timeout:20000},async()=>{
   const topics=['entertainment','sports','science'];
   const expected=[
@@ -96,6 +143,49 @@ test('phone Sync fetches combined Reddit topic feeds without redirecting to the 
     assert(await app.page.locator('#app-list-body .browse-title-link',{hasText:post.title}).count()>0);
     assert(await waitFor(()=>app.context.pages().length===1,5000),'the helper closes after delivering the listings');
     assert.deepEqual(app.errors,[]);
+  }finally{await app.browser.close()}
+});
+
+test('a Reddit discussion redirect leaves Popular available for the next phone Sync',{timeout:22000},async()=>{
+  const app=await launchApp({...phone,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],
+    settings:{sources:{hn:true,reddit:true},sourceRefreshMinutes:0,frontPageMode:'sources',updateCheck:false},values:notices});
+  const redirectModes=[];
+  let listings=0;
+  await app.context.exposeFunction('__recordTestRedditRedirect',mode=>redirectModes.push(mode));
+  await app.context.addInitScript(article=>{
+    if(location.origin!=='https://www.reddit.com')return;
+    const fetchReddit=window.fetch.bind(window);
+    window.fetch=async (path,options={})=>{
+      if(typeof path!=='string')return fetchReddit(path,options);
+      const url=new URL(path,location.origin);
+      if(url.pathname!=='/api/info.json'||url.searchParams.get('url')!==article) return fetchReddit(path,options);
+      await window.__recordTestRedditRedirect(options.redirect||'follow');
+      if(options.redirect==='error')throw new TypeError('A redirect is disallowed');
+      return {type:'opaqueredirect',status:0,ok:false};
+    };
+  },STORIES[0].url);
+  await app.context.route('https://www.reddit.com/**',route=>{
+    const path=new URL(route.request().url()).pathname;
+    if(path==='/')return route.fulfill({status:200,contentType:'text/html',body:'<title>Reddit fixture</title>'});
+    if(path==='/api/me.json')return route.fulfill({status:200,json:{data:{name:'fixture'}}});
+    if(path==='/r/popular.json')listings++;
+    return route.fulfill({status:200,json:listing});
+  });
+  try{
+    await app.page.emulateMedia({reducedMotion:'reduce'});
+    await app.page.goto('https://backchnnl.app/');
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Synced');
+    assert(await waitFor(()=>app.store.get(redditRefreshKey)?.state==='done'&&app.context.pages().length===1,5000));
+    await app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().tap();
+    assert(await waitFor(()=>redirectModes.length>0&&app.store.get(redditRefreshKey)?.state==='done'&&app.context.pages().length===1,8000));
+    const before=listings;
+    await app.page.locator('#app-bar-back').tap();
+    await syncPhoneList(app.page);
+    assert.equal(await syncResult(app),'Synced');
+    assert.equal(listings,before+1,'the next Sync contacts Reddit Popular');
+    assert(redirectModes.every(mode=>mode==='manual'),'the helper receives the redirect without following it');
+    assert.equal(app.store.get('HNewhere:reddit_poll')?.until||0,0);
   }finally{await app.browser.close()}
 });
 

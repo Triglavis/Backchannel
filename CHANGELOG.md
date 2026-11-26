@@ -25,6 +25,8 @@ use to detect updates, so every release bumps it.
   refresh, so an earlier source or article failure stays with its own check.
 - Combined Reddit topic feeds now load in mobile Safari. A network cooldown
   shows Reddit as unavailable and keeps saved articles visible.
+- Reddit discussion redirects leave other Reddit reads available. Sync honors
+  retry delays per host and distinguishes an outage from a rate limit.
 - Check for updates shows a checkmark and confirms when Backchannel is
   up to date.
 
