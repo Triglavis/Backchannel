@@ -43626,7 +43626,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 			for (let attempt = 0; attempt < 3; attempt++) {
 				const local = await withSharedStorageLock("account-storage", async (localLease) => {
 					const snapshot = await readAccountSnapshot(state.account);
-					if (trigger !== "edit" || !state.base || !accountSnapshotsEqual(snapshot, state.base)) return snapshot;
+					if (trigger !== "edit" || !stored.base || !accountSnapshotsEqual(snapshot, state.base)) return snapshot;
 					await clearAccountEdit(state.account, { commit: (write) => localLease.commit(() => lease.commit(write)) });
 					return null;
 				}, { required: true });
