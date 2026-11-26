@@ -32,6 +32,14 @@ use to detect updates, so every release bumps it.
   rate limit during the same Sync.
 - Reddit discussion redirects leave other Reddit reads available. Sync honors
   retry delays per host and distinguishes an outage from a rate limit.
+- Queue and Notes keep edits made in separate tabs. Account sync preserves edits
+  made during an upload alongside changes already saved by other devices.
+- Topic Article Discussion keeps expanded replies, Focus, and the reading
+  position during Sync.
+- Reader and Sidebar show available replies when a Reddit archive response
+  leaves some out. Newly loaded replies follow the selected sort.
+- Automatic Reddit refresh waits until its helper can run and follows the Sync
+  schedule after a failed launch. Topic views show when their feeds are down.
 - Check for updates shows a checkmark and confirms when Backchannel is
   up to date.
 

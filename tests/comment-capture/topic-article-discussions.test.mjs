@@ -1738,3 +1738,141 @@ test("sync in an open topic thread reloads comments beyond the mixed feed previe
 	await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
 	assert(await waitFor(async () => (await threadContent(detail).getByText("Revised after the hydrographic survey.").count()) === 1), "sync retrieves fresh bodies throughout the inline discussion");
 });
+
+for (const phone of [false, true]) {
+	test(`sync keeps a ${phone ? "phone" : "desktop"} topic thread at its expanded and focused reply`, async (t) => {
+		let revised = false;
+		const first = 974100;
+		const selected = 974123;
+		const updatedFirst = "An updated opening observation";
+		const updatedSelection = "The selected comment, updated after the survey";
+		const { aside, page, errors } = await openTopic(t, { phone, discussion: false, responses: [
+			{ match: (url) => revised && url === hnItem(first), json: { id: first, type: "comment", by: "editor", text: updatedFirst, time: now } },
+			{ match: (url) => revised && url === hnItem(selected), json: { id: selected, type: "comment", by: "editor", text: updatedSelection, time: now } },
+		] });
+		await (await sourceThread(page, threadURL(stories[0].id))).click();
+		if (phone) await page.locator('#app[data-stage="discussion"]:not([data-moving])').waitFor();
+		const detail = threadDetail(aside);
+		await threadContent(detail).getByText(/Comment 16 on Inspectors/).waitFor();
+		await detail.getByRole("button", { name: "Show more replies", exact: true }).click();
+		const row = detail.locator('[data-comment-key="hn:' + selected + '"]');
+		await row.evaluate((element) => element.scrollIntoView({ block: "center" }));
+		const offset = () => row.evaluate((element) => element.getBoundingClientRect().top - element.closest(".app-topic-discussion-scroll").getBoundingClientRect().top);
+		const before = await offset();
+		await row.getByRole("button", { name: /^focus$/i }).click();
+		const clear = detail.getByRole("button", { name: "Show all comments", exact: true });
+		await clear.waitFor();
+		revised = true;
+		await asideSources(aside).click();
+		await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
+		assert(await waitFor(async () => (await detail.getByText(updatedSelection, { exact: true }).count()) ||
+			(await detail.getByText(updatedFirst, { exact: true }).count())), "the updated thread has rendered");
+		assert(await clear.isVisible(), "the focused reply remains selected during Sync");
+		assert(await row.getByText(updatedSelection, { exact: true }).isVisible(), "the focused reply is updated in place");
+		await clear.click();
+		await detail.getByText(/Comment 32 on Inspectors/).waitFor();
+		assert(Math.abs(await offset() - before) <= 8, "clearing Focus returns to the expanded reply at the same position");
+		assert.deepEqual(errors, []);
+	});
+}
+
+test("topic thread sync keeps unavailable replies while applying confirmed changes", async (t) => {
+	let phase = "initial";
+	const story = stories[0].id;
+	const first = 974100, unavailable = 974119, removed = 974122, slow = 978701;
+	const changed = "Harbor maintenance observation after an edit. ".repeat(18).trim();
+	const kids = Array.from({ length: 35 }, (_, index) => first + index).filter((id) => id !== removed);
+	const { aside, page, errors } = await openTopic(t, { holdURL: hnItem(slow), responses: [
+		{ match: (url) => phase === "offline" && url === hnItem(story), status: 503 },
+		{ match: (url) => phase === "partial" && url === hnItem(story), json: { id: story, type: "story", kids: [slow, ...kids] } },
+		{ match: (url) => url === hnItem(slow), json: { id: slow, type: "comment", parent: story, by: "pilot", text: "A later update", time: now } },
+		{ match: (url) => phase === "partial" && url === hnItem(unavailable), status: 503 },
+		{ match: (url) => phase === "partial" && url === hnItem(first), json: { id: first, type: "comment", parent: story, by: "editor", text: changed, time: now } },
+		{ match: (url) => phase === "deleted" && url === hnItem(story), json: { id: story, type: "story", kids: [unavailable] } },
+		{ match: (url) => phase === "deleted" && url === hnItem(unavailable), text: "null" },
+	] });
+	await (await sourceThread(page, threadURL(story))).click();
+	const detail = threadDetail(aside);
+	await detail.getByRole("button", { name: "Show more replies", exact: true }).click();
+	await detail.getByText(/Comment 32 on Inspectors/).waitFor();
+	const sync = async () => {
+		await asideSources(aside).click();
+		await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
+	};
+	phase = "offline";
+	await sync();
+	await detail.getByRole("button", { name: "Retry comments", exact: true }).waitFor();
+	assert(await detail.getByText(/Comment 32 on Inspectors/).isVisible(), "an unavailable discussion retains the previously loaded replies");
+	phase = "partial";
+	await sync();
+	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
+	const anchor = detail.getByText(/Comment 18 on Inspectors/);
+	await anchor.evaluate((element) => element.scrollIntoView({ block: "start" }));
+	const offset = () => anchor.evaluate((element) => element.getBoundingClientRect().top - element.closest(".app-topic-discussion-scroll").getBoundingClientRect().top);
+	const before = await offset();
+	await page.evaluate(() => window.__releaseTopicResponse());
+	await detail.getByText(changed, { exact: true }).waitFor();
+	assert(Math.abs(await offset() - before) <= 8, "the comment being read holds its place when earlier comments change height");
+	assert(await detail.locator('[data-comment-key="hn:' + unavailable + '"]').isVisible(), "a temporary failure keeps the previous copy of the reply");
+	assert.equal(await detail.locator('[data-comment-key="hn:' + removed + '"]').count(), 0, "a reply removed from the source discussion is no longer shown");
+	phase = "deleted";
+	await sync();
+	await detail.getByText("No comments available here.", { exact: true }).waitFor();
+	assert.equal(await detail.getByRole("listitem").count(), 0, "confirmed removals clear the discussion even when no other replies remain");
+	assert.deepEqual(errors, []);
+});
+
+test("a pending thread sync leaves a newly opened topic discussion selected", async (t) => {
+	let revised = false;
+	const story = stories[0].id, late = 978702;
+	const { aside, page, errors } = await openTopic(t, { holdURL: hnItem(late), responses: [
+		{ match: (url) => revised && url === hnItem(story), json: { id: story, type: "story", kids: [late] } },
+		{ match: (url) => url === hnItem(late), json: { id: late, type: "comment", parent: story, by: "pilot", text: "A late update to the first discussion", time: now } },
+	] });
+	await (await sourceThread(page, threadURL(story))).click();
+	const detail = threadDetail(aside);
+	await detail.getByText(/Comment 1 on Inspectors/).waitFor();
+	revised = true;
+	await asideSources(aside).click();
+	await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
+	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
+	await (await sourceThread(page, threadURL(stories[1].id))).click();
+	const second = detail.getByText(/Comment 1 on Operators/);
+	await second.waitFor();
+	await page.evaluate(() => window.__releaseTopicResponse());
+	const lateUpdate = detail.getByText("A late update to the first discussion", { exact: true });
+	assert.equal(await waitFor(() => lateUpdate.count(), 400), false);
+	assert(await second.isVisible());
+	assert.deepEqual(errors, []);
+});
+
+test("syncing an opened Reddit thread updates its reply in the mixed topic feed", async (t) => {
+	let revised = false;
+	const old = "A pilot's original observation";
+	const edited = "A pilot's updated observation";
+	const record = (body) => ({ id: "observation", body, link_id: "t3_abcde", parent_id: "t3_abcde", author: "bridgepilot", created_utc: now });
+	const children = () => [{ kind: "t1", data: record(revised ? edited : old) }];
+	const { aside, page, errors } = await openTopic(t, { signedIn: true, enabled: { x: false }, responses: [
+		{ match: (url) => url.includes("/api/comments/search?"), json: { data: [record(old)] } },
+		{ match: (url) => url.includes("/api/comments/tree?"), get json() { return { data: children() }; } },
+		{ match: (url) => new URL(url).hostname === "www.reddit.com" && url.includes("/comments/abcde/") && url.includes(".json"),
+			get json() { return [null, { data: { children: children() } }]; } },
+		...stories.map(({ id }) => ({ match: (url) => url === hnItem(id), json: { id, type: "story", kids: [id * 100] } })),
+	] });
+	const list = feedList(aside);
+	await list.getByText(old, { exact: true }).waitFor();
+	await list.getByText(/Comment 1 on Operators/).waitFor();
+	const order = () => list.getByRole("listitem").evaluateAll((items) => items.map((item) => item.dataset.commentKey));
+	const before = await order();
+	await (await sourceThread(page, "https://www.reddit.com/r/ports/comments/abcde/harbor/")).click();
+	const detail = threadDetail(aside);
+	await detail.getByText(old, { exact: true }).waitFor();
+	revised = true;
+	await asideSources(aside).click();
+	await aside.getByRole("group", { name: "Filter discussions by source" }).getByRole("button", { name: "Sync" }).click();
+	await detail.getByText(edited, { exact: true }).waitFor();
+	await detail.getByRole("button", { name: "Show all discussions" }).click();
+	assert(await list.getByText(edited, { exact: true }).isVisible(), "the mixed feed reflects the refreshed Reddit reply");
+	assert.deepEqual(await order(), before);
+	assert.deepEqual(errors, []);
+});

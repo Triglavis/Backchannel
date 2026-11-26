@@ -149,6 +149,51 @@ test('a topic containing a failed source does not headline that source in the to
   } finally {await app.browser.close()}
 });
 
+for (const surface of ['Reader', 'Sidebar']) test(`${surface} distinguishes a complete topic outage from a valid empty topic`, {timeout:20000}, async () => {
+  const sidebar = surface === 'Sidebar';
+  const url = sidebar ? STORIES[0].url : 'https://backchnnl.app/';
+  const businessKey = 'HNewhere:frontpage_feed:business/bsky/feed/at://did:plc:cndfx4udwgvpjaakvxvh7wm5/app.bsky.feed.generator/flipboard-biz';
+  let healthy = false;
+  const app = await launchApp({
+    sharedStore: true,
+    ...(sidebar && {topHosts: [new URL(url).hostname]}),
+    settings: {sources: {hn: true, bsky: true}, frontPageMode: 'topics', frontPageTopics: ['business', 'technology'],
+      autoOpenSidebar: sidebar, updateCheck: false},
+    responses: [
+      {match: url => url.includes('/app.bsky.feed.getFeed') && url.includes('flipboard-biz'),
+        get status() { return healthy ? 200 : 503; },
+        get json() { return healthy ? {feed: []} : {error: 'fixture outage'}; }},
+      {match: url => url.includes('/app.bsky.feed.getFeed') && url.includes('flipboard-tech'), json: {feed: []}},
+    ],
+  });
+  const {page, store} = app;
+  try {
+    await page.clock.install();
+    await page.goto(url);
+    if (sidebar) {
+      await page.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor({timeout:10000});
+      await page.locator('#browse-toggle .wordmark-root').click();
+      await page.locator('#browse-tab-all').click();
+    }
+    const list = page.locator(sidebar ? '#browse-list' : '#app-list-body');
+    await list.getByRole('link', {name: STORIES[5].title, exact: true}).waitFor();
+    assert(await waitFor(() => store.get(businessKey)?.status === 'unavailable', 5000));
+
+    await page.locator(sidebar ? '#browse-home-filters [data-browse-view="topic:business"]' :
+      '#app-rail [data-app-view="topic:business"]').click();
+    const empty = list.locator('.browse-empty').filter({hasNotText: 'Loading Front Pages…'});
+    await empty.waitFor({timeout:5000});
+    assert.match(await empty.textContent(), /Could not load Front Pages/);
+
+    healthy = true;
+    await page.clock.fastForward(31_000);
+    await page.locator(sidebar ? '#browse-home-sync' : '#app-list-sync').click();
+    assert(await waitFor(() => store.get(businessKey)?.status === 'ok', 5000));
+    await list.getByText('Nothing here right now.', {exact: true}).waitFor();
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
+});
+
 test('Sidebar confines feed failure notices to the selected source', {timeout:30000}, async()=>{
   const fixture=feedFixture();
   const url=STORIES[0].url;

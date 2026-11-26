@@ -747,8 +747,8 @@
 		await saveCollapsed([...ids]);
 	}
 
-	async function loadSettings() {
-		const stored = await load(STORAGE.settings, {});
+	async function loadSettings({ forWrite = false } = {}) {
+		const stored = forWrite ? await GM.getValue(STORAGE.settings, {}) : await load(STORAGE.settings, {});
 		const merged = {
 			...DEFAULT_SETTINGS,
 			...(stored && typeof stored === "object" ? stored : {}),
@@ -774,12 +774,14 @@
 
 	function saveSettings(patch) {
 		settingsWrite = settingsWrite.catch(() => {}).then(async () => {
-			const current = await loadSettings();
-			const changes = typeof patch === "function" ? patch(current) : patch;
-			const next = { ...current, ...changes };
-			next.sourceRefreshMinutes = normalizeSourceRefreshMinutes(next.sourceRefreshMinutes);
-
-			await save(STORAGE.settings, next);
+			const { next, changes } = await withCollectionStorage(async (write) => {
+				const current = await loadSettings({ forWrite: true });
+				const changes = typeof patch === "function" ? patch(current) : patch;
+				const next = { ...current, ...changes };
+				next.sourceRefreshMinutes = normalizeSourceRefreshMinutes(next.sourceRefreshMinutes);
+				await write(STORAGE.settings, next);
+				return { next, changes };
+			}, false);
 			redditReadSourceOn = Boolean(next.sources?.reddit);
 			xSourceOn = Boolean(next.sources?.x);
 			updateSourceReadScope(next);
@@ -1928,6 +1930,7 @@
 	// #endregion hnewhere-test-export
 
 	async function markQueueArrival(url = pageAddress(), now = Date.now()) {
+		if (!(await loadQueue()).some((entry) => !entry.readAt && sameURL(entry.url, url))) return false;
 		const marked = await mutateQueue((entries) => {
 			if (!entries.length) {
 				return undefined;
@@ -2020,18 +2023,26 @@
 		return arrived.then((entry) => collectedIsFresh(entry));
 	}
 
-	async function loadQueue() {
-		const stored = await load(STORAGE.queue, []);
-
+	function queueEntries(stored) {
 		return withoutLegacyPlaceholders(stored).filter((entry) => entry?.id);
 	}
 
-	async function saveQueue(entries) {
-		await save(STORAGE.queue, entries);
-		return entries;
+	async function loadQueue() {
+		return queueEntries(await load(STORAGE.queue, []));
 	}
 
-	const mutateQueue = serializeMutations(loadQueue, saveQueue);
+	function mutateQueue(mutate) {
+		let committed;
+		return withCollectionStorage(async (write) => {
+			if (committed) return committed;
+			const next = await mutate(queueEntries(await GM.getValue(STORAGE.queue, [])));
+			if (next !== undefined) {
+				await write(STORAGE.queue, next);
+				committed = next;
+			}
+			return next;
+		});
+	}
 
 	// #region hnewhere-test-export
 	function hiddenStoryKey(story) {
@@ -2089,10 +2100,12 @@
 		return new Set((await loadHiddenStories()).map((entry) => entry.key));
 	}
 
-	async function loadSavedItems() {
-		const stored = await load(STORAGE.saved, []);
-
+	function savedEntries(stored) {
 		return Array.isArray(stored) ? stored.filter((entry) => entry?.key) : [];
+	}
+
+	async function loadSavedItems() {
+		return savedEntries(await load(STORAGE.saved, []));
 	}
 
 	async function loadLooks() {
@@ -3395,45 +3408,27 @@ ${links.join("\n")}
 		return appState ? appState.open?.key || "" : normalizeURL(pageAddress());
 	}
 
-	async function repointSaved(moves) {
-		const [saved, index] = await Promise.all([loadSavedItems(), load(NOTES_INDEX_KEY, null)]);
+	async function repointSaved(moves, write) {
+		const [stored, index] = await Promise.all([GM.getValue(STORAGE.saved, []), GM.getValue(NOTES_INDEX_KEY, null)]);
+		const saved = savedEntries(stored);
 		const nextSaved = repointFolders(saved, moves);
+		const nextIndex = repointFolders(index, moves);
+		if (nextSaved !== saved) await write(STORAGE.saved, nextSaved);
+		if (nextIndex !== index) await write(NOTES_INDEX_KEY, nextIndex);
+	}
 
-		if (nextSaved !== saved) {
-			await storeSavedItems(nextSaved);
-		}
-
-		if (Array.isArray(index)) {
-			const nextIndex = repointFolders(index, moves);
-
-			if (nextIndex !== index) {
-				await save(NOTES_INDEX_KEY, nextIndex);
-			}
-		}
+	async function fileSavedForWrite(context, write) {
+		const viewed = !context?.row || addressKey(context?.link) === openPageKey();
+		const entries = await loadCollectedForWrite(write);
+		const filed = fileInFolder(entries, context, Date.now(), { viewed });
+		if (filed.folders !== entries) await write(STORAGE.collected, filed.folders);
+		if (filed.moves.size) await repointSaved(filed.moves, write);
+		return filed.key;
 	}
 
 	async function fileSaved(context) {
-		const viewed = !context?.row || addressKey(context?.link) === openPageKey();
-		let key = "";
-		let moves = new Map();
-
-		await mutateCollected((entries) => {
-			const filed = fileInFolder(entries, context, Date.now(), { viewed });
-
-			key = filed.key;
-			moves = filed.moves;
-
-			return filed.folders === entries ? undefined : filed.folders;
-		});
-
-		if (moves.size) {
-			await repointSaved(moves);
-		}
-
-		if (key) {
-			seedCollectedMarks(key).catch(console.error);
-		}
-
+		const key = await withCollectionStorage((write) => fileSavedForWrite(context, write));
+		if (key) seedCollectedMarks(key).catch(console.error);
 		return key;
 	}
 
@@ -6680,7 +6675,6 @@ ${
 	let redditReadNoticeShown = false;
 	let redditReadNoticeAccepted = false;
 	let redditReadPendingPage = "";
-	let redditReadInitialAttempted = false;
 	let redditReadActionId = 0;
 	let syncRunId = 0;
 	let redditDeferredNotice = null;
@@ -7044,13 +7038,12 @@ ${
 			for (const [element, inert] of behind) element.inert = inert;
 			if (returnTo?.isConnected) returnTo.focus({ preventScroll: true });
 			redditReadNoticeAccepted = true;
-			return save(REDDIT_READ_NOTICE_KEY, 2);
+			return save(REDDIT_READ_NOTICE_KEY, 2).then(scheduleFrontPageRefresh);
 		};
 		const confirm = modal.querySelector(".reddit-read-confirm");
 
 		confirm.onclick = () => {
 			const accepted = close();
-			redditReadInitialAttempted = true;
 
 			runSync(async (releaseRead) => {
 				await accepted;
@@ -7433,7 +7426,6 @@ ${
 	function runRedditReadAction(task, options = {}) {
 		const actionId = ++redditReadActionId;
 		options = { ...options, actionId };
-		if (!options.automatic && usesRedditReadWindow() && redditReadSourceOn) redditReadInitialAttempted = true;
 		if (!usesRedditReadWindow() || !redditReadSourceOn || !usesManagerTabs() || redditReadBatch && !redditReadBatch.closing) return runRedditReadActionLocal(task, options);
 		const page = openPageKey();
 		const targets = page ? [...new Set(pageAddresses().map(normalizeURL).filter(Boolean))] : [];
@@ -8300,15 +8292,15 @@ ${
 			const index = result.tier === "archive-search"
 				? redditThreadIndexFromFlat(result.json?.data || [], discussion)
 				: redditThreadIndex(result.tier === "archive" ? [null, { data: { children: result.json?.data || [] } }] : result.json, discussion);
-			const shown = new Set(index.byKey.keys());
+			const loaded = index.byKey.size;
 			const unexpandable = (more) => Number(more?.count) > 0 && !more?.ids?.length;
 			const more = [index.rootMore, ...[...index.byKey.values()].map((comment) => comment.more)].filter(Boolean);
 			const remaining = more.reduce((total, item) => total + Math.max(Number(item.count) || 0, item.ids?.length || 0), 0);
 
 			return {
 				empty: !index.rootKeys.length && !index.rootMore && Number(discussion.commentCount) > 0,
-				incomplete: result.tier === "archive-search" || more.some(unexpandable) || shown.size > 0 && Number(discussion.commentCount) > shown.size + remaining,
-				archiveCount: archived ? shown.size : null,
+				incomplete: result.tier === "archive-search" || more.some(unexpandable) || loaded > 0 && Number(discussion.commentCount) > loaded + remaining,
+				archiveCount: archived ? loaded : null,
 				rootKeys: index.rootKeys,
 				rootTimes: new Map(
 					index.rootKeys.map((key) => [key, index.byKey.get(key)?.createdAt || 0]),
@@ -8329,12 +8321,15 @@ ${
 						const page = await requestWithMeta("https://arctic-shift.photon-reddit.com/api/comments/tree?link_id=" + encodeURIComponent("t3_" + discussion.id) + parent + "&limit=25000&start_breadth=25000&start_depth=64");
 						if (!page.ok || !Array.isArray(page.json?.data)) return { ok: false, added: [], remaining: ids };
 						const expanded = redditThreadIndex([null, { data: { children: page.json.data } }], discussion);
-						const missing = batch.filter((id) => !expanded.byKey.has(sourceKey("reddit", id)));
-						if (missing.length) return { ok: false, added: [], remaining: ids };
-						const added = batch.map((id) => expanded.byKey.get(sourceKey("reddit", id))).filter((comment) => comment && !shown.has(comment.key));
-						for (const comment of added) shown.add(comment.key);
+						const added = [];
+						const missing = [];
+						for (const id of batch) {
+							const comment = expanded.byKey.get(sourceKey("reddit", id));
+							if (comment) added.push(comment);
+							else missing.push(id);
+						}
 						for (const [key, comment] of expanded.byKey) if (!index.byKey.has(key)) index.byKey.set(key, comment);
-						return { ok: true, added, remaining: ids.slice(100) };
+						return { ok: true, added, remaining: [...ids.slice(batch.length), ...missing] };
 					}
 
 					const result = await runRedditReadAction(() => redditFetch(
@@ -9620,25 +9615,15 @@ button {
 
 		const { context } = chosen;
 		const ref = await chosen.ref;
-		const notes = await loadNotes(ref);
-		const written = String(text).trim();
-
-		await saveNotes([
-			...notes,
-			{
-				id:
-					"n" +
-					Date.now().toString(36) +
-					Math.floor(Math.random() * 1e6).toString(36),
-				created: Date.now(),
-				text: written,
-				exact: chosen.anchorable ? chosen.exact : "",
-				prefix: chosen.prefix,
-				suffix: chosen.suffix,
-				page: chosen.page,
-				url: context.link,
-			},
-		], ref, context);
+		await addNote(ref, context, {
+			created: Date.now(),
+			text: String(text).trim(),
+			exact: chosen.anchorable ? chosen.exact : "",
+			prefix: chosen.prefix,
+			suffix: chosen.suffix,
+			page: chosen.page,
+			url: context.link,
+		});
 
 		closeNoteComposer();
 		window.getSelection()?.removeAllRanges();
@@ -9945,23 +9930,7 @@ button {
 
 		const here = context || openPageContext();
 		const ref = await noteDocumentRefForPage(here.link);
-		const notes = await loadNotes(ref);
-
-		await saveNotes([
-			...notes,
-			reanchoredNote(
-				{
-					id:
-						"n" +
-						Date.now().toString(36) +
-						Math.floor(Math.random() * 1e6).toString(36),
-					created: Math.floor(Date.now() / 1000),
-					url: here.link,
-				},
-				parsed,
-				!context,
-			),
-		], ref, here);
+		await addNote(ref, here, reanchoredNote({ created: Math.floor(Date.now() / 1000), url: here.link }, parsed, !context));
 		if (!context) await reopenForNotes();
 	}
 
@@ -9972,23 +9941,14 @@ button {
 
 		const context = openPageContext();
 		const ref = await noteDocumentRefForPage(context.link);
-		const notes = await loadNotes(ref);
-
-		await saveNotes(
-			notes.map((note) =>
-				note.id === id ? editedNote(note, parsed) : note,
-			),
-			ref, context,
-		);
+		await mutateNotes(ref, context, (notes) => notes.map((note) => note.id === id ? editedNote(note, parsed) : note));
 		await reopenForNotes();
 	}
 
 	async function deleteNote(id) {
 		const context = openPageContext();
 		const ref = await noteDocumentRefForPage(context.link);
-		const notes = await loadNotes(ref);
-
-		await saveNotes(notes.filter((note) => note.id !== id), ref, context);
+		await mutateNotes(ref, context, (notes) => notes.filter((note) => note.id !== id));
 		await reopenForNotes();
 	}
 
@@ -10249,21 +10209,37 @@ button {
 		return keptNotes(await load(noteStorageKey(ref), null));
 	}
 
-	async function saveNotes(notes, ref, context) {
-		const kept = notes.slice(-NOTES_PER_DOCUMENT);
-		let page = "";
+	function addNote(ref, context, fields) {
+		const id = "n" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+		return mutateNotes(ref, context, (notes) => notes.some((note) => note.id === id) ? notes : [...notes, { ...fields, id }]);
+	}
 
-		await save(noteStorageKey(ref), { version: 1, notes: kept });
-
-		if (kept.length) {
-			try {
-				page = await fileSaved(context);
-			} catch (error) {
-				console.error(error);
+	async function mutateNotes(ref, context, mutate) {
+		const key = noteStorageKey(ref);
+		const { kept, page, previous } = await withCollectionStorage(async (write) => {
+			const kept = mutate(keptNotes(await GM.getValue(key, null))).slice(-NOTES_PER_DOCUMENT);
+			let page = "";
+			if (kept.length) {
+				try {
+					page = await fileSavedForWrite(context, write);
+				} catch (error) {
+					console.error(error);
+				}
 			}
-		}
 
-		const previous = await rememberNotedDocument(ref, kept, page, context);
+			const stored = await GM.getValue(NOTES_INDEX_KEY, []);
+			const list = Array.isArray(stored) ? stored : [];
+			const previous = list.find((entry) => entry?.key === key);
+			const entries = list.filter((entry) => entry?.key !== key);
+			if (kept.length) {
+				entries.push(notedIndexEntry(ref, kept, previous, ref, { url: context.link, title: context.title, page }, Date.now()));
+			}
+			await write(key, { version: 1, notes: kept });
+			await write(NOTES_INDEX_KEY, entries);
+			return { kept, page, previous };
+		});
+
+		if (page) seedCollectedMarks(page).catch(console.error);
 
 		if (kept.length) {
 			if (!appState && ref.kind === "url") {
@@ -10307,31 +10283,6 @@ button {
 	}
 
 	// #endregion hnewhere-test-export
-
-	async function rememberNotedDocument(ref, notes, page, context) {
-		const key = noteStorageKey(ref);
-		const stored = await load(NOTES_INDEX_KEY, []);
-		const list = Array.isArray(stored) ? stored : [];
-		const previous = list.find((entry) => entry?.key === key);
-		const entries = list.filter((entry) => entry?.key !== key);
-
-		if (notes.length > 0) {
-			entries.push(
-				notedIndexEntry(
-					ref,
-					notes,
-					previous,
-					ref,
-					{ url: context.link, title: context.title, page },
-					Date.now(),
-				),
-			);
-		}
-
-		await save(NOTES_INDEX_KEY, entries);
-
-		return previous || null;
-	}
 
 	// #region hnewhere-test-export
 	function notedDocuments(index) {
@@ -11064,17 +11015,17 @@ button {
 		return { at: snapshot.at, reader: sharedThreadReader(story, snapshot) };
 	}
 
-	async function persistSharedThreads(stories, { updateLocal = false } = {}) {
+	async function persistSharedThreads(stories, { updateLocal = false, remainingRootReplies } = {}) {
 		const epoch = sourceCacheEpoch;
 		const snapshots = stories.flatMap((story) => {
 			const held = threadCache.get(story.key);
 			if (story.local || !held || held.reader.empty) return [];
-			const entries = renderedComments.filter((entry) => entry.discussionKey === story.key && entry.comment && !entry.comment.local);
+			const entries = renderedComments.filter((entry) => entry.discussionKey === story.key && entry.comment && !entry.comment.local && entry.element.isConnected);
 			const comments = Object.fromEntries(entries.map((entry) => [entry.id, entry.comment]));
 			const roots = entries.filter((entry) => !entry.parentId);
 			const rootKeys = [...new Set([...(held.reader.rootKeys || []).filter((key) => comments[key]), ...roots.map((entry) => entry.id)])];
 			const rootTimes = new Map([...(held.reader.rootTimes || []), ...roots.map((entry) => [entry.id, entry.time || 0])]);
-			const rootMore = mergeMoreReplies(null, held.reader.rootMore, new Set(rootKeys), story.source);
+			const rootMore = mergeMoreReplies(null, remainingRootReplies === undefined ? held.reader.rootMore : remainingRootReplies, new Set(rootKeys), story.source);
 			const snapshot = { version: 1, at: held.at, rootKeys, rootTimes: [...rootTimes], rootMore, archiveCount: held.reader.archiveCount, incomplete: Boolean(held.reader.incomplete), refreshFailed: Boolean(held.reader.refreshFailed), refreshIncomplete: Boolean(held.reader.refreshIncomplete), comments };
 			return JSON.stringify(snapshot).length <= 3000000 ? [{ key: SHARED_THREAD_PREFIX + story.key, snapshot, story, held }] : [];
 		});
@@ -11182,7 +11133,7 @@ button {
 
 	function snapshotRenderedThread(story, previous) {
 		const base = previous?._hnewhereFresh || previous;
-		const shown = renderedComments.filter((entry) => entry.discussionKey === story.key && entry.comment);
+		const shown = renderedComments.filter((entry) => entry.discussionKey === story.key && entry.comment && entry.element.isConnected);
 		if (!shown.length) return previous || null;
 		const byKey = new Map(shown.map((entry) => [entry.id, { ...entry.comment, replyKeys: [...(entry.comment.replyKeys || [])] }]));
 		const roots = [];
@@ -11499,7 +11450,7 @@ button {
 	function frontPageNextAttempt(cached, settings, now = Date.now()) {
 		const interval = sourceRefreshInterval(settings);
 		if (!interval) return Infinity;
-		const attempt = Number(cached?.lastAttemptAt ?? cached?.timestamp) || 0;
+		const attempt = Math.max(Number(cached?.lastAttemptAt ?? cached?.timestamp) || 0, Number(cached?.lastAutomaticHelperAttemptAt) || 0);
 		const retry = Number(cached?.retryAt) || 0;
 		return Math.max(attempt > now ? now : attempt + interval, retry);
 	}
@@ -11837,6 +11788,7 @@ button {
 		if (!cachedOnly) frontPageLoads.set(key, request);
 		job.promise = (async () => {
 			const waitForReddit = !cachedOnly && feed.source === "reddit" && redditReady;
+			const usesHelper = feed.source === "reddit" && usesRedditReadWindow();
 			const scheduled = waitForReddit && automatic;
 			const scheduledUI = scheduled ? activeFrontPageUI() : null;
 			if (waitForReddit) await redditReady;
@@ -11847,19 +11799,21 @@ button {
 			const savedResult = () => ({ stories: Array.isArray(cached?.stories) ? cached.stories : [], status: cached?.status || "ok", cached: Boolean(cached?.status && cached.status !== "ok" && cached.stories?.length), attempted: false, lastAttemptAt: cached?.lastAttemptAt ?? cached?.timestamp ?? 0, lastSuccessAt: cached?.lastSuccessAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), dataFetchedAt: cached?.dataFetchedAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0), retryAt: cached?.retryAt || 0 });
 			if (epoch !== frontPageCacheEpoch || !cachedOnly && frontPageLoads.get(key) !== request ||
 				waitForReddit && !sourceReadEnabled?.has(feed.source)) return { stories: [], status: "cancelled", attempted: false };
-			const transportReady = feed.source === "reddit" && cached?.status === "window" && redditReadBatch?.connected && !redditReadBatch.closing && !redditReadBatch.cancelled;
+			const batch = usesHelper ? redditReadBatch : null;
+			const connected = batch?.connected && !batch.closing && !batch.cancelled;
+			const transportReady = connected && cached?.status === "window";
+			const automaticHelperAttempt = scheduled && batch?.tabAttempted;
 			if (cachedOnly || scheduled && !sourceRefreshInterval(refreshSettings) ||
 				!transportReady && (!force && frontPageNextAttempt(cached, refreshSettings, now) > now || cached?.retryAt > now)) return savedResult();
 			const cooldown = feed.source === "reddit" ? await load(REDDIT_POLL_KEY, null) : null;
 			if (cooldown?.until > now) {
-				const batch = redditReadBatch;
-				const staged = batch?.connected && !batch.closing && !batch.cancelled &&
-					batch.pathIds?.has(redditFrontPagePath(feed.target));
-				if (!staged) {
+				const staged = connected && batch.pathIds?.has(redditFrontPagePath(feed.target));
+				if (!staged && !automaticHelperAttempt) {
 					const saved = savedResult();
 					return { ...saved, status: cooldown.status === "limited" ? "limited" : "unavailable", cached: saved.stories.length > 0, retryAt: cooldown.until };
 				}
 			}
+			if (usesHelper && !force && !automatic && !connected) return savedResult();
 			if (scheduled && (document.visibilityState === "hidden" || !scheduledUI || activeFrontPageUI() !== scheduledUI ||
 				!frontPageFeedsForView(refreshSettings, activeFrontPageView()).some((active) => frontPageFeedKey(active) === key))) return savedResult();
 			const cachedETag = feed.source === "lobsters" && feed.kind === "front" && cached?.dataFetchedAt > 0 && Array.isArray(cached.stories) && validETag(cached.etag) ? cached.etag : "";
@@ -11868,15 +11822,17 @@ button {
 			const updated = result.status === "ok" && !result.unchanged;
 			const stories = updated ? result.stories : Array.isArray(cached?.stories) ? cached.stories : [];
 			const successAt = cached?.lastSuccessAt ?? (cached?.status === "ok" ? cached?.timestamp || 0 : 0);
+			const helperAttemptAt = automaticHelperAttempt && !result.attempted ? finished : cached?.lastAutomaticHelperAttemptAt;
 			const etag = updated ? result.etag : cachedETag;
 			const entry = {
 				timestamp: finished,
 				stories,
 				status: result.status,
-				lastAttemptAt: result.attempted ? now : cached?.lastAttemptAt || 0,
+				lastAttemptAt: result.attempted ? now : cached?.lastAttemptAt ?? cached?.timestamp ?? 0,
 				lastSuccessAt: result.status === "ok" ? finished : successAt,
 				dataFetchedAt: updated ? finished : cached?.dataFetchedAt ?? successAt,
 				retryAt: result.status === "ok" ? 0 : Math.max(result.retryAt || 0, finished + FRONT_PAGE_RETRY_MS),
+				...(helperAttemptAt && { lastAutomaticHelperAttemptAt: helperAttemptAt }),
 				...(etag && { etag }),
 			};
 			if (epoch === frontPageCacheEpoch) await writeFrontPageCache(key, request, entry);
@@ -11926,6 +11882,15 @@ button {
 		return [...new Set(messages)].join(" ");
 	}
 
+	function frontPageViewUnavailable(feedStates, view) {
+		const relevant = view.startsWith("topic:") ? feedStates.filter((feed) => feed.topic === view.slice(6)) : feedStates;
+		return relevant.length > 0 && relevant.every((feed) => feed.status !== "ok" && feed.status !== "window");
+	}
+
+	function frontPageTopicRows(rows, view) {
+		return view.startsWith("topic:") ? appViewRows(rows, view) : rows;
+	}
+
 	function activeFrontPageUI() {
 		if (!sidebarUI || !isSidebarVisible() || sidebarUI.frontPageTransitioning) return null;
 		if (appState) return appViewIsFrontPage(appState.view) && appState.ui.shadow.querySelector("#app-search-page")?.hidden !== false && appState.ui.shadow.querySelector("#app-list-body")?.getClientRects().length ? appState.ui : null;
@@ -11938,9 +11903,15 @@ button {
 
 	async function frontPageRefreshTimes(feeds, settings) {
 		const combined = await load(frontPageCacheKey(feeds), null);
-		const cooldown = feeds.some((feed) => feed.source === "reddit") ? await load(REDDIT_POLL_KEY, null) : null;
+		const hasReddit = feeds.some((feed) => feed.source === "reddit");
+		const usesHelper = hasReddit && usesRedditReadWindow();
+		const approved = !usesHelper || await load(REDDIT_READ_NOTICE_KEY, false);
+		const redditEligible = approved && (!usesHelper || usesManagerTabs());
+		if (!approved) scheduleRedditReadNotice();
+		const cooldown = hasReddit && redditEligible ? await load(REDDIT_POLL_KEY, null) : null;
 		const now = Date.now();
 		return Promise.all(feeds.map(async (feed) => {
+			if (feed.source === "reddit" && !redditEligible) return Infinity;
 			const cached = await readFrontPageFeedCache(feed, legacyFrontPageFeed(combined, feed));
 			return Math.max(frontPageNextAttempt(cached, settings, now), feed.source === "reddit" ? cooldown?.until || 0 : 0);
 		}));
@@ -11963,11 +11934,13 @@ button {
 			const feeds = frontPageFeedsForView(settings, activeFrontPageView());
 			if (!feeds.length) return;
 			const due = await frontPageRefreshTimes(feeds, settings);
+			const next = Math.min(...due);
+			if (!Number.isFinite(next)) return;
 			if (schedule !== frontPageScheduleId || document.visibilityState === "hidden" || !activeFrontPageUI() || frontPageRequests.size) return;
 			frontPageRefreshTimer = window.setTimeout(() => {
-				if (Math.min(...due) > Date.now()) scheduleFrontPageRefresh();
+				if (next > Date.now()) scheduleFrontPageRefresh();
 				else refreshActiveFrontPages().catch(console.error);
-			}, Math.max(50, Math.min(60000, Math.min(...due) - Date.now())));
+			}, Math.max(50, Math.min(60000, next - Date.now())));
 		})().catch(console.error);
 	}
 
@@ -11995,11 +11968,8 @@ button {
 				const options = { automatic: true, redditReady, dueFeedKeys };
 				return appState ? renderAppList(options) : renderBrowseView(ui, options);
 			};
-			const redditDue = due.some((feed) => feed.source === "reddit");
-			const allowHelper = !usesRedditReadWindow() || !redditReadSourceOn || redditDue &&
-				(!startup || !redditReadInitialAttempted) && usesManagerTabs() && Boolean(await load(REDDIT_READ_NOTICE_KEY, false));
+			const allowHelper = !usesRedditReadWindow() || due.some((feed) => feed.source === "reddit");
 			if (previousSync !== syncRunId) return startup;
-			if (startup && redditDue) redditReadInitialAttempted = true;
 			await runSync(task, { automatic: true, feedOnly: true, dueFeedKeys, allowHelper, overlapReddit: true });
 			return true;
 		} finally {
@@ -12045,23 +12015,6 @@ button {
 		if (!options.force && (document.visibilityState === "hidden" || sidebarUI && !activeFrontPageUI())) options = { ...options, cachedOnly: true };
 		const settings = options.settings || (await loadSettings());
 		const feeds = options.feeds || frontPageFeedsForView(settings);
-		const redditFeed = feeds.find((feed) => feed.source === "reddit");
-		const redditCached = redditFeed ? await load(frontPageFeedKey(redditFeed), null) || await load(frontPageCacheKey(feeds), null) : null;
-
-		if (!options.automatic && !options.cachedOnly && frontPageNextAttempt(redditCached, settings) <= Date.now() && sourceRefreshInterval(settings) && document.visibilityState !== "hidden" && activeFrontPageUI() && usesRedditReadWindow() && !redditReadInitialAttempted && !redditReadBatch && isSidebarVisible() && redditFeed) {
-			redditReadInitialAttempted = true;
-			const scheduledAction = redditReadActionId;
-			const [accepted, cooldown] = await Promise.all([load(REDDIT_READ_NOTICE_KEY, false), load(REDDIT_POLL_KEY, null)]);
-
-			if (accepted && !(cooldown?.until > Date.now()) && scheduledAction === redditReadActionId) {
-				const ui = sidebarUI;
-
-				runSync(async (releaseRead) => {
-					if (sidebarUI === ui && (await loadSettings()).sources?.reddit) return refreshRedditReadViews(ui, { onThreadsLoaded: releaseRead });
-				}, { automatic: true, feedOnly: appState ? !appState.open : isBrowsing(ui) }).catch(console.error);
-			}
-			if (!accepted) scheduleRedditReadNotice();
-		}
 
 		if (!feeds.length) {
 			return { rows: [], sources: [], topics: [], attempted: false };
@@ -17171,69 +17124,68 @@ html[data-backchannel-installed] .chin {
 	async function removeCollectedDocument(doc) {
 		const key = doc.key;
 		const notesKeys = (doc.noteDocuments?.length ? doc.noteDocuments : doc.noteDocument ? [doc.noteDocument] : []).map((entry) => entry.key).filter(Boolean);
-		const [saved, folders, looks, index, ...notes] = await Promise.all([
-			loadSavedItems(),
-			loadCollected(),
-			loadLooks(),
-			load(NOTES_INDEX_KEY, []),
-			...notesKeys.map((each) => load(each, null)),
-		]);
-		const notedIndex = Array.isArray(index) ? index : [];
-		const mine = (entry) => savedFolderKey(entry, folders) === key;
-		const snapshot = {
-			key,
-			url: doc.url || "",
-			saved: saved.filter(mine),
-			collected: [],
-			look: lookFor(looks, key),
-			notes: notesKeys.map((each, i) => ({ key: each, value: notes[i], indexEntry: notedIndex.find((entry) => entry?.key === each) || null })),
-		};
-
-		await mutateCollected((entries) => {
-			snapshot.collected = entries.filter((entry) => entry.key === key);
-
-			return removeFromCollected(entries, key);
+		const look = lookFor(await loadLooks(), key);
+		const written = new Set();
+		let snapshot;
+		await withCollectionStorage(async (write) => {
+			const writeOnce = async (name, value) => {
+				if (written.has(name)) return;
+				await write(name, value);
+				written.add(name);
+			};
+			const folders = await loadCollectedForWrite(write);
+			const [stored, index, ...notes] = await Promise.all([
+				GM.getValue(STORAGE.saved, []), GM.getValue(NOTES_INDEX_KEY, []),
+				...notesKeys.map((each) => GM.getValue(each, null)),
+			]);
+			const saved = savedEntries(stored);
+			const notedIndex = Array.isArray(index) ? index : [];
+			const mine = (entry) => savedFolderKey(entry, folders) === key;
+			snapshot ||= {
+				key, url: doc.url || "", look, saved: saved.filter(mine), collected: folders.filter((entry) => entry.key === key),
+				notes: notesKeys.map((each, i) => ({ key: each, value: notes[i], indexEntry: notedIndex.find((entry) => entry?.key === each) || null })),
+			};
+			const cleared = new Set(notesKeys.filter((name, i) => !written.has(name) || !notes[i]?.notes?.length));
+			await writeOnce(STORAGE.collected, removeFromCollected(folders, key));
+			await writeOnce(STORAGE.saved, saved.filter((entry) => !mine(entry)));
+			for (const each of notesKeys) await writeOnce(each, { version: 1, notes: [] });
+			if (cleared.size) await writeOnce(NOTES_INDEX_KEY, notedIndex.filter((entry) => !cleared.has(entry?.key)));
 		});
-		await storeSavedItems(saved.filter((entry) => !mine(entry)));
 		await forgetLook(key);
-
-		for (const each of notesKeys) {
-			await save(each, { version: 1, notes: [] });
-		}
-
-		if (notesKeys.length) {
-			await save(NOTES_INDEX_KEY, notedIndex.filter((entry) => !notesKeys.includes(entry?.key)));
-		}
-
 		return snapshot;
 	}
 
 	async function restoreCollectedDocument(snapshot) {
-		const saved = await loadSavedItems();
-		const held = new Set(saved.map((entry) => entry.key));
+		await withCollectionStorage(async (write) => {
+			const folders = await loadCollectedForWrite(write);
+			const saved = savedEntries(await GM.getValue(STORAGE.saved, []));
+			const held = new Set(saved.map((entry) => entry.key));
+			await write(STORAGE.saved, [...saved, ...snapshot.saved.filter((entry) => !held.has(entry.key))]);
+			await write(STORAGE.collected, [
+				...folders, ...snapshot.collected.filter((entry) => !folders.some((each) => each.key === entry.key)),
+			]);
+			if (!snapshot.notes?.length) return;
 
-		await storeSavedItems([...saved, ...snapshot.saved.filter((entry) => !held.has(entry.key))]);
-		await mutateCollected((entries) => [
-			...entries,
-			...snapshot.collected.filter((entry) => !entries.some((each) => each.key === entry.key)),
-		]);
+			const stored = await GM.getValue(NOTES_INDEX_KEY, []);
+			const index = Array.isArray(stored) ? [...stored] : [];
+			for (const { key, value, indexEntry } of snapshot.notes) {
+				if (!value) continue;
+				const current = await GM.getValue(key, null);
+				const original = Array.isArray(value.notes) ? value.notes : [];
+				const newer = Array.isArray(current?.notes) ? current.notes : [];
+				const notes = newer.length ? [...accountRecordMap([...original, ...newer], "id").values()]
+					.sort((a, b) => noteSeconds(a.created) - noteSeconds(b.created)).slice(-NOTES_PER_DOCUMENT) : original;
+				const position = index.findIndex((entry) => entry?.key === key);
+				const entry = index[position] || indexEntry;
+				await write(key, newer.length ? { ...value, notes } : value);
+				if (entry) index.splice(position < 0 ? index.length : position, position < 0 ? 0 : 1,
+					{ ...entry, count: notes.length, excerpt: latestNoteExcerpt(notes) });
+			}
+			await write(NOTES_INDEX_KEY, index);
+		});
 
 		if (snapshot.look && snapshot.url) {
 			await rememberLook(snapshot.url, snapshot.look);
-		}
-
-		if (snapshot.notes?.length) {
-			const index = await load(NOTES_INDEX_KEY, []);
-			const keys = snapshot.notes.map((each) => each.key);
-			const rest = (Array.isArray(index) ? index : []).filter((entry) => !keys.includes(entry?.key));
-
-			for (const each of snapshot.notes) {
-				if (each.value) {
-					await save(each.key, each.value);
-				}
-			}
-
-			await save(NOTES_INDEX_KEY, [...rest, ...snapshot.notes.map((each) => each.indexEntry).filter(Boolean)]);
 		}
 	}
 
@@ -17687,23 +17639,13 @@ html[data-backchannel-installed] .chin {
 			return "";
 		}
 
-		let key = "";
-		let moves = new Map();
-
-		await mutateCollected((entries) => {
+		return withCollectionStorage(async (write) => {
+			const entries = await loadCollectedForWrite(write);
 			const settled = settleFolders(entries, addresses);
-
-			key = settled.key;
-			moves = settled.moves;
-
-			return settled.folders === entries ? undefined : settled.folders;
+			if (settled.folders !== entries) await write(STORAGE.collected, settled.folders);
+			if (settled.moves.size) await repointSaved(settled.moves, write);
+			return settled.key;
 		});
-
-		if (moves.size) {
-			await repointSaved(moves);
-		}
-
-		return key;
 	}
 
 	function paintSavedMarks(body) {
@@ -19650,10 +19592,11 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 			if (!shown.length) {
 				const note = document.createElement("div");
-				const unavailable = feedStates.length > 0 && feedStates.every((feed) => feed.status !== "ok" && feed.status !== "window");
+				const unavailable = frontPageViewUnavailable(feedStates, view);
+				const allHidden = frontPageTopicRows(allRows, view).length && !frontPageTopicRows(candidates, view).length;
 
 				note.className = "browse-empty";
-				note.textContent = pending ? "Loading Front Pages…" : failureText || (unavailable ? "Could not load Front Pages." : filteredEmpty ? "No links match your topic filters." : allRows.length && !candidates.length ? "Everything in Front Pages is hidden." : view === "unread" ? "All caught up." : "Nothing here right now.");
+				note.textContent = pending ? "Loading Front Pages…" : failureText || (unavailable ? "Could not load Front Pages." : filteredEmpty ? "No links match your topic filters." : allHidden ? "Everything in Front Pages is hidden." : view === "unread" ? "All caught up." : "Nothing here right now.");
 				list.append(note);
 			} else if (failureText) {
 				const notice = document.createElement("div");
@@ -22284,13 +22227,13 @@ header button svg {
 	cursor:pointer;
 }
 
-.more-replies:disabled {
+.more-replies:is(:disabled, [aria-disabled="true"]) {
 	cursor:default;
 	opacity:.7;
 }
 
 @media (hover: hover) {
-	.more-replies:hover:not(:disabled) {
+	.more-replies:hover:not(:disabled, [aria-disabled="true"]) {
 		text-decoration:underline;
 	}
 }
@@ -29614,6 +29557,34 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		);
 	}
 
+	function discardDetachedComments(holder) {
+		renderedComments = renderedComments.filter((entry) => {
+			if (!holder.contains(entry.element)) return true;
+			cancelNewCommentDwell(entry.element);
+			newCommentScrollObserver?.unobserve(entry.element);
+			return false;
+		});
+	}
+
+	function insertExpandedReplies(holder, button, sorting) {
+		if (sorting?.sort !== "newest" && sorting?.sort !== "oldest") {
+			button.before(...holder.children);
+			return;
+		}
+
+		const container = button.parentElement;
+		const roots = new Set([...container.children, ...holder.children]);
+		const entries = renderedComments.filter(({ element }) => roots.has(element)).map(({ element, time, discussionKey }) => ({
+			element, createdAt: time || 0, size: 0,
+			unread: isNewComment({ createdAt: time }, visitSeenTimes.get(discussionKey)),
+		}));
+		let anchor = container.querySelector(":scope > .more-replies");
+		for (const { element } of sortCommentEntries(entries, sorting).reverse()) {
+			if (element.parentElement === holder) container.insertBefore(element, anchor);
+			anchor = element;
+		}
+	}
+
 	function mountMoreReplies(more, thread, container, discussion, context) {
 		if (!more?.ids?.length || typeof thread.expandMore !== "function") {
 			return;
@@ -29637,11 +29608,16 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			delete button._hnewherePendingRefresh;
 			if (pendingRefresh && container.isConnected) syncMoreReplies(pendingRefresh.more, pendingRefresh.thread, container, pendingRefresh.story, pendingRefresh.context);
 		};
+		const settle = (retry = false) => {
+			button.removeAttribute("aria-disabled");
+			button.textContent = label() + (retry ? " — try again" : "");
+			applyPendingRefresh();
+		};
 
 		button.textContent = label();
 
 		button.onclick = async () => {
-			if (button.disabled) {
+			if (button.hasAttribute("aria-disabled")) {
 				return;
 			}
 
@@ -29649,7 +29625,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			const stream = discussionStreamRun;
 			const attached = () => button.isConnected && openPageKey() === page && discussionStreamRun === stream &&
 				(!sourceReadEnabled || sourceReadEnabled.has(discussion.source));
-			button.disabled = true;
+			button.setAttribute("aria-disabled", "true");
 			button.textContent = "loading…";
 
 			const operation = beginSyncOperation("expansion");
@@ -29657,26 +29633,21 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			const { ok, added, remaining } = result.status === "ok" ? result.value : { ok: false, added: [], remaining: pending };
 
 			if (!attached()) {
-				button.disabled = false;
-				button.textContent = label();
-				applyPendingRefresh();
+				settle();
 				return;
 			}
 
 			if (!ok) {
-				button.disabled = false;
-				button.textContent = label() + " — try again";
-				applyPendingRefresh();
+				settle(true);
 				return;
 			}
 
 			const holder = document.createElement("div");
-
-			container.insertBefore(holder, button);
-
-			const directKeys = added
-				.filter((comment) => comment.parentKey === context.parentKey)
-				.map((comment) => comment.key);
+			const generation = sidebarGeneration;
+			const shown = new Set(renderedComments.filter((entry) => entry.discussionKey === discussion.key && entry.element.isConnected).map((entry) => entry.id));
+			const directKeys = [...new Set(added
+				.filter((comment) => comment.parentKey === context.parentKey && !shown.has(comment.key))
+				.map((comment) => comment.key))];
 
 			await renderChildren(
 				directKeys,
@@ -29685,36 +29656,54 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				discussion,
 				context.seenTime,
 				context.collapsedKeys,
-				sidebarGeneration,
+				generation,
 				context.parentKey,
 			);
-			if (!attached()) return;
+			if (!attached() || generation !== sidebarGeneration) {
+				discardDetachedComments(holder);
+				settle();
+				return;
+			}
 
-			refreshSaveControls().catch(console.error);
-			applyPendingFocus().catch(console.error);
-			ensureVoteControlsLoaded().catch(console.error);
+			for (const element of holder.querySelectorAll(".comment[data-comment-id]")) shown.add(element.dataset.commentId);
+			if (holder.childElementCount) {
+				const restoreScroll = preserveDiscussionScroll(container);
+				insertExpandedReplies(holder, button, context.sorting);
+				restoreScroll?.();
+				refreshSaveControls().catch(console.error);
+				applyPendingFocus().catch(console.error);
+				ensureVoteControlsLoaded().catch(console.error);
+			}
 
-			pending = remaining;
-			remainingCount = Math.max(pending.length, remainingCount - added.length);
+			const resolved = new Set(pending);
+			pending = discussion.source === "reddit" ? remaining.filter((id) => !shown.has(sourceKey("reddit", id))) : remaining;
+			for (const id of pending) resolved.delete(id);
+			remainingCount = Math.max(pending.length, remainingCount - Math.max(resolved.size, added.length));
+			const nextMore = pending.length ? { ...more, ids: pending, count: remainingCount } : null;
+
 			if (context.parentKey) {
 				const parent = renderedComments.find((entry) => entry.discussionKey === discussion.key && entry.id === context.parentKey);
 				if (parent?.comment) {
 					parent.comment.replyKeys = [...new Set([...(parent.comment.replyKeys || []), ...directKeys])];
-					parent.comment.more = pending.length ? { ...more, ids: [...pending], count: remainingCount } : null;
+					parent.comment.more = nextMore;
 				}
 			}
-			await persistSharedThreads([discussion], { updateLocal: true }).catch(console.error);
+			await persistSharedThreads([discussion], { updateLocal: true, remainingRootReplies: context.parentKey ? undefined : nextMore }).catch(console.error);
 
-			if (!pending.length) {
-				button.remove();
-				applyPendingRefresh();
+			if (!attached() || pending.length) {
+				settle(!added.length && !resolved.size);
 				return;
 			}
 
-			button.disabled = false;
-			button.textContent = label() + (added.length ? "" : " — try again");
+			if (button.getRootNode().activeElement === button) {
+				const previous = button.previousElementSibling;
+				const adjacent = previous?.matches("button") ? previous : previous?.querySelector(".comment-attribution .focus-link");
+				adjacent?.focus({ preventScroll: true });
+			}
+			button.remove();
 			applyPendingRefresh();
 		};
+		return button;
 	}
 
 	// -------------------------
@@ -30337,6 +30326,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				collapsedKeys,
 				generation,
 				parentKey: null,
+				sorting: { sort: settings.commentSort, unreadFirst: settings.newCommentsFirst },
 			});
 		}
 
@@ -36335,13 +36325,16 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 	function syncMoreReplies(more, thread, container, story, context) {
 		const existing = [...container.children].filter((node) => node.classList.contains("more-replies") && node.dataset.discussionKey === story.key);
 		if (!more && !existing.length) return;
-		if (existing.some((button) => button.disabled)) {
-			for (const button of existing.filter((item) => item.disabled)) button._hnewherePendingRefresh = { more, thread, story, context };
+		const loading = existing.filter((button) => button.hasAttribute("aria-disabled"));
+		if (loading.length) {
+			for (const button of loading) button._hnewherePendingRefresh = { more, thread, story, context };
 			return;
 		}
+		const focused = existing.includes(container.getRootNode().activeElement);
 		for (const button of existing) button.remove();
 		const shown = new Set(renderedComments.filter((entry) => entry.discussionKey === story.key && entry.parentId === context.parentKey).map((entry) => entry.id));
-		mountMoreReplies(mergeMoreReplies(null, more, shown, story.source), thread, container, story, context);
+		const button = mountMoreReplies(mergeMoreReplies(null, more, shown, story.source), thread, container, story, context);
+		if (focused) button?.focus({ preventScroll: true });
 	}
 
 	function changedDiscussionBranches(previous, current) {
@@ -36376,12 +36369,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			const holder = document.createElement("div");
 			await renderComment(key, thread, holder, story, context.seenTime, context.collapsedKeys, context.generation, context.parentKey);
 			if (context.generation !== sidebarGeneration || context.run !== discussionRenderRun) {
-				renderedComments = renderedComments.filter((entry) => {
-					if (!holder.contains(entry.element)) return true;
-					cancelNewCommentDwell(entry.element);
-					newCommentScrollObserver?.unobserve(entry.element);
-					return false;
-				});
+				discardDetachedComments(holder);
 				return;
 			}
 			if (renderedComments.length > start) context.annotationChanges.changed = true;
@@ -36666,7 +36654,10 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			if (!current()) return;
 			for (let index = 0; index < nextStories.length; index++) {
 				const story = nextStories[index];
-				if (!retained.has(story.key)) syncMoreReplies(threads[index]?.rootMore, threads[index], comments, story, { seenTime: seenTimes.get(story.key) || 0, collapsedKeys, generation, parentKey: null });
+				if (!retained.has(story.key)) syncMoreReplies(threads[index]?.rootMore, threads[index], comments, story, {
+					seenTime: seenTimes.get(story.key) || 0, collapsedKeys, generation, parentKey: null,
+					sorting: { sort: settings.commentSort, unreadFirst: settings.newCommentsFirst },
+				});
 			}
 			syncDiscussionBookends(comments, entries, settings, lookup);
 			if (restoreScroll) restoreScroll();
@@ -43572,11 +43563,15 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	}
 
 	async function syncAccount(preference = "", confirmed = null, trigger = "manual") {
-		const result = await accountSyncLock(async (lease) => {
+		const changes = { changedSettings: false, changedCollection: false, changedQueue: false, changedPreferences: false };
+		let acknowledged = null;
+		return accountSyncLock(async (lease) => {
 			const stored = await GM.getValue(ACCOUNT_SYNC_KEY, null);
 			if (!hasAccountSyncSession(stored) || stored.expiresAt <= Date.now()) throw new Error("session-expired");
 			if (stored.keyBackupPending || (await accountDataOwner(stored)) !== stored.account) return null;
-			if (trigger === "edit" && !(await accountHasPendingEdits(stored))) return null;
+			if (acknowledged && (acknowledged.account !== stored.account || acknowledged.token !== stored.token ||
+				acknowledged.revision <= (stored.revision || 0))) acknowledged = null;
+			if (!acknowledged && trigger === "edit" && !(await accountHasPendingEdits(stored))) return null;
 			const state = { ...stored };
 			let restore = trigger === "restore" ? confirmed?.recovery : null;
 			if (trigger === "restore" && restore?.account !== state.account) throw new Error("snapshot-restore-changed");
@@ -43590,17 +43585,52 @@ ${SETTINGS_MODAL_PHONE_CSS}
 				}
 			}
 
-			for (let attempt = 0; attempt < 3; attempt++) {
-				const local = await readAccountSnapshot(state.account);
-				if (trigger === "edit" && stored.base && accountSnapshotsEqual(local, stored.base)) {
-					const clean = await withSharedStorageLock("account-storage", async (localLease) => {
-						if (!accountSnapshotsEqual(local, await readAccountSnapshot(state.account))) return false;
-						await clearAccountEdit(state.account, localLease);
-						return true;
-					}, { required: true });
-					if (clean) return null;
-					continue;
+			const applySnapshot = (local, document, revision, uploaded) => withSharedStorageLock("account-storage", async (localLease) => {
+				const commit = (write) => localLease.commit(() => lease.commit(write));
+				const current = await readAccountSnapshot(state.account);
+				const edited = !accountValuesEqual(local, current);
+				if (edited && !uploaded) return false;
+				const next = edited ? accountPortableDocument(mergeAccountSnapshots(local, current, document, "local").document) : document;
+				const pending = !accountSnapshotsEqual(next, document);
+				if (pending && await load(ACCOUNT_EDIT_KEY, null) !== state.account) {
+					await commit(() => GM.setValue(ACCOUNT_EDIT_KEY, state.account));
 				}
+				await applyAccountSnapshot(state.account, current, next, { commit });
+				const checkpoint = { base: document, revision, ...(!pending && { lastSync: Date.now() }) };
+				const persist = () => GM.setValue(ACCOUNT_SYNC_KEY, { ...state, ...checkpoint });
+				try {
+					await commit(persist);
+				} catch (error) {
+					if (typeof error === "symbol") throw error;
+					await commit(persist);
+				}
+				Object.assign(state, checkpoint);
+				if (!pending) await clearAccountEdit(state.account, { commit });
+				changes.changedSettings ||= !accountValuesEqual(current.settings, next.settings);
+				changes.changedCollection ||= !accountValuesEqual(current.collection, next.collection);
+				changes.changedQueue ||= !accountQueuesEqual(current.collection.queue, next.collection.queue) ||
+					!accountQueuesEqual(stored.base?.collection?.queue, next.collection.queue);
+				changes.changedPreferences ||= Object.keys(ACCOUNT_PREFERENCES).some((name) => !accountValuesEqual(current.preferences[name], next.preferences[name]));
+				return !pending;
+			}, { required: true });
+			if (acknowledged) {
+				const { local, document, revision, keyProofVersion } = acknowledged;
+				if (keyProofVersion) state.keyProofVersion = keyProofVersion;
+				restored = acknowledged.restored;
+				if (restored) restore = null;
+				const applied = await applySnapshot(local, document, revision, true);
+				acknowledged = null;
+				if (applied) return { revision, restored, ...changes };
+			}
+
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const local = await withSharedStorageLock("account-storage", async (localLease) => {
+					const snapshot = await readAccountSnapshot(state.account);
+					if (trigger !== "edit" || !state.base || !accountSnapshotsEqual(snapshot, state.base)) return snapshot;
+					await clearAccountEdit(state.account, { commit: (write) => localLease.commit(() => lease.commit(write)) });
+					return null;
+				}, { required: true });
+				if (!local) return null;
 				const snapshot = await accountRequest("/snapshot", { token: state.token });
 				if (!Number.isSafeInteger(snapshot?.revision) || snapshot.revision < 0 || snapshot.revision < (state.revision || 0)) throw new Error("invalid-snapshot");
 				if (restore && restore.revision !== snapshot.revision) throw new Error("snapshot-restore-changed");
@@ -43637,6 +43667,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 
 				const document = accountPortableDocument(merge.document);
 				let revision = snapshot.revision;
+				let uploaded = false;
 				if (restore || !revision || !accountSnapshotsEqual(remote, document)) {
 					const ciphertext = await accountSeal(document, state, revision + 1);
 					const write = async () => {
@@ -43652,36 +43683,26 @@ ${SETTINGS_MODAL_PHONE_CSS}
 						});
 						if (written?.revision !== revision + 1) throw new Error("invalid-snapshot");
 						revision = written.revision;
+						uploaded = true;
 						if (restore) {
 							restored = true;
 							restore = null;
 						}
+						acknowledged = { account: state.account, token: state.token, local, document, revision, restored, keyProofVersion: state.keyProofVersion };
 					} catch (error) {
 						if (error.message === "revision-conflict") continue;
 						throw error;
 					}
 				}
 
-				const applied = await withSharedStorageLock("account-storage", async (localLease) => {
-					if (!accountValuesEqual(local, await readAccountSnapshot(state.account))) return false;
-					await applyAccountSnapshot(state.account, local, document, localLease);
-					await localLease.commit(() => GM.setValue(ACCOUNT_SYNC_KEY, { ...state, base: document, revision, lastSync: Date.now() }));
-					await clearAccountEdit(state.account, localLease);
-					return true;
-				}, { required: true });
-				if (!applied) continue;
-				return {
-					revision, restored, changedSettings: !accountValuesEqual(local.settings, document.settings),
-					changedCollection: !accountValuesEqual(local.collection, document.collection),
-					changedQueue: !accountQueuesEqual(local.collection.queue, document.collection.queue) ||
-						!accountQueuesEqual(stored.base?.collection?.queue, document.collection.queue),
-					changedPreferences: Object.keys(ACCOUNT_PREFERENCES).some((name) => !accountValuesEqual(local.preferences[name], document.preferences[name])),
-				};
+				const applied = await applySnapshot(local, document, revision, uploaded);
+				acknowledged = null;
+				if (applied) return { revision, restored, ...changes };
 			}
 			throw new Error("sync-busy");
+		}).finally(() => {
+			if (Object.values(changes).some(Boolean)) return refreshAccountLocal(changes).catch(console.error);
 		});
-		if (result?.revision) await refreshAccountLocal(result).catch(console.error);
-		return result;
 	}
 
 	function validAccountAvatar(value) {
@@ -52041,7 +52062,6 @@ ${frontPageChooserHTML()}
 				await applyAppTopicVisits(projection, isCurrent);
 				if (!isCurrent()) return;
 				const failureText = frontPageFailureText(feedStates, view);
-				const unavailable = feedStates.length > 0 && feedStates.every((feed) => feed.status !== "ok" && feed.status !== "window");
 				const queuedKeys = new Set(queued.map(queueKey));
 
 				while (list._hnewherePointer) {
@@ -52064,9 +52084,10 @@ ${frontPageChooserHTML()}
 				list.replaceChildren();
 
 				if ((!shown.length || topicsCaughtUp) && !projection.active) {
+					const unavailable = frontPageViewUnavailable(feedStates, view);
 					renderAppListMessage(
 						pending ? "Loading Front Pages…" : failureText || (filteredEmpty
-							? "No links match your topic filters." : !allRows.length
+								? "No links match your topic filters." : !frontPageTopicRows(allRows, view).length
 							? unavailable ? "Could not load Front Pages." : "Nothing here right now."
 							: view === "unread"
 								? "All caught up."
@@ -52521,6 +52542,7 @@ ${frontPageChooserHTML()}
 	}
 
 	const APP_TOPIC_COMMENT_PAGE = 24;
+	const APP_TOPIC_THREAD_PAGE = 16;
 	const APP_TOPIC_THREAD_BATCH = 8;
 	const APP_TOPIC_THREAD_SAMPLE = 8;
 	const APP_TOPIC_BEST_WAIT_MS = 400;
@@ -52703,6 +52725,7 @@ ${frontPageChooserHTML()}
 		state.offset = 0;
 		state.expansions = [];
 		state.missing = false;
+		state.removed = new Set();
 		state.incomplete = Boolean(reader.incomplete || reader.rootMore);
 		queueAppTopicReplies(state, reader.rootKeys, 0, null);
 		if (!cached && reader.expandMore && reader.rootMore?.ids?.length) state.expansions.push({ ids: reader.rootMore.ids, depth: 0, parent: null });
@@ -52749,7 +52772,11 @@ ${frontPageChooserHTML()}
 					continue;
 				}
 				const comment = fetched[i].value;
-				if (!comment) { state.missing = true; continue; }
+				if (!comment) {
+					state.missing = true;
+					if (hnIDs && !state.cached) state.removed.add(key);
+					continue;
+				}
 				const parentKey = reader.flat || comment.source === "reddit" ? comment.parentKey || parent : parent;
 				const level = parentKey && state.depths.has(parentKey) ? state.depths.get(parentKey) + 1 : depth;
 				state.depths.set(key, level);
@@ -52758,9 +52785,12 @@ ${frontPageChooserHTML()}
 					state.incomplete = true;
 					if (!state.cached && reader.expandMore && comment.more.ids?.length) state.expansions.push({ ids: comment.more.ids, depth: level + 1, parent: key });
 				}
-				if (state.displayed.has(key) || comment.deleted || comment.local || comment.muted || comment.hidden || typeof comment.bodyHTML !== "string") continue;
-				const plain = textExcerpt(comment.bodyHTML, 80);
-				if (!plain || /^\[(?:removed|deleted)\]$/i.test(plain)) continue;
+				if (state.displayed.has(key)) continue;
+				const plain = typeof comment.bodyHTML === "string" ? textExcerpt(comment.bodyHTML, 80) : "";
+				if (comment.deleted || comment.local || comment.muted || comment.hidden || !plain || /^\[(?:removed|deleted)\]$/i.test(plain)) {
+					state.removed.add(key);
+					continue;
+				}
 				state.displayed.add(key);
 				state.comments.push({ comment, depth: level, parent: parentKey || null });
 			}
@@ -52824,12 +52854,14 @@ ${frontPageChooserHTML()}
 				failed = result.status !== "ok" || !result.value?.getComment || result.value.empty;
 				if (failed && state.comments.length === before) return null;
 			}
-			if (!state.comments.length && !remaining() && (state.missing || state.reader.incomplete && !state.queued.size && source !== "x")) {
+			const unknown = state.missing && (source !== "hn" || state.cached);
+			if (!state.comments.length && !remaining() && (unknown || state.reader.incomplete && !state.queued.size && source !== "x")) {
 				if (!localOnly) readers.delete(id);
 				return null;
 			}
 			return { comments: state.comments.slice(0, limit), restricted: !state.comments.length && state.queued.size > 0, localOnly: localOnly && source === "reddit",
-				more: failed || state.comments.length > limit || remaining() || Boolean(fallback()), failed,
+				more: failed || state.comments.length > limit || remaining() || Boolean(fallback()), failed, incomplete: Boolean(state.reader.incomplete),
+				removed: state.removed, rootKeys: source === "hn" && !state.cached ? state.reader.rootKeys : null,
 				deferred: state.comments.length < limit && (budget.rows === 0 || budget.pages === 0) && remaining() };
 		};
 		state.turn = read().finally(() => { state.turn = null; });
@@ -52922,7 +52954,7 @@ ${frontPageChooserHTML()}
 			focus.onclick = () => openAppTopicDiscussion(reading, entry, focus, row);
 		} else {
 			focus.onclick = () => {
-				if (!panel.focusComment) panel.focusReturn = { key: comment.key, top: panel.scroller.scrollTop };
+				if (!panel.focusComment) panel.focusReturn = { key: comment.key, top: panel.scroller.scrollTop, offset: item.getBoundingClientRect().top };
 				panel.focusComment = comment.key;
 				panel.focusCollapsed = new Set();
 				panel.paintDetailRows();
@@ -53378,6 +53410,44 @@ ${frontPageChooserHTML()}
 		return votes;
 	}
 
+	function mergeAppTopicThreadRows(previous, data) {
+		const fresh = new Map(data.comments.map((row) => [row.comment.key, row]));
+		const roots = data.rootKeys && new Set(data.rootKeys);
+		const incomplete = data.more || data.incomplete || data.restricted;
+		const merged = new Map();
+		for (const row of previous) {
+			const key = row.comment.key;
+			if (!fresh.has(key)) {
+				if (!incomplete || data.removed?.has(key) || roots && !row.parent && !roots.has(key)) continue;
+				const parent = fresh.get(row.parent)?.comment;
+				if (roots && parent && !parent.replyKeys.includes(key)) continue;
+			}
+			merged.set(key, fresh.get(key) || row);
+		}
+		for (const [key, row] of fresh) merged.set(key, row);
+		return [...merged.values()];
+	}
+
+	function sameAppTopicThreadRow(a, b) {
+		return a === b || Boolean(a && b && a.depth === b.depth && a.parent === b.parent && JSON.stringify(a.comment) === JSON.stringify(b.comment));
+	}
+
+	function refreshAppTopicFeedThread(reading, entry, data) {
+		const panel = reading.discussionPanel;
+		const key = entry.discussion.key;
+		const hit = panel.results.get(key);
+		const previous = hit?.data?.comments || [];
+		const comments = mergeAppTopicThreadRows(previous, data);
+		const retained = new Map(comments.map((row) => [row.comment.key, row]));
+		for (const row of previous) {
+			const comment = row.comment.key;
+			if (!sameAppTopicThreadRow(row, retained.get(comment))) panel.nodes.delete(entry.thread.url + "\n" + comment);
+			const shown = panel.bestFeed?.visible.get(comment);
+			if (!retained.has(comment) && shown?.entry.discussion.key === key) panel.bestFeed.visible.delete(comment);
+		}
+		panel.results.set(key, { data: { ...data, comments }, limit: Math.max(hit?.limit || APP_TOPIC_THREAD_PAGE, comments.length), failed: data.failed });
+	}
+
 	function paintAppTopicDetail(reading, entry) {
 		const panel = reading.discussionPanel;
 		flushComposerDrafts(panel.detail).catch(console.error);
@@ -53413,7 +53483,11 @@ ${frontPageChooserHTML()}
 			panel.paintDetailRows?.();
 			const target = previous && region.querySelector('[data-comment-key="' + CSS.escape(previous.key) + '"] .focus-link') || clearFocus;
 			target.focus({ preventScroll: true });
-			if (previous) panel.scroller.scrollTop = previous.top;
+			if (previous) {
+				const row = target.closest("[data-comment-key]");
+				if (row) panel.scroller.scrollTop += row.getBoundingClientRect().top - previous.offset;
+				else panel.scroller.scrollTop = previous.top;
+			}
 		};
 		region.onkeydown = (event) => {
 			if (event.key !== "Escape") return;
@@ -53421,8 +53495,17 @@ ${frontPageChooserHTML()}
 			event.preventDefault();
 			event.stopPropagation();
 		};
-		const content = appTopicArticleNode("div", "app-topic-thread-content", "Loading comments…");
-		content.setAttribute("aria-busy", "true");
+		const content = appTopicArticleNode("div", "app-topic-thread-content");
+		const status = appTopicArticleNode("span", "", "Loading comments…");
+		const list = appTopicArticleNode("ol", "app-topic-comments");
+		list.hidden = true;
+		const more = appTopicArticleNode("button", "more-replies app-topic-thread-more", "Show more replies");
+		const retry = appTopicArticleNode("button", "more-replies", "Retry comments");
+		for (const button of [more, retry]) {
+			button.type = "button";
+			button.hidden = true;
+		}
+		content.append(status, list);
 		const discussion = entry.discussion;
 		region.append(focusBanner, content);
 		region.append(appTopicComposer(reading, entry).holder);
@@ -53432,144 +53515,178 @@ ${frontPageChooserHTML()}
 		paintAppPhoneComposer();
 		refreshSaveControls().catch(console.error);
 		const key = entry.discussion.key;
-		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted && panel.entries.has(entry.thread.url);
-		const hit = panel.results.get(key)?.data;
-		if (!panel.details.has(key)) panel.details.set(key, discussion.source !== "reddit" && hit?.comments.length && !hit.more ? Promise.resolve(hit) :
-			readAppTopicComments(panel, entry.discussion, 16, false, current, panel.revisions.has(key)).catch(() => null));
-		Promise.all([panel.details.get(key), panel.collapsedReady]).then(([loaded, collapsed]) => {
-			if (!current() || panel.detail !== region || !region.isConnected) return;
-			content.removeAttribute("aria-busy");
+		const current = () => appState?.topicArticle === reading && !panel.controller.signal.aborted && panel.entries.has(entry.thread.url) &&
+			panel.detail === region && region.isConnected;
+		const remembered = panel.details.get(key);
+		let limit = remembered?.limit || APP_TOPIC_THREAD_PAGE;
+		let data, rows = [], nodes = new Map(), graph;
+		const paintRows = (collapsed) => {
+			const focused = nodes.has(panel.focusComment) ? visibleCommentIdsFromGraph(graph, [panel.focusComment]) : null;
+			if (!focused) panel.focusComment = null;
+			paintFocus(Boolean(focused), rows.length);
+			if (focused) {
+				const { comment } = graph.byId.get(panel.focusComment);
+				paintCommentFocusQuote(quote, {
+					author: comment.authorName || comment.author,
+					textElement: nodes.get(panel.focusComment).querySelector(".app-topic-comment-body"),
+				});
+			}
+			const families = new Map();
+			for (const { row } of orderAppTopicComments(reading, rows.map((row) => ({ entry, row })))) {
+				if (focused && !focused.has(row.comment.key)) continue;
+				const parent = nodes.has(row.parent) ? row.parent : null;
+				if (!families.has(parent)) families.set(parent, []);
+				families.get(parent).push(row);
+			}
+			const visible = [];
+			const append = (row) => {
+				const id = row.comment.key;
+				const node = nodes.get(id);
+				const folded = collapsed.has(id) && (!focused || panel.focusCollapsed.has(id));
+				paintAppTopicCommentCollapse(node, folded);
+				visible.push(node);
+				if (!folded) (families.get(id) || []).forEach(append);
+			};
+			(families.get(null) || []).forEach(append);
+			if (list.children.length !== visible.length || visible.some((node, index) => node !== list.children[index])) {
+				const focus = region.getRootNode().activeElement;
+				const focusKey = list.contains(focus) && focus.closest("[data-comment-key]")?.dataset.commentKey;
+				const kept = new Set(visible);
+				for (const node of list.children) {
+					if (!kept.has(node)) flushComposerDrafts(node).catch(console.error);
+				}
+				list.replaceChildren(...visible);
+				if (list.contains(focus)) focus.focus({ preventScroll: true });
+				else if (focusKey) (nodes.get(focusKey)?.isConnected ? nodes.get(focusKey) : clearFocus).focus({ preventScroll: true });
+				refreshSaveControls().catch(console.error);
+			}
+			list.hidden = !visible.length;
+		};
+		const syncActions = (items) => {
+			if (!items.length || !getSource(discussion.source)?.capabilities.vote) return;
+			loadVoteState(discussion.source, discussion.id).then((state) => {
+				if (!current()) return;
+				for (const { comment } of items) {
+					const slot = nodes.get(comment.key)?.querySelector(".vote-controls");
+					if (slot) renderVoteControls(slot, discussion.id, comment.id, state.get(String(comment.id)));
+				}
+			}).catch(console.error);
+		};
+		const load = async (mode) => {
+			const initial = mode === "open";
+			const expanding = mode === "more";
+			const revision = panel.revisions.get(key);
+			const nextLimit = limit + (expanding ? APP_TOPIC_THREAD_PAGE : 0);
+			const hit = panel.results.get(key)?.data;
+			const cached = initial && (remembered?.data || (discussion.source !== "reddit" && hit?.comments.length && !hit.more ? hit : null));
+			const busy = expanding ? more : content;
+			busy.setAttribute("aria-busy", "true");
+			more.disabled = true;
+			retry.disabled = true;
 			panel.controls.update();
-			const data = loaded || hit;
-			const origin = panel.origin;
-			if (data?.comments.length || data?.more || origin) {
-				if (data && !panel.results.get(key)?.data?.comments.length) panel.results.set(key, { data, limit: 16 });
-				const rows = [...(data?.comments || [])];
+			const [loaded, collapsed] = await Promise.all([cached ||
+				readAppTopicComments(panel, discussion, nextLimit, false, current, Boolean(revision)).catch(() => null), panel.collapsedReady]);
+			if (!current() || revision !== panel.revisions.get(key)) return;
+			const previous = new Map(rows.map((row) => [row.comment.key, row]));
+			const origin = initial && panel.origin;
+			if (initial) {
+				data = loaded || hit;
+				rows = [...(data?.comments || [])];
+				if (data && !hit?.comments.length) panel.results.set(key, { data, limit });
 				if (origin) {
-					const loadedKeys = new Set(rows.map(({ comment }) => comment.key));
 					const known = new Map([...(hit?.comments || []), origin, ...rows].map((row) => [row.comment.key, row]));
 					const focus = visibleCommentIdsFromGraph(appTopicCommentGraph([...known.values()]), [origin.comment.key]);
+					const loadedKeys = new Set(rows.map(({ comment }) => comment.key));
 					for (const [id, row] of known) if (focus.has(id) && !loadedKeys.has(id)) rows.push(row);
 				}
-				const list = appTopicArticleNode("ol", "app-topic-comments");
-				content.replaceChildren(list);
-				const nodes = new Map(rows.map((row) => [row.comment.key, appTopicCommentNode(reading, entry, row, false)]));
-				let graph;
-				panel.paintDetailRows = () => {
-					const focused = nodes.has(panel.focusComment) ? visibleCommentIdsFromGraph(graph, [panel.focusComment]) : null;
-					if (!focused) panel.focusComment = null;
-					paintFocus(Boolean(focused), rows.length);
-					if (focused) {
-						const { comment } = graph.byId.get(panel.focusComment);
-						paintCommentFocusQuote(quote, {
-							author: comment.authorName || comment.author,
-							textElement: nodes.get(panel.focusComment).querySelector(".app-topic-comment-body"),
-						});
-					}
-					const families = new Map();
-					for (const { row } of orderAppTopicComments(reading, rows.map((row) => ({ entry, row })))) {
-						if (focused && !focused.has(row.comment.key)) continue;
-						const parent = nodes.has(row.parent) ? row.parent : null;
-						if (!families.has(parent)) families.set(parent, []);
-						families.get(parent).push(row);
-					}
-					const visible = [];
-					const append = (row) => {
-						const id = row.comment.key;
-						const node = nodes.get(id);
-						const folded = collapsed.has(id) && (!focused || panel.focusCollapsed.has(id));
-						paintAppTopicCommentCollapse(node, folded);
-						visible.push(node);
-						if (!folded) (families.get(id) || []).forEach(append);
-					};
-					(families.get(null) || []).forEach(append);
-					if (list.children.length !== visible.length || visible.some((node, index) => node !== list.children[index])) {
-						const focus = region.getRootNode().activeElement;
-						const kept = new Set(visible);
-						for (const node of list.children) {
-							if (!kept.has(node)) flushComposerDrafts(node).catch(console.error);
-						}
-						list.replaceChildren(...visible);
-						if (list.contains(focus)) focus.focus({ preventScroll: true });
-						refreshSaveControls().catch(console.error);
-					}
-				};
-				const paintRows = () => {
-					graph = appTopicCommentGraph(rows);
-					panel.paintDetailRows();
-				};
-				paintRows();
-				const syncActions = (items) => {
-					if (!getSource(entry.discussion.source)?.capabilities.vote) return;
-					loadVoteState(entry.discussion.source, entry.discussion.id).then((state) => {
-						if (panel.detail !== region) return;
-						for (const { comment } of items) renderVoteControls(nodes.get(comment.key).querySelector(".vote-controls"),
-							entry.discussion.id, comment.id, state.get(String(comment.id)));
-					}).catch(console.error);
-				};
-				syncActions(rows);
-				if (data?.more) {
-					const more = appTopicArticleNode("button", "more-replies app-topic-thread-more", data.failed ? "Retry more replies" : "Show more replies");
-					more.type = "button";
-					let limit = Math.max(16, rows.length);
-					more.onclick = async () => {
-						more.disabled = true;
-						more.setAttribute("aria-busy", "true");
-						const next = await readAppTopicComments(panel, entry.discussion, limit + 16, false, current, panel.revisions.has(key)).catch(() => null);
-						if (panel.detail !== region || !current()) return;
-						more.disabled = false;
-						more.removeAttribute("aria-busy");
-						if (!next) { more.textContent = "Retry more replies"; return; }
-						limit += 16;
-						const added = next.comments.filter(({ comment }) => !nodes.has(comment.key));
-						for (const row of added) nodes.set(row.comment.key, appTopicCommentNode(reading, entry, row, false));
-						rows.push(...added);
-						more.hidden = !next.more;
-						more.textContent = next.failed ? "Retry more replies" : "Show more replies";
-						panel.details.set(key, Promise.resolve({ ...next, comments: rows, more: !more.hidden }));
-						paintRows();
-						syncActions(added);
-						if (added.length && more.hidden) nodes.get(added[0].comment.key).focus({ preventScroll: true });
-					};
-					content.append(more);
-				}
-				if (origin && region.getRootNode().activeElement === clearFocus) {
-					const target = nodes.get(origin.comment.key);
-					if (target?.isConnected) {
-						target.focus({ preventScroll: true });
-						focusBanner.scrollIntoView({ block: "nearest" });
+				limit = Math.max(limit, rows.length);
+			} else if (loaded) {
+				rows = mergeAppTopicThreadRows(rows, loaded);
+				data = { ...loaded, comments: rows };
+				limit = nextLimit;
+			}
+			if (loaded) panel.details.set(key, { data, limit });
+			const scroller = panel.scroller;
+			const viewport = scroller.getBoundingClientRect();
+			const keys = new Set(rows.map(({ comment }) => comment.key));
+			let anchor, anchorTop;
+			if (mode === "refresh" && scroller.scrollTop) {
+				for (const node of list.children) {
+					if (!keys.has(node.dataset.commentKey)) continue;
+					const box = node.getBoundingClientRect();
+					if (box.bottom > viewport.top && box.top < viewport.bottom) {
+						anchor = node.dataset.commentKey;
+						anchorTop = box.top;
+						break;
 					}
 				}
-			} else {
-				content.textContent = data?.restricted ? "No comments available here." : data ? "No comments yet." : "Comments couldn’t be loaded.";
 			}
-			if (!loaded) {
-				const retry = appTopicArticleNode("button", "more-replies", "Retry comments");
-				retry.type = "button";
-				retry.onclick = () => { panel.details.delete(key); paintAppTopicDetail(reading, entry).focus({ preventScroll: true }); };
-				content.append(" ", retry);
+			const priorNodes = nodes;
+			const changed = [];
+			nodes = new Map(rows.map((row) => {
+				const key = row.comment.key;
+				if (sameAppTopicThreadRow(previous.get(key), row)) return [key, priorNodes.get(key)];
+				changed.push(row);
+				return [key, appTopicCommentNode(reading, entry, row, false)];
+			}));
+			graph = appTopicCommentGraph(rows);
+			panel.paintDetailRows = () => paintRows(collapsed);
+			panel.paintDetailRows();
+			status.textContent = rows.length || data?.more ? "" : data?.restricted ? "No comments available here." : data ? "No comments yet." : "Comments couldn’t be loaded.";
+			more.hidden = !data?.more;
+			if (!more.hidden && !more.isConnected) content.append(more);
+			more.textContent = data?.failed || expanding && !loaded ? "Retry more replies" : "Show more replies";
+			retry.hidden = Boolean(loaded) || expanding;
+			if (retry.hidden) retry.remove();
+			else if (!retry.isConnected) content.append(retry);
+			for (const element of [more, content]) element.removeAttribute("aria-busy");
+			more.disabled = false;
+			retry.disabled = false;
+			const anchored = nodes.get(anchor);
+			if (anchored?.isConnected) scroller.scrollTop += anchored.getBoundingClientRect().top - anchorTop;
+			if (mode === "refresh" && loaded) refreshAppTopicFeedThread(reading, entry, loaded);
+			syncActions(changed);
+			panel.controls.update();
+			if (expanding && more.hidden && changed.length) nodes.get(changed[0].comment.key).focus({ preventScroll: true });
+			if (origin && region.getRootNode().activeElement === clearFocus) {
+				const target = nodes.get(origin.comment.key);
+				if (target?.isConnected) {
+					target.focus({ preventScroll: true });
+					focusBanner.scrollIntoView({ block: "nearest" });
+				}
 			}
-		});
+		};
+		more.onclick = () => load("more").catch(console.error);
+		retry.onclick = () => refreshAppTopicThreads(reading, [entry]);
+		panel.refreshDetail = () => load("refresh").catch(console.error);
+		load("open").catch(console.error);
 		return clearFocus;
 	}
 
 	function refreshAppTopicThreads(reading, entries) {
 		const panel = reading.discussionPanel;
 		if (appState.topicArticle !== reading || !entries.length) return;
-		panel.pageFrom = null;
-		panel.pageKeys = null;
-		resetAppTopicBestFeed(panel);
+		const selected = panel.entries.get(panel.selected);
+		if (!selected) {
+			panel.pageFrom = null;
+			panel.pageKeys = null;
+			resetAppTopicBestFeed(panel);
+		}
 		forgetSyncedItems(entries.map(({ discussion }) => discussion), entries.flatMap(({ discussion }) => Array.from(panel.hnItems.get(discussion.key) || [])));
+		let refreshDetail = false;
 		for (const { discussion, thread } of entries) {
 			const key = discussion.key;
 			panel.revisions.set(key, (panel.revisions.get(key) || 0) + 1);
 			panel.active.delete(key);
+			if (key === selected?.discussion.key && panel.refreshDetail) {
+				refreshDetail = true;
+				continue;
+			}
 			panel.results.delete(key);
 			panel.details.delete(key);
 			for (const node of panel.nodes.keys()) if (node.startsWith(thread.url + "\n")) panel.nodes.delete(node);
 		}
-		const selected = panel.entries.get(panel.selected);
-		if (selected && entries.some(({ discussion }) => discussion.key === selected.discussion.key)) paintAppTopicDetail(reading, selected);
+		if (refreshDetail) panel.refreshDetail();
 		updateAppTopicFeed(reading);
 	}
 
@@ -53817,6 +53934,7 @@ ${frontPageChooserHTML()}
 			panel.detail?.remove();
 			panel.detail = null;
 			panel.paintDetailRows = null;
+			panel.refreshDetail = null;
 		}
 		panel.controls ||= mountAppTopicControls(reading);
 		updateAppTopicFeed(reading);
@@ -53854,6 +53972,7 @@ ${frontPageChooserHTML()}
 		panel.detail?.remove();
 		panel.detail = null;
 		panel.paintDetailRows = null;
+		panel.refreshDetail = null;
 		updateAppTopicFeed(reading);
 		if (!restoreFocus) return true;
 		let anchor = panel.returnAnchor;

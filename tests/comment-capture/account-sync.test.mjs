@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {launchApp, STORIES, waitFor} from './harness.mjs';
+import {frontPageHTML, launchApp, STORIES, waitFor} from './harness.mjs';
 
 const appURL = 'https://backchnnl.app/';
 const storage = 'HNewhere:account_sync';
@@ -8,6 +8,190 @@ const queueStorage = 'HNewhere:queue';
 const key = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const account = 'test-account';
 const session = {account, token: 'test-session', expiresAt: Date.now() + 600000, recoveryKey: key, protocol: 2, revision: 0, base: null};
+
+const noteKey = 'HNewhere:notes:url:framed.example.com/gc';
+const sharedWritePrefix = 'HNewhere:storage_lock:account-storage:';
+
+async function holdNextLibraryRead(page, key) {
+  const read = Promise.withResolvers();
+  const held = Promise.withResolvers();
+  await page.exposeFunction('__holdLibraryRead', value => {
+    read.resolve(value);
+    return held.promise;
+  });
+  await page.evaluate(key => {
+    const original = window.__gmStore;
+    let armed = true;
+    window.__gmStore = async (operation, requested, value) => {
+      const result = await original(operation, requested, value);
+      if (armed && operation === 'get' && requested === key) {
+        armed = false;
+        await window.__holdLibraryRead(result.has ? result.value : null);
+      }
+      return result;
+    };
+  }, key);
+  return { read: read.promise, release: held.resolve };
+}
+
+for (const notes of [false, true]) test(`two Reader tabs keep both ${notes ? 'notes for the same article' : 'queued links'}`, {timeout:25000}, async () => {
+  const stories = STORIES.slice(0, 2).map(story => ({
+    ...story, key: new URL(story.url).host + new URL(story.url).pathname, source: 'hn', descendants: story.comments,
+    permalink: 'https://news.ycombinator.com/item?id=' + story.id,
+  }));
+  const key = notes ? noteKey : queueStorage;
+  const app = await launchApp({
+    sharedStore: true, settings: {notepad: true, updateCheck: false, sourceRefreshMinutes: 0},
+    values: {
+      'HNewhere:collected': [], 'HNewhere:collected_migrated': true, 'HNewhere:collection_filed': true,
+      'HNewhere:frontpage_feed:/hn/front/': {timestamp: Date.now(), status: 'ok', stories},
+      [queueStorage]: notes ? [{...stories[0], addedAt: Date.now()}] : [],
+    },
+  });
+  let held;
+  try {
+    const pages = [app.page, await app.context.newPage()];
+    const texts = ['Note from tab 1', 'Note from tab 2'];
+    const actions = await Promise.all(pages.map(async (page, i) => {
+      page.setDefaultTimeout(7500);
+      await page.emulateMedia({reducedMotion: 'reduce'});
+      await page.goto(appURL);
+      const list = page.locator('#app-list-body');
+      if (!notes) {
+        const row = list.locator('.browse-row').filter({has: page.getByRole('link', {name: stories[i].title, exact: true})});
+        await row.locator('.browse-more').click();
+        return page.locator('#app-row-menu').getByRole('menuitem', {name: 'Queue', exact: true});
+      }
+      await page.locator('#app-rail [data-app-view="queue"]').click();
+      await list.getByRole('link', {name: stories[0].title, exact: true}).click();
+      await page.locator(`#app .comment[data-comment-id="hn:${stories[0].id}01"]`).waitFor();
+      const composer = page.locator('#app-discussion-compose');
+      await composer.locator('.composer-text').fill(texts[i]);
+      return composer.locator('.compose-send-note');
+    }));
+    const saved = () => notes
+      ? (app.store.get(key)?.notes || []).map(note => note.text)
+      : app.store.get(key).map(link => link.url);
+    const expected = notes ? texts : stories.map(story => story.url);
+    held = await holdNextLibraryRead(pages[0], key);
+    await actions[0].click();
+    assert.deepEqual(await held.read, notes ? null : [], 'the first edit read the original storage value');
+    await actions[1].click();
+    assert(await waitFor(() => saved().includes(expected[1]) ||
+      [...app.store.keys()].filter(name => name.startsWith(sharedWritePrefix)).length === 2, 5000),
+      'the second edit reaches storage while the first is pending');
+    held.release();
+    assert(await waitFor(() => saved().includes(expected[0]), 5000));
+    assert(await waitFor(() => ![...app.store.keys()].some(name => name.startsWith(sharedWritePrefix)), 5000));
+    assert.deepEqual(saved().sort(), expected.slice().sort(), 'both independent edits survive');
+    if (notes) assert.equal(app.store.get('HNewhere:notes_index').find(entry => entry.key === noteKey).count, 2);
+    assert.deepEqual(app.errors, []);
+  } finally {
+    held?.release();
+    await app.browser.close();
+  }
+});
+
+test('a Queue click writes once even when its storage lease expires after the write', {timeout:15000}, async () => {
+  const url = 'https://news.ycombinator.com/news';
+  const app = await launchApp({sharedStore: true, topHosts: ['news.ycombinator.com'], values: {[queueStorage]: []},
+    settings: {sourceRefreshMinutes: 0, updateCheck: false}});
+  try {
+    await app.context.route(url, route => route.fulfill({contentType: 'text/html', body: frontPageHTML([STORIES[0]])}));
+    await app.page.goto(url);
+    const link = app.page.locator('.hnewhere-queue-link');
+    await link.waitFor();
+    await app.page.evaluate(({queueStorage, sharedWritePrefix}) => {
+      const set = GM.setValue;
+      window.__fixtureQueueWrites = 0;
+      GM.setValue = async (key, value) => {
+        await set(key, value);
+        if (key !== queueStorage || ++window.__fixtureQueueWrites !== 1) return;
+        const lock = (await GM.listValues()).find(name => name.startsWith(sharedWritePrefix));
+        if (lock) await set(lock, {...(await GM.getValue(lock)), expires: 0});
+      };
+    }, {queueStorage, sharedWritePrefix});
+    await link.click();
+    assert(await waitFor(async () => await link.textContent() === 'queued' &&
+      ![...app.store.keys()].some(name => name.startsWith(sharedWritePrefix)), 5500));
+    assert.equal(await app.page.evaluate(() => window.__fixtureQueueWrites), 1);
+    assert.deepEqual(app.store.get(queueStorage).map(entry => entry.url), [STORIES[0].url]);
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
+});
+
+for (const latest of ['light', 'auto']) test(`Account sync keeps a newer ${latest} selection during an upload`, {timeout:25000}, async () => {
+  const remote = {revision: 0, ciphertext: null, email: 'fixture@example.com'};
+  const app = await launchApp({
+    sharedStore: true, values: {[storage]: session}, settings: {sourceRefreshMinutes: 0, updateCheck: false},
+  });
+  const upload = Promise.withResolvers();
+  try {
+    await mockAccount(app, remote).start;
+    await app.page.emulateMedia({reducedMotion: 'reduce'});
+    const pane = await settings(app);
+    const sync = pane.getByRole('button', {name: 'Sync now', exact: true});
+    assert(await waitFor(() => sync.isEnabled(), 6000));
+    const pending = 'HNewhere:account_pending_edit';
+    const theme = () => app.store.get('HNewhere:settings').theme;
+    const choose = value => app.page.locator(`#settings-panel label:has(input[data-setting="theme"][value="${value}"])`).click();
+    await app.page.getByRole('button', {name: 'Appearance', exact: true}).click();
+    await choose('light');
+    assert(await waitFor(() => app.store.get(storage)?.base?.settings.theme === 'light' && !app.store.get(pending), 6000));
+    const remoteLink = {id: 'queued-on-another-device', key: 'example.org/queued', url: 'https://example.org/queued',
+      title: 'Link queued on the other device', addedAt: Date.now(), readAt: null};
+    if (latest === 'auto') {
+      const other = await launchApp({
+        sharedStore: true, settings: app.store.get('HNewhere:settings'),
+        values: {[storage]: app.store.get(storage), [queueStorage]: [remoteLink], [pending]: account},
+      });
+      try {
+        await mockAccount(other, remote).start;
+        await other.page.goto(appURL);
+        assert(await waitFor(() => other.store.get(storage)?.base?.collection.queue?.some(link => link.key === remoteLink.key), 6000));
+        assert(!app.store.get(queueStorage)?.some(link => link.key === remoteLink.key));
+      } finally { await other.browser.close(); }
+    }
+    const revision = remote.revision;
+
+    let started = false;
+    remote.beforePut = () => { started = true; return upload.promise; };
+    await choose('dark');
+    assert(await waitFor(() => started, 6000), 'the first edit reaches the account service');
+    await choose(latest);
+    assert(await waitFor(() => theme() === latest, 5000), 'the second choice was saved locally');
+    if (latest === 'auto') {
+      await app.page.evaluate(({storage, revision}) => {
+        const set = GM.setValue;
+        GM.setValue = async (key, value) => {
+          if (!window.__fixtureCheckpointFailed && key === storage && value.revision === revision) {
+            window.__fixtureCheckpointFailed = true;
+            throw new Error('Fixture checkpoint temporarily unavailable');
+          }
+          await set(key, value);
+        };
+      }, {storage, revision: revision + 1});
+    }
+    upload.resolve();
+    await app.page.getByRole('button', {name: 'Account', exact: true}).click();
+    const conflict = pane.locator('#account-conflict');
+    assert(await waitFor(async () => await conflict.isVisible() ||
+      (remote.revision > revision && !app.store.get(pending)), 6000));
+    assert.equal(await conflict.isVisible(), false, 'a later change on this device is not a sync conflict');
+    assert.equal(remote.revision, revision + 2, 'the later choice replaces the first upload');
+    assert.equal(app.store.get(storage).base.settings.theme ?? 'auto', latest);
+    assert.equal(theme() ?? 'auto', latest);
+    if (latest === 'auto') {
+      assert(await app.page.evaluate(() => window.__fixtureCheckpointFailed));
+      assert(app.store.get(storage).base.collection.queue.some(link => link.key === remoteLink.key));
+      assert(app.store.get(queueStorage).some(link => link.key === remoteLink.key), 'the retry preserves the other device’s queued link');
+    }
+    assert.deepEqual(app.errors, []);
+  } finally {
+    upload.resolve();
+    await app.browser.close();
+  }
+});
 
 test('an offline bookmark import and its undo sync across devices', {timeout: 25000}, async () => {
   const remote = {revision:0, ciphertext:null, capabilities:{emailAvailable:true}, email:'birb@example.com'};

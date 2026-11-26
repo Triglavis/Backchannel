@@ -7,12 +7,9 @@ for (const mode of ['Reader', 'Sidebar']) test(`${mode} does not start a delayed
   const original = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
   const sidebar = mode === 'Sidebar';
   const pause = 'if (!window.__autoRefreshPaused) { window.__autoRefreshPaused = true; await new Promise((resolve) => { window.__resumeAutoRefresh = resolve; }); }';
-  const seam = sidebar ?
-    'const [accepted, cooldown] = await Promise.all([load(REDDIT_READ_NOTICE_KEY, false), load(REDDIT_POLL_KEY, null)]);' :
-    'Boolean(await load(REDDIT_READ_NOTICE_KEY, false))';
+  const seam = 'if (previousSync !== syncRunId) return startup;';
   assert(original.includes(seam));
-  const source = original.replace(seam, sidebar ? `${pause}\n\t\t\t${seam}` :
-    `await (async () => { ${pause} return ${seam}; })()`);
+  const source = original.replace(seam, `${pause}\n\t\t\t${seam}`);
   const url = STORIES[0].url;
   const app = await launchApp({ source, ...(sidebar ? { appHost: new URL(url).hostname } : {}), sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com'], settings: { sources: { hn: true, reddit: true }, autoOpenSidebar: sidebar, frontPageMode: 'sources', updateCheck: false }, values: { 'HNewhere:reddit_read_window_notice': 2 } });
   const opened = [];
@@ -68,12 +65,9 @@ for (const { firstMode, outcome, topics } of [
   ...['Sidebar', 'Reader'].flatMap((firstMode) => ['success', 'failed'].map((outcome) => ({ firstMode, outcome, topics: false }))),
   { firstMode: 'Reader', outcome: 'success', topics: true },
 ]) test(`concurrent ${firstMode} and Sidebar browsing views ${outcome === 'success' ? 'share a successful' : 'preserve retry delays after a failed'} Reddit ${topics ? 'topic ' : ''}feed refresh`, { timeout: 45000 }, async () => {
-  const original = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
-  const source = original.replace('let redditReadInitialAttempted = false;', 'let redditReadInitialAttempted = true;');
-  assert.notEqual(source, original);
   const url = STORIES[0].url;
   const reader = firstMode === 'Reader';
-  const app = await launchApp({ source, sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com', new URL(url).hostname], settings: { sources: { hn: true, reddit: true }, autoOpenSidebar: true, frontPageMode: topics ? 'topics' : 'sources', frontPageTopics: topics ? ['technology'] : [], updateCheck: false }, values: { 'HNewhere:reddit_read_window_notice': 2 } });
+  const app = await launchApp({ sharedStore: true, handler: 'Userscripts', tabs: true, topHosts: ['www.reddit.com', new URL(url).hostname], settings: { sources: { hn: true, reddit: true }, autoOpenSidebar: true, frontPageMode: topics ? 'topics' : 'sources', frontPageTopics: topics ? ['technology'] : [], sourceRefreshMinutes: 0, updateCheck: false }, values: { 'HNewhere:reddit_read_window_notice': 2 } });
   let feedRequests = 0;
   let feedTitle = 'A freshly synced feed item';
   await app.context.route('https://www.reddit.com/**', async (route) => {
@@ -91,7 +85,7 @@ for (const { firstMode, outcome, topics } of [
   app.context.on('page', (page) => { if (page !== app.page && page !== other) opened.push(page); });
   try {
     await Promise.all([app.page.goto(reader ? 'https://backchnnl.app/' : url), other.goto(url)]);
-    assert(await waitFor(async () => await app.page.locator(reader ? '#app-list-body .browse-title-link' : '#comments-content .comment[data-comment-id]').count() > 0 && await other.locator('#comments-content .comment[data-comment-id]').count() > 0, 15000));
+    assert(await waitFor(async () => await app.page.locator(reader ? '#app-list-sync' : '#comments-content .comment[data-comment-id]').count() > 0 && await other.locator('#comments-content .comment[data-comment-id]').count() > 0, 15000));
     await Promise.all([...(reader ? [] : [app.page.locator('#browse-toggle .wordmark-root').click()]), other.locator('#browse-toggle .wordmark-root').click()]);
     assert(await waitFor(async () => (reader || await app.page.locator('#panel.browsing').count() === 1) && await other.locator('#panel.browsing').count() === 1, 10000));
     const firstButton = app.page.locator(reader ? '#app-list-sync' : '#browse-home-sync');
@@ -462,9 +456,7 @@ test('Reader Sync still requests a working Reddit feed after an individual discu
 });
 
 test('a failed unrelated feed does not prevent views sharing a successful Reddit refresh',{timeout:45000},async()=>{
-  const original=await readFile(new URL('../../HNewhere.user.js',import.meta.url),'utf8');
-  const source=original.replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;');
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com',new URL(STORIES[0].url).hostname],settings:{sources:{hn:true,reddit:true,lemmy:true},autoOpenSidebar:true,frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2},responses:[{match:url=>url.includes('lemmy.world/api/'),status:503,json:{error:'unavailable'}}]});
+  const app=await launchApp({sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com',new URL(STORIES[0].url).hostname],settings:{sources:{hn:true,reddit:true,lemmy:true},autoOpenSidebar:true,frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2},responses:[{match:url=>url.includes('lemmy.world/api/'),status:503,json:{error:'unavailable'}}]});
   const history=[];const set=app.store.set.bind(app.store);app.store.set=(key,value)=>{if(key==='HNewhere:reddit_shared_refresh')history.push(structuredClone(value));return set(key,value)};
   let feeds=0;const opened=[];const other=await app.context.newPage();
   app.context.on('page',page=>{if(page!==app.page&&page!==other)opened.push(page)});
@@ -476,7 +468,7 @@ test('a failed unrelated feed does not prevent views sharing a successful Reddit
   });
   try{
     await Promise.all([app.page.goto('https://backchnnl.app/'),other.goto(STORIES[0].url)]);
-    await app.page.locator('#app-list-body .browse-title-link').first().waitFor();await other.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor();
+    await app.page.locator('#app-list-sync').waitFor();await other.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor();
     await other.locator('#browse-toggle .wordmark-root').click();
     const one=app.page.locator('#app-list-sync'),two=other.locator('#browse-home-sync');
     assert(await waitFor(async()=>await other.locator('#panel.browsing').count()===1&&await one.getAttribute('aria-busy')!=='true'&&await two.getAttribute('aria-busy')!=='true',15000),'both initial views settle before the concurrent manual refresh');

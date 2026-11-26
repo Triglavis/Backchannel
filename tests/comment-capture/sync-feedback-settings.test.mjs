@@ -41,6 +41,84 @@ async function syncResult(app, selector = '#toast'){
   return status.textContent();
 }
 
+for (const tabs of [false, true]) test(`automatic Reader Sync skips Reddit ${tabs ? 'until approval' : 'without manager tabs'}`, {timeout:20000}, async () => {
+  const now = Date.now();
+  const stale = now - 61 * 60_000;
+  const savedReddit = {timestamp: stale, lastAttemptAt: stale, status: 'ok', stories: [
+    {...STORIES[5], source: 'reddit', url: 'https://framed.example.com/post/91', title: 'Saved Reddit article'},
+  ]};
+  const app = await launchApp({
+    sharedStore: true, handler: 'Userscripts', tabs, topHosts: ['www.reddit.com'],
+    settings: {sources: {hn: true, reddit: true}, sourceRefreshMinutes: 60, updateCheck: false},
+    values: {
+      ...(!tabs && notices),
+      [hnKey]: {timestamp: stale, status: 'ok', stories: [{...STORIES[0], source: 'hn'}]},
+      [redditKey]: savedReddit,
+    },
+  });
+  const {page, context, store} = app;
+  const redditPaths = [];
+  await context.route('https://www.reddit.com/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    redditPaths.push(path);
+    if (path === '/') return route.fulfill({contentType: 'text/html', body: '<title>Reddit fixture</title>'});
+    return route.fulfill({json: path === '/api/me.json' ? {data: {name: 'fixture'}} : {data: {children: []}}});
+  });
+  try {
+    await page.clock.install({time: now});
+    await page.goto('https://backchnnl.app/');
+    const notice = page.locator('#reddit-read-modal');
+    if (tabs) await notice.waitFor();
+    await page.locator('#app-list-body').getByRole('link', {name: 'Saved Reddit article', exact: true}).waitFor({timeout:5000});
+    assert(await waitFor(() => store.get(hnKey)?.lastSuccessAt > stale, 5000), 'Hacker News still refreshes');
+    assert.equal(await syncResult(app), 'Synced', 'unavailable Reddit transport does not make automatic Sync partial');
+    await page.clock.fastForward(31_000);
+    assert.deepEqual(store.get(redditKey), savedReddit);
+    assert.deepEqual(redditPaths, []);
+
+    if (tabs) await notice.getByRole('dialog').press('Escape');
+    else await page.locator('#app-list-sync').click();
+    assert(await waitFor(() => store.get(redditKey)?.lastSuccessAt > stale, 7000),
+      tabs ? 'approval re-arms automatic Reddit refresh' : 'explicit Sync can open the Reddit popup');
+    assert.deepEqual(redditPaths, ['/', '/api/me.json', '/r/popular.json']);
+    assert.equal(await syncResult(app), 'Synced');
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
+});
+
+test('automatic Reddit helpers that time out before a listing honor the Sync schedule', {timeout:22000}, async () => {
+  const source = (await readFile(process.env.BC_SCRIPT || new URL('../../HNewhere.user.js', import.meta.url), 'utf8'))
+    .replace('const REDDIT_READ_CONNECT_TIMEOUT_MS = 10000;', 'const REDDIT_READ_CONNECT_TIMEOUT_MS = 500;');
+  const now = Date.now();
+  const stale = now - 6 * 60_000;
+  const app = await launchApp({
+    source, sharedStore: true, handler: 'Userscripts', tabs: true,
+    settings: {sources: {reddit: true}, sourceRefreshMinutes: 5, updateCheck: false},
+    values: {...notices, [redditKey]: {timestamp: stale, lastAttemptAt: stale, lastSuccessAt: stale, status: 'ok',
+      stories: [{...STORIES[5], source: 'reddit', title: 'Saved Reddit article'}]}},
+  });
+  const {page, context, store} = app;
+  const helpers = [];
+  context.on('page', helper => helpers.push(helper));
+  await context.route('https://www.reddit.com/**', route =>
+    route.fulfill({contentType: 'text/html', body: '<title>Reddit without a ready helper</title>'}));
+  try {
+    await page.clock.install({time: now});
+    await page.goto('https://backchnnl.app/');
+    assert(await waitFor(() => helpers.length === 1 && helpers[0].url().includes('backchannel_read'), 7000));
+    assert.equal(await syncResult(app), 'Partial sync');
+    assert.equal(store.get(redditKey).lastAttemptAt, stale, 'no listing request reached the provider');
+    assert.equal(store.get(redditKey).lastSuccessAt, stale);
+    assert.equal(await page.locator('#app-list-body').getByRole('link', {name: 'Saved Reddit article', exact: true}).count(), 1);
+
+    await page.clock.fastForward(31_000);
+    assert.equal(await waitFor(() => helpers.length > 1, 2000), false, 'a local failure does not retry after the generic feed retry delay');
+    await page.clock.fastForward(5 * 60_000);
+    assert(await waitFor(() => helpers.length === 2, 7000), 'another helper can launch once the schedule is due');
+    assert.deepEqual(app.errors, []);
+  } finally { await app.browser.close(); }
+});
+
 for(const fail of [false,true]) test(`automatic phone Sync reports ${fail?'a fresh failure':'success'} despite an old feed failure`,{timeout:12000},async()=>{
   const now=Date.now();
   const stale=now-6*60_000;

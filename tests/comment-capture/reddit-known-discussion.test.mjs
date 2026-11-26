@@ -4,14 +4,12 @@ import {readFile} from 'node:fs/promises';
 import {launchApp, STORIES, waitFor} from './harness.mjs';
 
 for (const commentsAvailable of [true,false]) test(`a known large Reddit discussion is ${commentsAvailable?'loaded':'reported unavailable'} when its metadata lookup fails`, {timeout:45000}, async()=>{
-  let source=await readFile(new URL('../../HNewhere.user.js',import.meta.url),'utf8');
-  source=source.replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;');
   const url=STORIES[0].url,id='large123',now=Math.floor(Date.now()/1000);
   const post={id,url,title:STORIES[0].title,author:'reader',subreddit:'news',subreddit_name_prefixed:'r/news',permalink:`/r/news/comments/${id}/article/`,num_comments:4028,created_utc:now-3600,score:100};
   const redditStory={source:'reddit',id,url,title:post.title,by:post.author,score:post.score,time:post.created_utc,descendants:post.num_comments,site:'r/news',permalink:'https://www.reddit.com'+post.permalink};
   const hnStory={source:'hn',id:String(STORIES[0].id),url,title:STORIES[0].title,by:STORIES[0].by,score:STORIES[0].points,time:STORIES[0].time,descendants:STORIES[0].comments};
   const cache={timestamp:Date.now(),rows:[{story:redditStory,also:[hnStory]}],sources:['hn','reddit'],topics:[]};
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2,'HNewhere:frontpage_cache:hn,reddit':cache}});
+  const app=await launchApp({sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2,'HNewhere:frontpage_cache:hn,reddit':cache}});
   const paths=[];
   await app.context.route('https://www.reddit.com/**',async route=>{
     const request=new URL(route.request().url()),path=request.pathname;paths.push(path+request.search);
@@ -75,13 +73,11 @@ test('a successful empty Reddit metadata response does not restore an old feed p
 });
 
 test('Reader does not restore a stale feed post after an authoritative empty Reddit lookup', {timeout:30000}, async()=>{
-  let source=await readFile(new URL('../../HNewhere.user.js',import.meta.url),'utf8');
-  source=source.replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;');
   const url=STORIES[0].url,id='large123';
   const redditStory={source:'reddit',id,url,title:STORIES[0].title,by:'reader',score:100,time:Math.floor(Date.now()/1000)-3600,descendants:4028,site:'r/news',permalink:`https://www.reddit.com/r/news/comments/${id}/article/`};
   const hnStory={source:'hn',id:String(STORIES[0].id),url,title:STORIES[0].title,by:STORIES[0].by,score:STORIES[0].points,time:STORIES[0].time,descendants:STORIES[0].comments};
   const cache={timestamp:Date.now(),rows:[{story:redditStory,also:[hnStory]}],sources:['hn','reddit'],topics:[]};
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2,'HNewhere:frontpage_cache:hn,reddit':cache}});
+  const app=await launchApp({sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2,'HNewhere:frontpage_cache:hn,reddit':cache}});
   let lookups=0,threads=0;
   await app.context.route('https://www.reddit.com/**',route=>{
     const request=new URL(route.request().url()),path=request.pathname;

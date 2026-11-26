@@ -3,15 +3,22 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {launchApp,waitFor,STORIES} from './harness.mjs';
 
+const manualFeeds = {
+  settings: {sources: {hn: true, reddit: true}, frontPageMode: 'sources', sourceRefreshMinutes: 0, updateCheck: false},
+  values: {
+    'HNewhere:reddit_read_window_notice': 2,
+    'HNewhere:frontpage_feed:/hn/front/': {timestamp: Date.now(), status: 'ok', stories: [{...STORIES[0], source: 'hn'}]},
+  },
+};
+
 for(const timing of ['during','after','shared']) test(`a completed Reddit feed refresh supersedes an older failure ${timing==='shared'?'after reusing another view’s success':'reported '+timing+' the new Sync'}`,{timeout:20000},async()=>{
   const original=await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8');
-  const source=original.replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;')
-    .replace('const TOAST_BRIEF_MS = 1800;','const TOAST_BRIEF_MS = 150;')
+  const source=original.replace('const TOAST_BRIEF_MS = 1800;','const TOAST_BRIEF_MS = 150;')
     .replace('async function readBridgePayload(nonce) {',`async function readBridgePayload(nonce) {
       if(nonce==='fixture-old'&&!window.__oldFailureWaiting){window.__oldFailureWaiting=true;await new Promise(resolve=>window.__releaseOldFailure=resolve)}
     `)
     .replace('init().catch(console.error);',`window.__finishOldRedditFailure=()=>finishRedditReadBatch({nonce:'fixture-old',sequence:0,unresponsive:true,feedOnly:true,actionId:redditReadActionId,created:Date.now(),startedSyncRun:syncRunId}).then(()=>{window.__oldFailureFinished=true});init().catch(console.error);`);
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2}});
+  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],...manualFeeds});
   const opened=[];app.context.on('page',page=>opened.push(page));
   let releaseFeed;
   let requestedFeed=false;
@@ -62,9 +69,8 @@ for(const timing of ['during','after','shared']) test(`a completed Reddit feed r
 
 for(const unrelatedToast of [false,true]) test(`a successful Reddit discussion check ${unrelatedToast?'preserves unrelated feedback':'clears its older transport failure'} without a full Sync`,{timeout:20000},async()=>{
   const source=(await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8'))
-    .replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;')
     .replace('init().catch(console.error);',`window.__oldRedditFailure=()=>finishRedditReadBatch({nonce:'fixture-old',sequence:0,unresponsive:true,actionId:redditReadActionId,created:Date.now(),startedSyncRun:syncRunId});window.__unrelatedFeedback=()=>showToast('A different user action completed.',{persist:true});init().catch(console.error);`);
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2}});
+  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],...manualFeeds});
   const post={id:'fresh123',url:STORIES[0].url,title:STORIES[0].title,author:'fixture',subreddit:'news',permalink:'/r/news/comments/fresh123/article/',num_comments:1,created_utc:Math.floor(Date.now()/1000)-60,score:17};
   const opened=[];app.context.on('page',page=>opened.push(page));
   let releaseQueries;
@@ -113,9 +119,8 @@ for(const sourceName of ['Reddit','article','X']) test(`an old transport failure
 
 test('a genuine timeout after a successful Reddit refresh briefly reports Partial sync',{timeout:20000},async()=>{
   const source=(await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8'))
-    .replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;')
     .replace('const REDDIT_READ_CONNECT_TIMEOUT_MS = 10000;','const REDDIT_READ_CONNECT_TIMEOUT_MS = 2500;');
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2}});
+  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],...manualFeeds});
   let unavailable=false;
   let releaseIdentity;
   const identityGate=new Promise(resolve=>{releaseIdentity=resolve});
@@ -167,9 +172,8 @@ for(const newerStatus of ['transport','article-cleanup','X-cleanup']) test(`an o
 test('a successful archive recovery resolves an older Reddit transport error',{timeout:15000},async()=>{
   const post={id:'fresh123',url:STORIES[0].url,title:'Fresh archive metadata',author:'fixture',subreddit:'news',permalink:'/r/news/comments/fresh123/article/',num_comments:17,created_utc:Math.floor(Date.now()/1000)-60,score:17};
   const source=(await readFile(process.env.BC_SCRIPT||new URL('../../HNewhere.user.js',import.meta.url),'utf8'))
-    .replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;')
     .replace('init().catch(console.error);',`window.__oldReadError=()=>finishRedditReadBatch({nonce:'fixture-old',actionId:redditReadActionId,created:Date.now(),sequence:0,unresponsive:true,startedSyncRun:syncRunId});window.__recoverArchivedRead=()=>runRedditReadAction(async()=>{window.__recoveredRows=await recoverAppRowThreads([{source:'reddit',id:'fresh123',url:${JSON.stringify(STORIES[0].url)}}],[])});init().catch(console.error);`);
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2},responses:[{match:url=>url.includes('/api/posts/ids?ids=fresh123'),json:{data:[post]}}]});
+  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],...manualFeeds,responses:[{match:url=>url.includes('/api/posts/ids?ids=fresh123'),json:{data:[post]}}]});
   await app.context.route('https://www.reddit.com/**',route=>{
     const path=new URL(route.request().url()).pathname;
     const info=path==='/api/info.json';

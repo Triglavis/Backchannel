@@ -106,12 +106,14 @@ test('a slow Reddit response followed by a successful archive recovery is retain
 test('a suspended Reddit helper does not hold up an available Hacker News discussion', {timeout:30000}, async()=>{
   let source=await readFile(new URL('../../HNewhere.user.js',import.meta.url),'utf8');
   source=source.replace('const REDDIT_READ_CONNECT_TIMEOUT_MS = 10000;','const REDDIT_READ_CONNECT_TIMEOUT_MS = 500;');
-  source=source.replace('let redditReadInitialAttempted = false;','let redditReadInitialAttempted = true;');
   const seam='const identity = await fetchJSON("/api/me.json");';
   assert(source.includes(seam));
   source=source.replace(seam,'if (globalThis.__pauseRedditIdentity) await new Promise(resolve => { globalThis.__resumeRedditIdentity = resolve; }); '+seam);
   source=source.replace('init().catch(console.error);',`if (location.hostname === 'www.reddit.com') globalThis.__pauseRedditIdentity = true; init().catch(console.error);`);
-  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:{'HNewhere:reddit_read_window_notice':2},responses:[{match:url=>url.includes('/api/posts/search'),json:{data:[]}}]});
+  const app=await launchApp({source,sharedStore:true,handler:'Userscripts',tabs:true,topHosts:['www.reddit.com'],settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',sourceRefreshMinutes:0,updateCheck:false},values:{
+    'HNewhere:reddit_read_window_notice':2,
+    'HNewhere:frontpage_feed:/hn/front/':{timestamp:Date.now(),status:'ok',stories:[{...STORIES[0],source:'hn'}]},
+  },responses:[{match:url=>url.includes('/api/posts/search'),json:{data:[]}}]});
   const opened=[];app.context.on('page',page=>opened.push(page));
   await app.context.route('https://www.reddit.com/**',route=>route.fulfill({status:200,contentType:route.request().url().includes('/api/')?'application/json':'text/html',body:route.request().url().includes('/api/me.json')?'{"data":{"name":"fixture"}}':route.request().url().includes('/api/')?'{"data":{"children":[]}}':'<title>Reddit fixture</title>'}));
   try {
@@ -121,7 +123,7 @@ test('a suspended Reddit helper does not hold up an available Hacker News discus
     const helper=opened[0];
     await helper.waitForFunction(()=>typeof window.__resumeRedditIdentity==='function',null,{timeout:5000});
     assert(await waitFor(async()=>await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').count()>0,5000),'Hacker News comments render while the Reddit helper is paused');
-    assert.equal(await app.page.locator('#toast').textContent(),'Partial sync','the stalled helper has the standard incomplete result');
+    assert(await waitFor(async()=>await app.page.locator('#toast').textContent()==='Partial sync',5000),'the stalled helper has the standard incomplete result');
     assert(await waitFor(()=>helper.isClosed(),5000),'the timed-out helper closes without foreground resumption');
   } finally {await app.browser.close()}
 });

@@ -7,15 +7,24 @@ const url = STORIES[0].url;
 const now = Math.floor(Date.now() / 1000);
 const comment = (id, parent, body, replies = "") => ({ kind: "t1", data: { id, parent_id: parent, link_id: "t3_fixture0", author: "reader", body, score: 1, created_utc: now, replies } });
 
-async function openArchive(initial, expanded, { handler = "Userscripts", expandedDelay = 0 } = {}) {
+async function openArchive(initial, expanded, { handler = "Userscripts", expandedDelay = 0, reader = false, commentSort = "best" } = {}) {
   const fixture = discussionFixture(url);
+  const expansion = Array.isArray(expanded) ? { json: { data: expanded } } : expanded;
+  expansion.match = (path) => path.includes("/api/comments/tree") && new URL(path).searchParams.get("limit") === "25000";
+  expansion.delay = expandedDelay;
   const responses = [
     { match: (path) => path.includes("/api/posts/search"), json: { data: [fixture.posts[0]] } },
-    { match: (path) => path.includes("/api/comments/tree") && new URL(path).searchParams.get("limit") === "25000", delay: expandedDelay, json: { data: expanded } },
+    expansion,
     { match: (path) => path.includes("/api/comments/tree"), json: { data: initial } },
   ];
-  const app = await launchApp({ appHost: new URL(url).hostname, sharedStore: true, handler, settings: { sources: { hn: false, reddit: true }, autoOpenSidebar: true, updateCheck: false }, values: { "HNewhere:reddit_read_window_notice": 2, "HNewhere:reddit_tier": { tier: "archive", timestamp: Date.now() } }, responses });
-  await app.page.goto(url);
+  const app = await launchApp({
+    ...(reader ? {} : { appHost: new URL(url).hostname }), sharedStore: true, handler,
+    settings: { sources: { hn: reader, reddit: true }, autoOpenSidebar: !reader, updateCheck: false, commentSort },
+    values: { "HNewhere:reddit_read_window_notice": 2, "HNewhere:reddit_tier": { tier: "archive", timestamp: Date.now() } },
+    responses,
+  });
+  await app.page.goto(reader ? "https://backchnnl.app/" : url);
+  if (reader) await app.page.locator("#app-list-body .browse-title-link", { hasText: STORIES[0].title }).first().click();
   return app;
 }
 
@@ -188,3 +197,106 @@ test("unexpandable missing replies keep the available comments without a load di
     await app.browser.close();
   }
 });
+
+const rootMore = (ids) => ({ kind: "more", data: { children: ids, count: ids.length } });
+const archiveButton = (page) => page.locator('#comments-content .top-level-comments > .more-replies[data-discussion-key="reddit:fixture0"]');
+const redditRoots = (page) => page.locator('#comments-content .top-level-comments .comment[data-comment-id^="reddit:"]');
+
+test("partial archive expansions show available replies and retry only the missing ones", { timeout: 25000 }, async t => {
+  const root = comment("root", "t3_fixture0", "First comment");
+  const available = ["availablea", "availableb"].map(id => comment(id, "t3_fixture0", id));
+  const expanded = [root, ...available];
+  const app = await openArchive([root, rootMore(["missing", ...available.map(node => node.data.id)])], expanded,
+    { handler: "Tampermonkey", expandedDelay: 500 });
+  t.after(() => app.browser.close());
+  const { page } = app;
+  const more = archiveButton(page);
+  const roots = redditRoots(page);
+  await more.focus();
+  await page.keyboard.press("Enter");
+  assert(await more.isDisabled());
+  assert(await more.evaluate(node => node.matches(":focus")), "the loading button stays focused");
+  assert(await waitFor(async () => await roots.count() === 3), "a successful subset is visible");
+  assert(await waitFor(async () => await more.textContent() === "1 more reply"), "only the missing reply is counted");
+  assert.deepEqual(app.store.get("HNewhere:thread_cache:reddit:fixture0")?.rootMore?.ids, ["missing"]);
+
+  await page.keyboard.press("Enter");
+  assert(await waitFor(async () => await more.textContent() === "1 more reply — try again"), "an empty retry stays available");
+  assert.equal(await roots.count(), 3);
+  assert(await more.evaluate(node => node.matches(":focus")), "the retry has keyboard focus");
+  expanded.push(comment("missing", "t3_fixture0", "Missing reply now available"));
+  await page.keyboard.press("Enter");
+  await more.waitFor({ state: "detached" });
+  const focus = page.locator('[data-comment-id="reddit:missing"] .focus-link');
+  assert(await focus.evaluate(node => node.matches(":focus")), "focus moves to a nearby reply when the button is exhausted");
+  assert.deepEqual(await roots.evaluateAll(nodes => nodes.map(node => node.dataset.commentId)),
+    ["reddit:root", "reddit:availablea", "reddit:availableb", "reddit:missing"]);
+  assert.deepEqual(app.errors, []);
+});
+
+test("archive expansion moves past a batch of missing IDs to reach later replies", { timeout: 25000 }, async t => {
+  const root = comment("root", "t3_fixture0", "First comment");
+  const ids = Array.from({ length: 100 }, (_, index) => `missing${index}`);
+  const expanded = { status: 500, json: { data: [] } };
+  const app = await openArchive([root, rootMore([...ids, "later"])], expanded, { handler: "Tampermonkey" });
+  t.after(() => app.browser.close());
+  const { page } = app;
+  const more = archiveButton(page);
+
+  await more.click();
+  assert(await waitFor(async () => await more.textContent() === "101 more replies — try again"), "a failed archive response keeps the count and retry");
+  assert.equal(app.store.get("HNewhere:thread_cache:reddit:fixture0")?.rootMore?.ids?.[0], ids[0]);
+  expanded.status = 200;
+  await more.click();
+  assert(await waitFor(async () => await more.textContent() === "101 more replies — try again"), "an empty archive response keeps the count and retry");
+  assert.equal(app.store.get("HNewhere:thread_cache:reddit:fixture0")?.rootMore?.ids?.[0], "later", "only a successful read advances the queue");
+  expanded.json.data.push(root, comment("later", "t3_fixture0", "A reply in the next batch"));
+  await more.click();
+  assert(await waitFor(() => page.locator('[data-comment-id="reddit:later"]').isVisible()), "missing IDs in the first batch do not block the next reply");
+  assert(await waitFor(async () => await more.textContent() === "100 more replies"));
+  assert.equal(await redditRoots(page).count(), 2);
+  assert.deepEqual(app.errors, []);
+});
+
+for (const [surface, commentSort, expected] of [
+  ["Reader", "newest", ["latest", "recent", "middle", "old", "earliest"]],
+  ["Sidebar", "oldest", ["earliest", "old", "middle", "recent", "latest"]],
+  ["Sidebar", "best", ["old", "recent", "earliest", "latest", "middle"]],
+]) {
+  test(`${surface} inserts expanded roots in the active ${commentSort} order`, { timeout: 25000 }, async t => {
+    const timed = (id, age) => {
+      const node = comment(id, "t3_fixture0", id);
+      node.data.created_utc -= age;
+      return node;
+    };
+    const initial = [timed("old", 1000), timed("recent", 100)];
+    if (commentSort === "oldest") initial[1].data.body = "A long comment with enough text to scroll. ".repeat(140);
+    const additional = [timed("earliest", 1500), timed("latest", 50), timed("middle", 500)];
+    const app = await openArchive([...initial, rootMore(additional.map(node => node.data.id))], [...initial, ...additional],
+      { handler: "Tampermonkey", reader: surface === "Reader", commentSort });
+    t.after(() => app.browser.close());
+    const { page } = app;
+    const roots = redditRoots(page);
+    const existing = page.locator('[data-comment-id="reddit:old"]');
+    await existing.waitFor();
+    await existing.evaluate(node => { node.dataset.expansionFixture = "retained"; });
+
+    const more = archiveButton(page);
+    const recentText = page.locator('[data-comment-id="reddit:recent"] .text');
+    let before;
+    if (commentSort === "oldest") {
+      await more.scrollIntoViewIfNeeded();
+      assert(await page.locator("#comments").evaluate(node => node.scrollTop) > 0);
+      before = (await recentText.boundingBox()).y;
+    }
+    await more.click();
+    await more.waitFor({ state: "detached" });
+    if (before !== undefined) assert(Math.abs((await recentText.boundingBox()).y - before) < 2, "the old content holds its position");
+    assert.deepEqual(await roots.evaluateAll(nodes => nodes.map(node => node.dataset.commentId.slice(7))), expected);
+    assert.equal(await existing.getAttribute("data-expansion-fixture"), "retained");
+    const timestamps = await page.locator('#comments-content .top-level-comments .comment[data-created-at]').evaluateAll(nodes => nodes.map(node => Number(node.dataset.createdAt)));
+    if (commentSort === "newest") assert.deepEqual(timestamps, [...timestamps].sort((left, right) => right - left));
+    if (commentSort === "oldest") assert.deepEqual(timestamps, [...timestamps].sort((left, right) => left - right));
+    assert.deepEqual(app.errors, []);
+  });
+}
