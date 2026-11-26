@@ -285,8 +285,12 @@ for (const [surface, commentSort, expected] of [
     const recentText = page.locator('[data-comment-id="reddit:recent"] .text');
     let before;
     if (commentSort === "oldest") {
-      await more.scrollIntoViewIfNeeded();
-      assert(await page.locator("#comments").evaluate(node => node.scrollTop) > 0);
+      const scrollTop = await more.evaluate(button => {
+        const comments = button.closest("#comments");
+        comments.scrollTo({ top: comments.scrollHeight, behavior: "instant" });
+        return comments.scrollTop;
+      });
+      assert(scrollTop > 0, "the Sidebar starts with a scrolled position to preserve");
       before = (await recentText.boundingBox()).y;
     }
     await more.click();
