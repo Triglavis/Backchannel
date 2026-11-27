@@ -13,8 +13,8 @@ const bookmarkHTML = (entries) => `<!DOCTYPE NETSCAPE-Bookmark-file-1>
 const bookmark = (url, title, attributes = "") => `<DT><A HREF="${url}" ${attributes}>${title}</A>`;
 
 async function importApp(options = {}) {
-	const source = await readFile(new URL("../../HNewhere.user.js", import.meta.url), "utf8");
-	const end = source.lastIndexOf("\n\tif (window.top === window.self)");
+	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const end = source.lastIndexOf("\n})();");
 	assert(end >= 0);
 	const hook = `window.__collectionImportTest = {
 		parse: typeof parseBookmarkHTML === "function" && parseBookmarkHTML,

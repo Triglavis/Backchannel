@@ -285,6 +285,14 @@ async function settings(app, url = appURL, {recordPasskeyDetails = false, before
   return app.page.locator('#settings-account-sync');
 }
 
+async function linkedDevicesIn(panel) {
+  const manage = panel.locator('#account-manage-page');
+  const devices = manage.getByRole('region', {name:'Linked devices',exact:true});
+  await devices.waitFor();
+  assert.deepEqual(await manage.getByRole('heading', {level:4}).allTextContents(), ['Privacy', 'Linked devices']);
+  return devices;
+}
+
 test('Reader source diagnostics require a signed-in account with sharing enabled', {timeout:20000}, async () => {
   const app = await launchApp({sharedStore:true, settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false,sourceRefreshMinutes:0}});
   const reports = [];
@@ -512,8 +520,8 @@ test('Account sync uploads a private snapshot and another local profile can appl
     assert.equal(await nav.locator('.app-account-tab-title').textContent(), 'birb@example.com');
     assert.equal(await nav.locator('.app-account-tab-subtitle').textContent(), 'Backchannel\u00a0Account');
     assert.equal(await nav.evaluate(node => getComputedStyle(node).borderTopWidth), '0px');
-    await firstPanel.getByText('Mac · Safari · This device', {exact:true}).waitFor();
-    await firstPanel.getByRole('button', {name:'Sign out iPhone · Safari'}).waitFor();
+    assert.equal(await firstPanel.getByRole('heading', {name:'Linked devices',exact:true}).isVisible(), false,
+      'the Account overview leaves Linked devices in Manage account');
     const deletionStyle = await firstPanel.getByRole('button',{name:'Delete account…',exact:true}).evaluate(button => ({
       color: getComputedStyle(button).color,
       background: getComputedStyle(button).backgroundColor,
@@ -526,8 +534,7 @@ test('Account sync uploads a private snapshot and another local profile can appl
       const box = selector => panel.querySelector(selector).getBoundingClientRect();
       return [
         [box('#account-stage').top - box('#account-email-value').bottom, box('#account-signed-in .account-setting-row').top - box('#account-stage').top - 1],
-        [box('#account-devices-section').top - box('#account-signed-in .account-setting-row').bottom, box('#account-devices-section h3').top - box('#account-devices-section').top - 1],
-        [box('#account-delete-section').top - box('#account-device-list li:last-child').bottom, box('#account-actions').top - box('#account-delete-section').top - 1],
+        [box('#account-delete-section').top - box('#account-signed-in .account-setting-row').bottom, box('#account-actions').top - box('#account-delete-section').top - 1],
       ];
     });
     for (const [above, below] of dividerGaps) assert(Math.abs(above - below) < 1);
@@ -552,6 +559,9 @@ test('Account sync uploads a private snapshot and another local profile can appl
     assert.deepEqual(await profileLayout(), header);
     assert.equal(await firstPanel.getByRole('button',{name:'Sync now',exact:true}).isVisible(),false);
     const manage = firstPanel.locator('#account-manage-page');
+    const devices = await linkedDevicesIn(firstPanel);
+    await devices.getByText('Mac · Safari · This device', {exact:true}).waitFor();
+    await devices.getByRole('button', {name:'Sign out iPhone · Safari'}).waitFor();
     const address = manage.getByLabel('Email address',{exact:true});
     await address.waitFor({timeout:4000});
     assert.equal(await manage.locator('input[type="email"]').count(),1);
@@ -597,7 +607,7 @@ test('Account sync uploads a private snapshot and another local profile can appl
         aligned:Math.abs(button.top-address.top) < .5,
         labelWeight:getComputedStyle(section.querySelector('.settings-field-label')).fontWeight,
         heading:headingStyle(root.getElementById('account-manage-heading')),
-        referenceHeading:headingStyle(root.querySelector('#account-devices-section h3')),
+        referenceHeading:headingStyle(root.getElementById('account-devices-heading')),
         sharingWidth:sharing.width,
         sharingHeight:sharing.height,
         sharingFillsRow:Math.abs(sharingLabel.width - privacy.width) < 1 && Math.abs(sharing.left - privacy.left) < 1,
@@ -618,7 +628,7 @@ test('Account sync uploads a private snapshot and another local profile can appl
     });
     await emailHint.waitFor();
     assert.match(await emailHint.textContent(),/confirm your identity with your passkey/);
-    await updateEmail.click();
+    await updateEmail.click({scroll:'none'});
     const codeField = first.page.getByLabel('Verification code',{exact:true});
     await codeField.waitFor();
     assert(Math.abs((await codeField.boundingBox()).height - sizing.expectedHeight) < 0.5);
@@ -629,12 +639,12 @@ test('Account sync uploads a private snapshot and another local profile can appl
     assert.equal(await address.inputValue(),'draft-birb@example.com');
     await codeField.waitFor({state:'hidden'});
     await address.fill('new-birb@example.com');
-    await updateEmail.click();
+    await updateEmail.click({scroll:'none'});
     await codeField.fill('123456');
     assert(await manage.getByRole('heading',{name:'Manage account'}).isVisible());
     assert.equal(remote.email,'birb@example.com');
     assert.equal(await address.getAttribute('placeholder'),'birb@example.com');
-    await manage.getByRole('button',{name:'Verify email',exact:true}).click();
+    await manage.getByRole('button',{name:'Verify email',exact:true}).click({scroll:'none'});
     await first.page.locator('#toast.is-showing').filter({hasText:'Email updated.'}).waitFor();
     await codeField.waitFor({state:'hidden'});
     assert.equal(await address.getAttribute('placeholder'),'new-birb@example.com');
@@ -1052,7 +1062,7 @@ test('email updates confirm the passkey before sending a code and anchor request
     assert(!mock.requests.includes('/account/email/start'));
     await address.fill('New-Birb+nest@sub.example.com');
     assert.equal(await invalidAddress.isVisible(),false);
-    await update.click();
+    await update.click({scroll:'none'});
     const opened = await waitFor(() => app.page.evaluate(() => window.emailPrompts.length === 1),4000);
     if (!opened) {
       const count = await app.page.evaluate(() => window.emailPrompts.length);
@@ -1096,7 +1106,7 @@ test('email updates confirm the passkey before sending a code and anchor request
     assert.equal(await manage.locator('#account-status-email').textContent(),'');
     assert.match(await update.getAttribute('aria-describedby'),/\baccount-status-send-code\b/);
     remote.emailSendError = null;
-    await update.click();
+    await update.click({scroll:'none'});
     assert(await waitFor(() => app.page.evaluate(() => window.emailPrompts.length === 3)));
     await app.page.evaluate(() => window.emailPrompts[2].resolve({toJSON: () => ({id:'fixture-passkey'})}));
     await manage.getByRole('button',{name:'Sending verification code…',exact:true}).waitFor();
@@ -1117,11 +1127,11 @@ test('email updates confirm the passkey before sending a code and anchor request
     assert.equal(await toast.isVisible(),false);
     const verify = manage.getByRole('button',{name:'Verify email',exact:true});
     await code.fill('000000');
-    await verify.click();
+    await verify.click({scroll:'none'});
     await manage.locator('#account-status-code [data-error]').waitFor();
     assert.deepEqual(await app.page.evaluate(() => window.passkeyDetails), [passkeyDetails('birb@example.com')]);
     await code.fill('123456');
-    await verify.click();
+    await verify.click({scroll:'none'});
     const confirmation = app.page.locator('#toast').filter({hasText:'Email updated.'});
     await confirmation.and(app.page.locator('.is-showing')).waitFor();
     assert.equal(await confirmation.getAttribute('data-kind'),'system');
@@ -1194,7 +1204,9 @@ test('a browser without Ed25519 keeps legacy passkey sign-in available', {timeou
         if (algorithm === 'Ed25519') throw new DOMException('Unavailable in fixture', 'NotSupportedError');
         return importKey(format, data, algorithm, ...options);
       }});
-      Object.defineProperty(navigator.credentials, 'get', { value: async () => ({
+      const credentials = navigator.credentials;
+      Object.defineProperty(navigator, 'credentials', {value: credentials, configurable: true});
+      Object.defineProperty(credentials, 'get', { value: async () => ({
         toJSON: () => ({id:credentialId,clientExtensionResults:{}}),
         getClientExtensionResults: () => ({prf:{results:{first:new Uint8Array(seed)}}}),
       }) });
@@ -1355,54 +1367,117 @@ test('a passkey timeout cannot appear on sign-in after the account session is re
   } finally { await app.browser.close(); }
 });
 
-test('Sidebar Account opens account controls on Backchannel’s origin without opening Reader', {timeout:15000}, async () => {
+test('Phone Sidebar Account uses the private Account settings in place', {timeout:15000}, async () => {
   const article = STORIES[0].url;
+  const shell = appURL + 'sidebar-settings';
   const lastSync = Date.now() - 60_000;
   const app = await launchApp({
-    topHosts:[new URL(article).hostname], sharedStore:true, settings:{autoOpenSidebar:true,updateCheck:false},
+    topHosts:[new URL(article).hostname], sharedStore:true, hasTouch:true, isMobile:true,
+    viewport:{width:393,height:852}, contentPages:[shell],
+    settings:{autoOpenSidebar:true,keepSidebarSize:true,updateCheck:false},
+    pages:{[article]:{html:'<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Account fixture</title></head><body><article>Account layout fixture</article></body></html>'}},
     values:{[storage]:{...session,lastSync},['HNewhere:account_avatar:' + account]:{shape:'wide',color:'blue',background:'sky'}},
   });
   try {
-    const api = mockAccount(app, {email:'birb@example.com',capabilities:{emailAvailable:true}});
+    await mockPasskeySupport(app);
+    await app.context.route(shell, (route) => route.fulfill({
+      contentType:'text/html',headers:{'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'"},
+      body:'<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
+    }));
+    await app.context.addInitScript(({ url, publisher }) => {
+      if (location.href === publisher) Object.defineProperty(window, "outerWidth", { get: () => 393 });
+      if (location.origin + location.pathname !== url) return;
+      window.avatarImagesBlocked = 0;
+      document.addEventListener("securitypolicyviolation", (event) => {
+        if (event.effectiveDirective === "img-src") window.avatarImagesBlocked++;
+      });
+    }, { url: shell, publisher: article });
+    const remote = {revision:0,ciphertext:null,email:'birb@example.com',capabilities:{emailAvailable:true}};
+    const api = mockAccount(app, remote);
     await api.start;
-    const panel = await settings(app, article);
-    const manage = panel.getByRole('link', {name:'Manage account',exact:true});
-    await manage.waitFor({timeout:2500});
-    assert.equal(await manage.getAttribute('href'), appURL + '#settings/account');
-    assert.equal(await manage.getAttribute('target'), '_blank');
+    const accountWrites = [];
+    await app.context.route(appURL + "account/**", async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET") accountWrites.push(await request.allHeaders());
+      await route.fallback();
+    });
+    await app.page.goto(article);
+    app.context.setDefaultTimeout(5000);
+    await app.page.getByRole("button", { name: "Open Backchannel settings" }).click();
+    const accountTab = app.page.getByRole("button", { name: "Account", exact: true });
+    await accountTab.evaluate((button) => button.click());
+    assert.equal(app.page.frames().some((frame) => frame.url().startsWith(shell)), false);
+    assert.deepEqual(api.requests, []);
+    await accountTab.click();
+    const accountFrame = () => app.page.frames().find((frame) => frame.url().startsWith(shell));
+    assert(await waitFor(accountFrame, 4500), 'Account is loaded inside Sidebar Settings');
+    const frame = accountFrame();
+    const panel = frame.locator('#settings-account-sync');
+    const sync = panel.getByRole('button', {name:'Sync now',exact:true});
+    await sync.waitFor();
     assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'), 'wide');
-    assert(await panel.getByText('Signed in on this device', {exact:true}).isVisible());
-    assert.equal(await panel.locator('#account-last-sync time').getAttribute('datetime'), new Date(lastSync).toISOString());
-    assert.equal(await panel.getByRole('button', {name:'Create passkey'}).count(),0);
-    const markup = await panel.innerHTML();
-    for (const privateValue of [session.token, session.account, session.recoveryKey, 'birb@example.com']) {
-      assert(!markup.includes(privateValue), 'private account fields stay out of the page');
+    await frame.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await frame.evaluate(() => window.avatarImagesBlocked), 0, "the private frame permits the bundled avatar");
+    assert.equal(await panel.getByRole('heading', {name:'Linked devices',exact:true}).isVisible(), false);
+    await app.page.setViewportSize({ width:197, height:426 });
+    assert(await waitFor(() => app.page.locator("#panel").evaluate((el) => el.style.zoom === "0.5")));
+    const accountFits = (selector) => frame.evaluate((selector) => {
+      const root = document.querySelector("body > div").shadowRoot;
+      const section = root.getElementById("settings-account-sync");
+      const rows = [...section.querySelectorAll(selector)];
+      return innerWidth > 300 && Math.abs(document.body.getBoundingClientRect().width - innerWidth) <= 1 &&
+        rows.length > 0 && rows.every(row => row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().right <= innerWidth + 1);
+    }, selector);
+    assert(await waitFor(() => accountFits("#account-profile-avatar, #account-sync-now")), "Account avatar and controls fit the logical Settings frame at 200% zoom");
+    const frameBox = await (await frame.frameElement()).boundingBox();
+    assert(Math.abs(frameBox.width / (await frame.evaluate(() => innerWidth)) - 0.5) < 0.025);
+    assert(await panel.getByRole('button', {name:'Sign out',exact:true}).isVisible());
+    assert(await panel.getByRole('button', {name:'Delete account…',exact:true}).isVisible());
+    assert(await waitFor(() => sync.isEnabled()));
+    const beforeSync = api.requests.filter(path => path === '/account/snapshot').length;
+    await sync.scrollIntoViewIfNeeded();
+    const buttonCenter = await sync.evaluate((el) => {
+      const { x, y, width, height } = el.getBoundingClientRect();
+      return { x: x + width / 2, y: y + height / 2 };
+    });
+    const positionedFrame = await (await frame.frameElement()).boundingBox();
+    const scale = positionedFrame.width / (await frame.evaluate(() => innerWidth));
+    await app.page.mouse.click(positionedFrame.x + buttonCenter.x * scale, positionedFrame.y + buttonCenter.y * scale);
+    assert(await waitFor(() => api.requests.filter(path => path === '/account/snapshot').length > beforeSync));
+    const manage = panel.getByRole('button', {name:'Manage account',exact:true});
+    assert(await waitFor(() => manage.isEnabled()));
+    await manage.press('Enter');
+    const devices = await linkedDevicesIn(panel);
+    await devices.getByRole('button', {name:'Sign out iPhone · Safari'}).waitFor();
+    assert(await waitFor(() => accountFits(".account-device-list li")), "Linked devices fit the logical Settings frame at 200% zoom");
+    await app.page.setViewportSize({ width:393, height:852 });
+    assert(await waitFor(() => app.page.locator("#panel").evaluate((el) => !el.style.zoom)));
+    assert.equal(await panel.locator('#account-email-input').getAttribute('placeholder'), 'birb@example.com');
+    assert.equal(await app.page.getByText('birb@example.com', { exact:true }).count(), 0);
+    assert.deepEqual(app.context.pages(), [app.page]);
+    assert.equal(app.page.url(), article);
+    assert.equal(await frame.locator('#app-rail').count(),0);
+    assert(accountWrites.length > 0, 'Account sends an authenticated same-origin write');
+    for (const headers of accountWrites) {
+      assert.equal(headers.origin, new URL(appURL).origin);
+      assert(!['same-site', 'cross-site'].includes(headers['sec-fetch-site']));
     }
-    assert.deepEqual(api.requests,[]);
-    const [accountWindow] = await Promise.all([app.context.waitForEvent('page'), manage.click()]);
-    accountWindow.setDefaultTimeout(6000);
-    const accountPanel = accountWindow.locator('#settings-account-sync');
-    await accountPanel.getByRole('button', {name:'Sync now',exact:true}).waitFor();
-    await accountPanel.getByRole('button', {name:'Manage account',exact:true}).click();
-    await accountPanel.getByText('birb@example.com', {exact:true}).first().waitFor();
-    assert.equal(await accountWindow.locator('#app-rail').count(),0);
-    assert.equal(new URL(accountWindow.url()).origin,new URL(appURL).origin);
-    await Promise.all([
-      accountWindow.waitForEvent('close', {timeout:6000}),
-      accountWindow.getByRole('button', {name:'Close settings'}).click().catch(error => {
-        if (!accountWindow.isClosed()) throw error;
-      }),
+    await panel.locator('#account-manage-back').click();
+    const [passkeyWindow] = await Promise.all([
+      app.context.waitForEvent('page'),
+      panel.getByRole('button', {name:'Delete account…',exact:true}).click(),
     ]);
-    assert.equal(app.page.url(),article);
-
-    app.store.delete(storage);
-    await app.page.locator('#app-settings-close').click();
-    await app.page.locator('#settings-toggle').click();
-    await app.page.getByRole('button', {name:'Account',exact:true}).click();
-    await panel.getByRole('link', {name:'Sign in to Backchannel'}).waitFor({timeout:2500});
-    assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'),null);
-    assert.equal(await panel.locator('#account-last-sync').isVisible(),false);
-    assert(!app.requests.some(({url})=>url.startsWith(appURL + 'account/')));
+    await passkeyWindow.waitForURL(appURL + '#settings/account');
+    const windowAccount = passkeyWindow.locator('#settings-account-sync');
+    assert.equal(await windowAccount.getByRole('heading', {name:'Linked devices',exact:true}).isVisible(), false);
+    await windowAccount.getByRole('button', {name:'Manage account',exact:true}).click();
+    const windowDevices = await linkedDevicesIn(windowAccount);
+    await windowDevices.getByText('Mac · Safari · This device', {exact:true}).waitFor();
+    assert.equal(await passkeyWindow.locator('#app-rail').count(),0);
+    assert.equal(await passkeyWindow.evaluate(() => Boolean(window.opener)), false);
+    assert(!api.requests.includes('/account/delete/options'), 'Account deletion still requires the user to confirm in Backchannel');
+    await passkeyWindow.close();
+    assert(await panel.isVisible());
     assert.deepEqual(app.errors,[]);
   } finally { await app.browser.close(); }
 });

@@ -282,19 +282,26 @@ for (const [surface, commentSort, expected] of [
 
     const more = archiveButton(page);
     const recentText = page.locator('[data-comment-id="reddit:recent"] .text');
-    let before;
     if (commentSort === "oldest") {
-      const scrollTop = await more.evaluate(button => {
+      await more.evaluate(button => {
         const comments = button.closest("#comments");
         comments.scrollTo({ top: comments.scrollHeight, behavior: "instant" });
-        return comments.scrollTop;
+        const text = comments.querySelector('[data-comment-id="reddit:recent"] .text');
+        button.addEventListener("click", () => {
+          window.beforeReplyExpansion = { top: text.getBoundingClientRect().top, scrollTop: comments.scrollTop };
+        }, { capture: true, once: true });
       });
-      assert(scrollTop > 0, "the Sidebar starts with a scrolled position to preserve");
-      before = (await recentText.boundingBox()).y;
     }
     await more.click();
     await more.waitFor({ state: "detached" });
-    if (before !== undefined) assert(Math.abs((await recentText.boundingBox()).y - before) < 2, "the old content holds its position");
+    if (commentSort === "oldest") {
+      const { before, after } = await recentText.evaluate(text => ({
+        before: window.beforeReplyExpansion,
+        after: text.getBoundingClientRect().top,
+      }));
+      assert(before?.scrollTop > 0, "the Sidebar is scrolled when expansion starts");
+      assert(Math.abs(after - before.top) < 2, `the old content holds its position (${before.top} to ${after})`);
+    }
     assert.deepEqual(await roots.evaluateAll(nodes => nodes.map(node => node.dataset.commentId.slice(7))), expected);
     assert.equal(await existing.getAttribute("data-expansion-fixture"), "retained");
     const timestamps = await page.locator('#comments-content .top-level-comments .comment[data-created-at]').evaluateAll(nodes => nodes.map(node => Number(node.dataset.createdAt)));

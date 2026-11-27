@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.20.1] — 2026-11-27
+
+### Changed
+
+- Linked devices appears below Privacy in Manage account.
+
+### Fixed
+
+- On mobile, the whole Settings dialog follows the Sidebar’s size preference,
+  including text, tables and controls in every section.
+- Sidebar, Filters, and Collection Settings open in place on pages that block
+  inline scripts. Their controls stay visible with empty lists if the page
+  blocks both ways of loading the section.
+- The Search topics placeholder matches the surrounding text on mobile.
+- Sidebar Account includes sync, device and profile controls. Actions that
+  require a passkey open the dedicated Backchannel Account window.
+
 ## [1.6.20] — 2026-11-26
 
 ### Changed

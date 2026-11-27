@@ -81,11 +81,11 @@ test('a narrow phone Sidebar keeps Sources compact and clips the wordmark within
   const menu=page.locator('#source-menu');
   const group=menu.getByRole('button',{name:/Reddit discussions/});
   assert((await group.boundingBox()).height<=30,'the source group fits a compact row');
-  assert(await menu.evaluate(node=>{
+  assert(await waitFor(()=>menu.evaluate(node=>{
     const {left,right}=node.getBoundingClientRect();
     const panel=node.closest('#panel').getBoundingClientRect();
     return left>=panel.left-1 && right<=panel.right+1;
-  }),'the menu fits within the resized Sidebar');
+  })),'the menu fits within the resized Sidebar');
   const first=menu.getByRole('checkbox',{name:'r/community0',exact:true});
   assert(await first.isVisible());
   await group.tap();

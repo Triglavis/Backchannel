@@ -23,6 +23,18 @@ export default {
 			return Response.redirect(`https://${HOME}${url.pathname}${url.search}`, 301);
 		}
 
+		if (url.pathname === "/sidebar-settings" && (request.method === "GET" || request.method === "HEAD")) {
+			const body = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Backchannel&nbsp;Settings</title><body></body></html>';
+			return new Response(request.method === "HEAD" ? null : body, {
+				headers: {
+					"Content-Type": "text/html; charset=utf-8",
+					"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'",
+					"Referrer-Policy": "no-referrer",
+					"X-Content-Type-Options": "nosniff",
+				},
+			});
+		}
+
 		const response = await env.ASSETS.fetch(request);
 
 		return response.status === 404 ? Response.redirect(new URL("/", url).href, 302) : response;

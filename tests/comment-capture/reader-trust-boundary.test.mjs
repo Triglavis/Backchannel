@@ -108,7 +108,134 @@ test("The publisher cannot read private Sidebar settings, drafts or notes", asyn
 	}
 });
 
-test("A publisher that blocks the Sidebar settings frame opens only the requested Backchannel settings", async () => {
+test("Phone Sidebar Settings follows the Keep the Sidebar size preference", async (t) => {
+	const fixture = articleFor(article.url);
+	const longAddress = "https://manage.example.org/" + "long-path-segment".repeat(10);
+	const app = await launchApp({
+		topHosts: [new URL(article.url).hostname], sharedStore: true, hasTouch: true, isMobile: true,
+		viewport: { width: 393, height: 852 }, settings: { autoOpenSidebar: true, keepSidebarSize: true, updateCheck: false },
+		values: {
+			"HNewhere:blocked_sites": ["page:" + longAddress],
+			"HNewhere:hidden_stories": [{ key: longAddress, url: longAddress }],
+		},
+		pages: { [article.url]: { ...fixture, html: fixture.html.replace("<head>", '<head><meta name="viewport" content="width=device-width, initial-scale=1">') } },
+	});
+	t.after(() => app.browser.close());
+	await app.context.addInitScript((url) => {
+		if (location.href !== url) return;
+		Object.defineProperty(window, "outerWidth", { get: () => 393 });
+	}, article.url);
+	const { page } = app;
+	page.setDefaultTimeout(5000);
+	await page.goto(article.url);
+	await page.getByRole("button", { name: "Open Backchannel settings" }).click();
+	const modal = page.getByRole("dialog", { name: "Settings" });
+	const close = modal.getByRole("button", { name: "Close settings" });
+	const start = (await close.boundingBox()).height;
+	await page.setViewportSize({ width: 262, height: 568 });
+	assert(await waitFor(() => page.locator("#panel").evaluate((panel) => panel.style.zoom === "0.67")));
+	assert(Math.abs((await close.boundingBox()).height / start - 0.67) < 0.05, "the Settings controls receive the Sidebar's compensation");
+	const bounds = await page.locator("#app-settings-modal").boundingBox();
+	assert(bounds.width >= 261 && bounds.height >= 567, "the Settings backdrop still covers the viewport");
+
+	for (const [section, selector, list] of [
+		["Collection", ".settings-subheading, .settings-action-row button"],
+		["Sidebar", ".manage-table, .manage-row", "Disabled sites"],
+		["Filters", "#settings-topic-search, #settings-hidden-section .sources-subhead, .manage-table, .manage-row", "Hidden links"],
+	]) {
+		await modal.getByRole("button", { name: section, exact: true }).click();
+		const getFrame = () => page.frame("backchannel-sidebar-settings");
+		assert(await waitFor(getFrame));
+		const frame = getFrame();
+		const controls = frame.locator(selector);
+		await controls.first().waitFor();
+		if (list) await frame.getByRole("listbox", { name: list }).getByRole("option").waitFor();
+		const layout = () => controls.evaluateAll((elements) => ({
+			width: window.innerWidth,
+			bodyWidth: document.body.getBoundingClientRect().width,
+			right: Math.max(document.body.scrollWidth, ...elements.map(element => element.getBoundingClientRect().right)),
+		}));
+		assert(await waitFor(async () => {
+			const inner = await layout();
+			return inner.width > 0 && Math.abs(inner.bodyWidth - inner.width) <= 1;
+		}), `${section} uses the frame’s logical viewport ${JSON.stringify(await layout())}`);
+		const inner = await layout();
+		const frameBox = await (await frame.frameElement()).boundingBox();
+		assert(Math.abs(frameBox.width / inner.width - 0.67) < 0.025, `${section} scales at the same rate as the dialog`);
+		assert(inner.right <= inner.width + 1, `${section} controls fit horizontally`);
+
+		if (section === "Collection") {
+			await frame.locator("#bookmark-import-file").setInputFiles({
+				name: "bookmarks.html", mimeType: "text/html",
+				buffer: Buffer.from('<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><DT><A HREF="https://saved.example.org/">An imported link</A></DL>'),
+			});
+			const preview = frame.getByRole("dialog", { name: "Import bookmarks" });
+			await preview.waitFor();
+			const height = () => frame.evaluate(() => window.innerHeight);
+			assert(await waitFor(async () => await height() >= 360), `The import preview uses the logical dialog height. Got ${await height()}px.`);
+		}
+	}
+	const filterFrame = () => page.frame("backchannel-sidebar-settings");
+	assert(await waitFor(filterFrame));
+	const search = filterFrame().getByRole("searchbox", { name: "Search topics" });
+	const size = await search.evaluate((field) => ({
+		placeholder: getComputedStyle(field, "::placeholder").fontSize,
+		input: getComputedStyle(field).fontSize,
+		touch: matchMedia("(pointer: coarse)").matches,
+	}));
+	assert.equal(size.placeholder, "12px");
+	if (size.touch) assert.equal(size.input, "16px");
+
+	await page.setViewportSize({ width: 786, height: 1704 });
+	assert(await waitFor(() => page.locator("#panel").evaluate((panel) => panel.style.zoom === "2")));
+	assert.equal(await modal.locator(".app-settings-body").evaluate((body) => getComputedStyle(body).flexDirection), "column",
+		"Settings stays compact at the same logical width even when the page viewport is wide");
+	await modal.getByRole("button", { name: "Sidebar", exact: true }).click();
+	await modal.locator("#setting-keep-sidebar-size").uncheck();
+	assert(await waitFor(async () => Math.abs((await close.boundingBox()).height - start) <= 1));
+});
+
+test("Phone Sidebar Settings loads private sections when the publisher blocks inline scripts", async (t) => {
+	const shell = "https://backchnnl.app/sidebar-settings";
+	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const hash = createHash("sha256").update(source).digest("base64");
+	const app = await launchApp({
+		source, topHosts: [new URL(article.url).hostname], sharedStore: true, hasTouch: true, isMobile: true, contentPages: [shell],
+		viewport: { width: 393, height: 852 }, settings: { autoOpenSidebar: true, updateCheck: false, hiddenTopics: [privateTopic] },
+		values: { "HNewhere:blocked_sites": ["private.example.org"] },
+		pages: { [article.url]: {
+			html: '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Article with strict CSP</title><article><p>The publisher applies a script policy.</p></article>',
+			headers: { "content-security-policy": `script-src 'sha256-${hash}'` },
+		} },
+	});
+	t.after(() => app.browser.close());
+	await app.context.route(shell, (route) => route.fulfill({
+		contentType: "text/html", headers: { "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'" },
+		body: '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
+	}));
+	const { page } = app;
+	page.setDefaultTimeout(5000);
+	await page.goto(article.url);
+	await page.getByRole("button", { name: "Open Backchannel settings" }).click();
+	const sidebar = page.getByRole("dialog", { name: "Settings" });
+	for (const [section, control] of [
+		["Sidebar", (frame) => frame.getByRole("option", { name: /private.example.org/ })],
+		["Filters", (frame) => frame.getByRole("button", { name: `Show again, ${privateTopic}` })],
+		["Collection", (frame) => frame.getByRole("button", { name: "Download JSON" })],
+	]) {
+		await sidebar.getByRole("button", { name: section, exact: true }).click();
+		const getFrame = () => page.frames().find((entry) => entry.url().startsWith(shell));
+		assert(await waitFor(getFrame, 3500), `${section} loads inside Settings`);
+		const frame = getFrame();
+		await control(frame).waitFor();
+		assert.equal(await sidebar.getByRole("link", { name: /Open .*settings|Manage disabled sites/ }).count(), 0);
+	}
+	assert.equal(await page.getByText("private.example.org").count(), 0);
+	assert.equal(await page.getByText(privateTopic).count(), 0);
+	assert.deepEqual(app.context.pages(), [page]);
+});
+
+test("A publisher that blocks both Settings frames leaves an empty Filters table and opens the requested settings", async () => {
 	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
 	const hash = createHash("sha256").update(source).digest("base64");
 	const app = await launchApp({
@@ -116,7 +243,7 @@ test("A publisher that blocks the Sidebar settings frame opens only the requeste
 		settings: { autoOpenSidebar: true, updateCheck: false },
 		pages: { [article.url]: {
 			html: "<title>Article with strict CSP</title><article><p>The publisher applies a script policy.</p></article>",
-			headers: { "content-security-policy": `script-src 'sha256-${hash}'` },
+			headers: { "content-security-policy": `frame-src 'none'; script-src 'sha256-${hash}'` },
 		} },
 	});
 	try {
@@ -125,6 +252,11 @@ test("A publisher that blocks the Sidebar settings frame opens only the requeste
 		await page.goto(article.url);
 		await page.getByRole("button", { name: "Open Backchannel settings" }).click();
 		await page.getByRole("button", { name: "Filters", exact: true }).click();
+		const modal = page.getByRole("dialog", { name: "Settings" });
+		const list = modal.getByRole("listbox", { name: "Hidden links" });
+		await list.waitFor();
+		assert.equal(await list.getByRole("option").count(), 0);
+		assert(await modal.getByRole("button", { name: "Hide a link", exact: true }).isDisabled());
 		const [settings] = await Promise.all([
 			app.context.waitForEvent("page"),
 			page.getByRole("link", { name: "Open Filters settings", exact: true }).click(),

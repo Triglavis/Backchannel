@@ -573,6 +573,7 @@ test('searching Settings for Sync schedule opens the Sources section',{timeout:1
   const app=await launchApp({sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
     await app.page.goto('https://backchnnl.app/');
+    await app.page.locator('#app-list-body .browse-title-link').first().waitFor({timeout:5000});
     await app.page.locator('#app-rail-search').click();
     await app.page.locator('#app-search-input').fill('Sync schedule');
     await app.page.locator('#app-search-results .app-search-item').filter({hasText:'Sync schedule'}).first().click({timeout:3000});
