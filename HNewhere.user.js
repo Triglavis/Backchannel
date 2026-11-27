@@ -6471,8 +6471,9 @@ ${links.join("\n")}
 			tip.id = "source-help-tip";
 			tip.className = "app-tip source-help-tip";
 			tip.setAttribute("role", "tooltip");
-			shadow.append(tip);
 		}
+		const owner = button.closest(".app-settings-viewport") || shadow;
+		if (tip.parentNode !== owner) owner.append(tip);
 		tip.innerHTML = `<ul>${button.dataset.tip.split("\n").map((point) => `<li>${escapeHTML(point)}</li>`).join("")}</ul>`;
 		tip.hidden = false;
 		tip.style.left = "0px";
@@ -12872,19 +12873,10 @@ button {
 				: 1;
 
 		if (panel) {
-			const settings = panel.getRootNode().getElementById("app-settings-modal");
-			const viewportZoom = sidebarZoom !== 1 && viewportUnitsScaleWithZoom() ? sidebarZoom : 1;
-
-			for (const surface of [panel, settings]) {
-				if (!surface) continue;
-				if (sidebarZoom === 1) {
-					surface.style.removeProperty("zoom");
-					surface.style.removeProperty("--viewport-zoom");
-				} else {
-					surface.style.setProperty("zoom", String(sidebarZoom));
-					surface.style.setProperty("--viewport-zoom", String(viewportZoom));
-				}
-			}
+			const scale = sidebarZoom === 1 ? "" : String(sidebarZoom);
+			panel.style.setProperty("zoom", scale);
+			panel.style.setProperty("--viewport-zoom", scale && !viewportUnitsScaleWithZoom() ? "1" : scale);
+			panel.getRootNode().getElementById("app-settings-modal")?.style.setProperty("--settings-scale", scale);
 		}
 
 		return sidebarZoom;
@@ -19845,7 +19837,7 @@ body {margin:0;background:var(--bg);color:var(--text);font:13px/1.4 var(--app-ui
 `;
 		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>${escapeHTML(label)}</title><body><main id="app-list-body" class="reader-list" aria-label="${escapeHTML(label)}"></main><div id="app-row-menu" class="dropdown" role="menu" aria-label="Link actions" hidden></div>
 <script>"use strict";
 ${adoptStyle.toString()}
@@ -25413,7 +25405,8 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 
 	function sidebarSettingsFrameCSS() {
 		return `${documentThemeCSS()}${CHROME_CSS}${BOOKMARK_DIALOG_CSS}
-body { margin:0;color:var(--surface-text);font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+body { margin:0;color:var(--surface-text);font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere; }
 [hidden] { display:none !important; }
 main { display:flow-root; }
 .settings-group + .settings-group { margin-top:12px; }
@@ -25424,7 +25417,7 @@ main { display:flow-root; }
 		const components = section === "collection" ? [pluralize, downloadFile, openBookmarkImport, wireBookmarkImport, wireCollectionDownloads]
 			: section === "filters" ? [topicFilterKey, topicDisplayName, wireSettingsTopicFilters, wireSettingsManageTable] : [wireSettingsManageTable];
 		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>${SIDEBAR_SETTINGS_TITLES[section]}</title><style>${sidebarSettingsFrameCSS()}</style><body><main>${sidebarSettingsMarkup(section)}</main>
 <script>"use strict";
 ${paintSidebarFrameTheme.toString()}
@@ -25454,6 +25447,7 @@ ${components.map((component) => component.toString()).join("\n")}
 			document.body.append(host);
 			root = host.attachShadow({ mode: "open" });
 			root.innerHTML = `<style>${THEME_CSS}${CHROME_CSS}${SIDEBAR_SETTINGS_MODAL_CSS}
+:host { display:block; container:app-settings / inline-size; }
 #app-settings-content { display:flow-root; padding:0; overflow:visible; }
 [hidden] { display:none !important; }
 </style><main id="app-settings-content">${accountSettingsHTML()}</main>`;
@@ -25490,6 +25484,7 @@ ${components.map((component) => component.toString()).join("\n")}
 
 				const title = SIDEBAR_SETTINGS_TITLES[section];
 				const origin = new URL(SIDEBAR_SETTINGS_URL).origin;
+				const viewport = slot.closest(".app-settings-viewport");
 				const host = document.createElement("div");
 				const root = host.attachShadow({ mode: "closed" });
 				const status = document.createElement("div");
@@ -25522,7 +25517,7 @@ ${components.map((component) => component.toString()).join("\n")}
 					const frame = document.createElement("iframe");
 					frame.name = SIDEBAR_SETTINGS_FRAME;
 					frame.title = title;
-					frame.style.cssText = "display:block;width:100%;height:0;border:0";
+					frame.style.cssText = "display:block;width:100%;max-width:100%;height:0;border:0";
 					frame.referrerPolicy = "no-referrer";
 					frame.setAttribute("sandbox", "allow-scripts" + (nonce ? " allow-same-origin" : "") +
 						(section === "collection" ? " allow-downloads" : section === "account" ? " allow-forms allow-popups allow-popups-to-escape-sandbox" : ""));
@@ -25579,7 +25574,7 @@ ${components.map((component) => component.toString()).join("\n")}
 						}
 						if (typeof data?.tabBack === "boolean") moveTab(host, data.tabBack);
 						else if (Number.isFinite(data?.height)) {
-							const minimum = data.modal ? Math.min(360, Math.max(260, innerHeight - 310)) : 1;
+							const minimum = data.modal ? Math.min(360, Math.max(260, viewport.clientHeight - 310)) : 1;
 							frame.style.height = Math.max(minimum, data.height) + "px";
 							if (data.modal) host.scrollIntoView({ block: "nearest" });
 						} else if (data?.close) closeAppSettings();
@@ -38022,6 +38017,30 @@ ${APP_ICON_THEME_CSS}
 	display:none;
 }
 
+#app-settings-modal {
+	padding:0;
+	overflow:clip;
+	-webkit-text-size-adjust:100%;
+	text-size-adjust:100%;
+}
+
+.app-settings-viewport {
+	container:app-settings / inline-size;
+	box-sizing:border-box;
+	display:flex;
+	flex:none;
+	align-items:center;
+	justify-content:center;
+	width:calc(100% / var(--settings-scale, 1));
+	height:calc(100% / var(--settings-scale, 1));
+	scale:var(--settings-scale, none);
+}
+
+.app-settings-viewport > .app-settings-dialog {
+	width:min(678px, calc(100% - 64px));
+	height:min(520px, calc(100% - 64px));
+}
+
 .app-settings-dialog {
 	display:flex;
 	flex-direction:column;
@@ -38978,13 +38997,10 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 		padding-bottom:4px;
 	}
 
-	#app-settings-modal {
-		padding:calc(12px + env(safe-area-inset-top, 0px)) 12px calc(12px + env(safe-area-inset-bottom, 0px));
-	}
-
-	.app-settings-dialog {
-		width:100%;
-		height:100%;
+	.app-settings-viewport > .app-settings-dialog {
+		width:calc(100% - 24px);
+		height:calc(100% - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+		margin-block:calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-bottom, 0px));
 		border-radius:14px;
 	}
 
@@ -39420,6 +39436,8 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 }
 `;
 
+	const SETTINGS_MODAL_RESPONSIVE_CSS = `@container app-settings (max-width:700px) {${SETTINGS_MODAL_PHONE_CSS}}`;
+
 	const SIDEBAR_SETTINGS_MODAL_CSS = `${APP_ICON_CSS}${SETTINGS_MODAL_CSS}${TIP_CSS}${DISCUSSION_TOOLS_CSS}
 #app-settings-modal {
 	z-index:2147483647;
@@ -39443,7 +39461,7 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 	display:none !important;
 }
 
-@media (max-width: 700px) {${SETTINGS_MODAL_PHONE_CSS}}
+${SETTINGS_MODAL_RESPONSIVE_CSS}
 `;
 
 	const READER_LIST_CSS = `
@@ -41086,6 +41104,7 @@ ${DISCUSSION_TOOLS_CSS}
 }
 
 ${SETTINGS_MODAL_CSS}
+${SETTINGS_MODAL_RESPONSIVE_CSS}
 
 ${BOOKMARK_DIALOG_CSS}
 
@@ -43180,7 +43199,6 @@ header .item-action-link {
 		}
 	}
 
-${SETTINGS_MODAL_PHONE_CSS}
 }
 
 `;
@@ -46091,6 +46109,7 @@ ${accountBackButton("account-manage-back")}
 		const privateAccount = onAccountSettingsPage();
 		return `
 <div id="app-settings-modal" class="app-settings-modal" hidden>
+<div class="app-settings-viewport">
 <div class="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1">
 <div class="app-settings-top"><span id="app-settings-title" class="app-settings-title">Settings</span><span class="app-settings-top-spacer"></span><button id="app-settings-close" class="app-head-icon" type="button" aria-label="Close settings" title="Close">${APP_CLOSE_ICON}</button></div>
 <div class="app-settings-body">
@@ -46108,6 +46127,7 @@ ${accountBackButton("account-manage-back")}
 <div id="app-settings-content" class="app-settings-content" tabindex="-1" role="group" aria-labelledby="app-settings-heading"><div id="app-settings-heading" class="app-settings-heading">General</div>
 ${privateAccount ? accountSettingsHTML() : `<div id="settings-account-sync">${sidebarPrivateSettingsHTML("account")}</div>`}
 ${settingsPanelHTML(privateContent)}
+</div>
 </div>
 </div>
 </div>
@@ -47205,6 +47225,7 @@ ${readingListShareHTML()}
 
 	function wireSettingsModal(shadow, settingsControls, { standalone = false } = {}) {
 		const modal = shadow.querySelector("#app-settings-modal");
+		const viewport = modal.querySelector(".app-settings-viewport");
 		const content = shadow.querySelector("#app-settings-content");
 		const panel = shadow.querySelector("#settings-panel");
 		const gear = shadow.querySelector("#settings-toggle");
@@ -47334,7 +47355,8 @@ ${readingListShareHTML()}
 			const place = target && shadow.querySelector(target);
 
 			if (place) {
-				content.scrollTop += place.getBoundingClientRect().top - content.getBoundingClientRect().top - parseFloat(getComputedStyle(content).paddingTop);
+				const scale = Number(modal.style.getPropertyValue("--settings-scale")) || 1;
+				content.scrollTop += (place.getBoundingClientRect().top - content.getBoundingClientRect().top) / scale - parseFloat(getComputedStyle(content).paddingTop);
 			}
 			return tab;
 		};
@@ -47353,7 +47375,7 @@ ${readingListShareHTML()}
 
 			if (open) {
 				if (report) {
-					const phone = appIsPhone();
+					const phone = viewport.clientWidth <= 700;
 					credits.hidden = phone;
 					if (phone) modal.querySelector("#app-settings-title").after(report);
 					else credits.prepend(report);
@@ -47396,7 +47418,7 @@ ${readingListShareHTML()}
 		modal.addEventListener("click", (event) => {
 			event.stopPropagation();
 
-			if (event.target === modal && !standalone) {
+			if ((event.target === modal || event.target === viewport) && !standalone) {
 				closeModal();
 			}
 		});

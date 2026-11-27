@@ -110,18 +110,20 @@ test("The publisher cannot read private Sidebar settings, drafts or notes", asyn
 
 test("Phone Sidebar Settings follows the Keep the Sidebar size preference", async (t) => {
 	const fixture = articleFor(article.url);
+	const longAddress = "https://manage.example.org/" + "long-path-segment".repeat(10);
 	const app = await launchApp({
 		topHosts: [new URL(article.url).hostname], sharedStore: true, hasTouch: true, isMobile: true,
 		viewport: { width: 393, height: 852 }, settings: { autoOpenSidebar: true, keepSidebarSize: true, updateCheck: false },
+		values: {
+			"HNewhere:blocked_sites": ["page:" + longAddress],
+			"HNewhere:hidden_stories": [{ key: longAddress, url: longAddress }],
+		},
 		pages: { [article.url]: { ...fixture, html: fixture.html.replace("<head>", '<head><meta name="viewport" content="width=device-width, initial-scale=1">') } },
 	});
 	t.after(() => app.browser.close());
 	await app.context.addInitScript((url) => {
 		if (location.href !== url) return;
-		window.fixturePageZoom = 1;
-		Object.defineProperty(window, "outerWidth", {
-			get: () => Math.round(document.documentElement.clientWidth * window.fixturePageZoom),
-		});
+		Object.defineProperty(window, "outerWidth", { get: () => 393 });
 	}, article.url);
 	const { page } = app;
 	page.setDefaultTimeout(5000);
@@ -130,16 +132,49 @@ test("Phone Sidebar Settings follows the Keep the Sidebar size preference", asyn
 	const modal = page.getByRole("dialog", { name: "Settings" });
 	const close = modal.getByRole("button", { name: "Close settings" });
 	const start = (await close.boundingBox()).height;
-	await page.evaluate(() => {
-		window.fixturePageZoom = 1.5;
-		window.dispatchEvent(new Event("resize"));
-	});
+	await page.setViewportSize({ width: 262, height: 568 });
 	assert(await waitFor(() => page.locator("#panel").evaluate((panel) => panel.style.zoom === "0.67")));
 	assert(Math.abs((await close.boundingBox()).height / start - 0.67) < 0.05, "the Settings controls receive the Sidebar's compensation");
 	const bounds = await page.locator("#app-settings-modal").boundingBox();
-	assert(bounds.width >= 392 && bounds.height >= 851, "the Settings backdrop still covers the viewport");
+	assert(bounds.width >= 261 && bounds.height >= 567, "the Settings backdrop still covers the viewport");
 
-	await modal.getByRole("button", { name: "Filters", exact: true }).click();
+	for (const [section, selector, list] of [
+		["Collection", ".settings-subheading, .settings-action-row button"],
+		["Sidebar", ".manage-table, .manage-row", "Disabled sites"],
+		["Filters", "#settings-topic-search, #settings-hidden-section .sources-subhead, .manage-table, .manage-row", "Hidden links"],
+	]) {
+		await modal.getByRole("button", { name: section, exact: true }).click();
+		const getFrame = () => page.frame("backchannel-sidebar-settings");
+		assert(await waitFor(getFrame));
+		const frame = getFrame();
+		const controls = frame.locator(selector);
+		await controls.first().waitFor();
+		if (list) await frame.getByRole("listbox", { name: list }).getByRole("option").waitFor();
+		const layout = () => controls.evaluateAll((elements) => ({
+			width: window.innerWidth,
+			bodyWidth: document.body.getBoundingClientRect().width,
+			right: Math.max(document.body.scrollWidth, ...elements.map(element => element.getBoundingClientRect().right)),
+		}));
+		assert(await waitFor(async () => {
+			const inner = await layout();
+			return inner.width > 0 && Math.abs(inner.bodyWidth - inner.width) <= 1;
+		}), `${section} uses the frame’s logical viewport ${JSON.stringify(await layout())}`);
+		const inner = await layout();
+		const frameBox = await (await frame.frameElement()).boundingBox();
+		assert(Math.abs(frameBox.width / inner.width - 0.67) < 0.025, `${section} scales at the same rate as the dialog`);
+		assert(inner.right <= inner.width + 1, `${section} controls fit horizontally`);
+
+		if (section === "Collection") {
+			await frame.locator("#bookmark-import-file").setInputFiles({
+				name: "bookmarks.html", mimeType: "text/html",
+				buffer: Buffer.from('<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><DT><A HREF="https://saved.example.org/">An imported link</A></DL>'),
+			});
+			const preview = frame.getByRole("dialog", { name: "Import bookmarks" });
+			await preview.waitFor();
+			const height = () => frame.evaluate(() => window.innerHeight);
+			assert(await waitFor(async () => await height() >= 360), `The import preview uses the logical dialog height. Got ${await height()}px.`);
+		}
+	}
 	const filterFrame = () => page.frame("backchannel-sidebar-settings");
 	assert(await waitFor(filterFrame));
 	const search = filterFrame().getByRole("searchbox", { name: "Search topics" });
@@ -150,6 +185,14 @@ test("Phone Sidebar Settings follows the Keep the Sidebar size preference", asyn
 	}));
 	assert.equal(size.placeholder, "12px");
 	if (size.touch) assert.equal(size.input, "16px");
+
+	await page.setViewportSize({ width: 786, height: 1704 });
+	assert(await waitFor(() => page.locator("#panel").evaluate((panel) => panel.style.zoom === "2")));
+	assert.equal(await modal.locator(".app-settings-body").evaluate((body) => getComputedStyle(body).flexDirection), "column",
+		"Settings stays compact at the same logical width even when the page viewport is wide");
+	await modal.getByRole("button", { name: "Sidebar", exact: true }).click();
+	await modal.locator("#setting-keep-sidebar-size").uncheck();
+	assert(await waitFor(async () => Math.abs((await close.boundingBox()).height - start) <= 1));
 });
 
 test("Phone Sidebar Settings loads private sections when the publisher blocks inline scripts", async (t) => {
@@ -167,7 +210,7 @@ test("Phone Sidebar Settings loads private sections when the publisher blocks in
 	});
 	t.after(() => app.browser.close());
 	await app.context.route(shell, (route) => route.fulfill({
-		contentType: "text/html", headers: { "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'" },
+		contentType: "text/html", headers: { "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'" },
 		body: '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
 	}));
 	const { page } = app;

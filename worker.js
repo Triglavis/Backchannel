@@ -28,7 +28,7 @@ export default {
 			return new Response(request.method === "HEAD" ? null : body, {
 				headers: {
 					"Content-Type": "text/html; charset=utf-8",
-					"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'",
+					"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'",
 					"Referrer-Policy": "no-referrer",
 					"X-Content-Type-Options": "nosniff",
 				},

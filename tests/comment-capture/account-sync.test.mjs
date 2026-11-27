@@ -1194,7 +1194,9 @@ test('a browser without Ed25519 keeps legacy passkey sign-in available', {timeou
         if (algorithm === 'Ed25519') throw new DOMException('Unavailable in fixture', 'NotSupportedError');
         return importKey(format, data, algorithm, ...options);
       }});
-      Object.defineProperty(navigator.credentials, 'get', { value: async () => ({
+      const credentials = navigator.credentials;
+      Object.defineProperty(navigator, 'credentials', {value: credentials, configurable: true});
+      Object.defineProperty(credentials, 'get', { value: async () => ({
         toJSON: () => ({id:credentialId,clientExtensionResults:{}}),
         getClientExtensionResults: () => ({prf:{results:{first:new Uint8Array(seed)}}}),
       }) });
@@ -1362,14 +1364,23 @@ test('Phone Sidebar Account uses the private Account settings in place', {timeou
   const app = await launchApp({
     topHosts:[new URL(article).hostname], sharedStore:true, hasTouch:true, isMobile:true,
     viewport:{width:393,height:852}, contentPages:[shell],
-    settings:{autoOpenSidebar:true,updateCheck:false},
+    settings:{autoOpenSidebar:true,keepSidebarSize:true,updateCheck:false},
+    pages:{[article]:{html:'<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Account fixture</title></head><body><article>Account layout fixture</article></body></html>'}},
     values:{[storage]:{...session,lastSync},['HNewhere:account_avatar:' + account]:{shape:'wide',color:'blue',background:'sky'}},
   });
   try {
     await app.context.route(shell, (route) => route.fulfill({
-      contentType:'text/html',headers:{'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'"},
+      contentType:'text/html',headers:{'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'"},
       body:'<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
     }));
+    await app.context.addInitScript(({ url, publisher }) => {
+      if (location.href === publisher) Object.defineProperty(window, "outerWidth", { get: () => 393 });
+      if (location.origin + location.pathname !== url) return;
+      window.avatarImagesBlocked = 0;
+      document.addEventListener("securitypolicyviolation", (event) => {
+        if (event.effectiveDirective === "img-src") window.avatarImagesBlocked++;
+      });
+    }, { url: shell, publisher: article });
     const remote = {revision:0,ciphertext:null,email:'birb@example.com',capabilities:{emailAvailable:true}};
     const api = mockAccount(app, remote);
     await api.start;
@@ -1394,11 +1405,36 @@ test('Phone Sidebar Account uses the private Account settings in place', {timeou
     const sync = panel.getByRole('button', {name:'Sync now',exact:true});
     await sync.waitFor();
     assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'), 'wide');
+    await frame.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await frame.evaluate(() => window.avatarImagesBlocked), 0, "the private frame permits the bundled avatar");
+    await panel.locator(".account-device-list li").first().waitFor();
+    await app.page.setViewportSize({ width:197, height:426 });
+    assert(await waitFor(() => app.page.locator("#panel").evaluate((el) => el.style.zoom === "0.5")));
+    const accountFits = () => frame.evaluate(() => {
+      const root = document.querySelector("body > div").shadowRoot;
+      const section = root.getElementById("settings-account-sync");
+      const rows = [...section.querySelectorAll(".account-device-list li, #account-profile-avatar, #account-sync-now")];
+      return innerWidth > 300 && Math.abs(document.body.getBoundingClientRect().width - innerWidth) <= 1 &&
+        rows.every(row => row.getBoundingClientRect().width > 0 && row.getBoundingClientRect().right <= innerWidth + 1);
+    });
+    assert(await waitFor(accountFits), "Account devices, avatar and controls fit the logical Settings frame at 200% zoom");
+    const frameBox = await (await frame.frameElement()).boundingBox();
+    assert(Math.abs(frameBox.width / (await frame.evaluate(() => innerWidth)) - 0.5) < 0.025);
     assert(await panel.getByRole('button', {name:'Sign out',exact:true}).isVisible());
     assert(await panel.getByRole('button', {name:'Delete account…',exact:true}).isVisible());
+    assert(await waitFor(() => sync.isEnabled()));
     const beforeSync = api.requests.filter(path => path === '/account/snapshot').length;
-    await sync.click();
+    await sync.scrollIntoViewIfNeeded();
+    const buttonCenter = await sync.evaluate((el) => {
+      const { x, y, width, height } = el.getBoundingClientRect();
+      return { x: x + width / 2, y: y + height / 2 };
+    });
+    const positionedFrame = await (await frame.frameElement()).boundingBox();
+    const scale = positionedFrame.width / (await frame.evaluate(() => innerWidth));
+    await app.page.mouse.click(positionedFrame.x + buttonCenter.x * scale, positionedFrame.y + buttonCenter.y * scale);
     assert(await waitFor(() => api.requests.filter(path => path === '/account/snapshot').length > beforeSync));
+    await app.page.setViewportSize({ width:393, height:852 });
+    assert(await waitFor(() => app.page.locator("#panel").evaluate((el) => !el.style.zoom)));
     await panel.getByRole('button', {name:'Manage account',exact:true}).click();
     await panel.getByRole('heading', {name:'Privacy',exact:true}).waitFor();
     assert.equal(await panel.locator('#account-email-input').getAttribute('placeholder'), 'birb@example.com');

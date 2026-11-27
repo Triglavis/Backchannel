@@ -15,7 +15,7 @@ test('the private Settings shell is frameable and restricts requests to Backchan
   assert.equal(page.status, 200);
   assert.equal(page.headers.get('x-frame-options'), null);
   assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
-  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'/);
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'/);
   assert.match(await page.text(), /<title>Backchannel&nbsp;Settings<\/title>/);
   const head = await accountApp.fetch(new Request(url, { method: 'HEAD' }), {}, {});
   assert.equal(head.status, 200);

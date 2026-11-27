@@ -12,7 +12,8 @@ use to detect updates, so every release bumps it.
 
 ### Fixed
 
-- On mobile, Settings follows the Sidebar’s size preference when the page is zoomed.
+- On mobile, the whole Settings dialog follows the Sidebar’s size preference,
+  including text, tables and controls in every section.
 - Sidebar, Filters, and Collection Settings open in place on pages that block
   inline scripts. Their controls stay visible with empty lists if the page
   blocks both ways of loading the section.
