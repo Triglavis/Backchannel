@@ -628,7 +628,7 @@ test('Account sync uploads a private snapshot and another local profile can appl
     });
     await emailHint.waitFor();
     assert.match(await emailHint.textContent(),/confirm your identity with your passkey/);
-    await updateEmail.click();
+    await updateEmail.click({scroll:'none'});
     const codeField = first.page.getByLabel('Verification code',{exact:true});
     await codeField.waitFor();
     assert(Math.abs((await codeField.boundingBox()).height - sizing.expectedHeight) < 0.5);
@@ -639,12 +639,12 @@ test('Account sync uploads a private snapshot and another local profile can appl
     assert.equal(await address.inputValue(),'draft-birb@example.com');
     await codeField.waitFor({state:'hidden'});
     await address.fill('new-birb@example.com');
-    await updateEmail.click();
+    await updateEmail.click({scroll:'none'});
     await codeField.fill('123456');
     assert(await manage.getByRole('heading',{name:'Manage account'}).isVisible());
     assert.equal(remote.email,'birb@example.com');
     assert.equal(await address.getAttribute('placeholder'),'birb@example.com');
-    await manage.getByRole('button',{name:'Verify email',exact:true}).click();
+    await manage.getByRole('button',{name:'Verify email',exact:true}).click({scroll:'none'});
     await first.page.locator('#toast.is-showing').filter({hasText:'Email updated.'}).waitFor();
     await codeField.waitFor({state:'hidden'});
     assert.equal(await address.getAttribute('placeholder'),'new-birb@example.com');
@@ -1062,7 +1062,7 @@ test('email updates confirm the passkey before sending a code and anchor request
     assert(!mock.requests.includes('/account/email/start'));
     await address.fill('New-Birb+nest@sub.example.com');
     assert.equal(await invalidAddress.isVisible(),false);
-    await update.click();
+    await update.click({scroll:'none'});
     const opened = await waitFor(() => app.page.evaluate(() => window.emailPrompts.length === 1),4000);
     if (!opened) {
       const count = await app.page.evaluate(() => window.emailPrompts.length);
@@ -1106,7 +1106,7 @@ test('email updates confirm the passkey before sending a code and anchor request
     assert.equal(await manage.locator('#account-status-email').textContent(),'');
     assert.match(await update.getAttribute('aria-describedby'),/\baccount-status-send-code\b/);
     remote.emailSendError = null;
-    await update.click();
+    await update.click({scroll:'none'});
     assert(await waitFor(() => app.page.evaluate(() => window.emailPrompts.length === 3)));
     await app.page.evaluate(() => window.emailPrompts[2].resolve({toJSON: () => ({id:'fixture-passkey'})}));
     await manage.getByRole('button',{name:'Sending verification code…',exact:true}).waitFor();
@@ -1127,11 +1127,11 @@ test('email updates confirm the passkey before sending a code and anchor request
     assert.equal(await toast.isVisible(),false);
     const verify = manage.getByRole('button',{name:'Verify email',exact:true});
     await code.fill('000000');
-    await verify.click();
+    await verify.click({scroll:'none'});
     await manage.locator('#account-status-code [data-error]').waitFor();
     assert.deepEqual(await app.page.evaluate(() => window.passkeyDetails), [passkeyDetails('birb@example.com')]);
     await code.fill('123456');
-    await verify.click();
+    await verify.click({scroll:'none'});
     const confirmation = app.page.locator('#toast').filter({hasText:'Email updated.'});
     await confirmation.and(app.page.locator('.is-showing')).waitFor();
     assert.equal(await confirmation.getAttribute('data-kind'),'system');
@@ -1379,6 +1379,7 @@ test('Phone Sidebar Account uses the private Account settings in place', {timeou
     values:{[storage]:{...session,lastSync},['HNewhere:account_avatar:' + account]:{shape:'wide',color:'blue',background:'sky'}},
   });
   try {
+    await mockPasskeySupport(app);
     await app.context.route(shell, (route) => route.fulfill({
       contentType:'text/html',headers:{'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'"},
       body:'<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
@@ -1401,7 +1402,7 @@ test('Phone Sidebar Account uses the private Account settings in place', {timeou
       await route.fallback();
     });
     await app.page.goto(article);
-    app.page.setDefaultTimeout(5000);
+    app.context.setDefaultTimeout(5000);
     await app.page.getByRole("button", { name: "Open Backchannel settings" }).click();
     const accountTab = app.page.getByRole("button", { name: "Account", exact: true });
     await accountTab.evaluate((button) => button.click());
