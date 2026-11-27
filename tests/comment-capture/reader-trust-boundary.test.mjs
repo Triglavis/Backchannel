@@ -108,7 +108,91 @@ test("The publisher cannot read private Sidebar settings, drafts or notes", asyn
 	}
 });
 
-test("A publisher that blocks the Sidebar settings frame opens only the requested Backchannel settings", async () => {
+test("Phone Sidebar Settings follows the Keep the Sidebar size preference", async (t) => {
+	const fixture = articleFor(article.url);
+	const app = await launchApp({
+		topHosts: [new URL(article.url).hostname], sharedStore: true, hasTouch: true, isMobile: true,
+		viewport: { width: 393, height: 852 }, settings: { autoOpenSidebar: true, keepSidebarSize: true, updateCheck: false },
+		pages: { [article.url]: { ...fixture, html: fixture.html.replace("<head>", '<head><meta name="viewport" content="width=device-width, initial-scale=1">') } },
+	});
+	t.after(() => app.browser.close());
+	await app.context.addInitScript((url) => {
+		if (location.href !== url) return;
+		window.fixturePageZoom = 1;
+		Object.defineProperty(window, "outerWidth", {
+			get: () => Math.round(document.documentElement.clientWidth * window.fixturePageZoom),
+		});
+	}, article.url);
+	const { page } = app;
+	page.setDefaultTimeout(5000);
+	await page.goto(article.url);
+	await page.getByRole("button", { name: "Open Backchannel settings" }).click();
+	const modal = page.getByRole("dialog", { name: "Settings" });
+	const close = modal.getByRole("button", { name: "Close settings" });
+	const start = (await close.boundingBox()).height;
+	await page.evaluate(() => {
+		window.fixturePageZoom = 1.5;
+		window.dispatchEvent(new Event("resize"));
+	});
+	assert(await waitFor(() => page.locator("#panel").evaluate((panel) => panel.style.zoom === "0.67")));
+	assert(Math.abs((await close.boundingBox()).height / start - 0.67) < 0.05, "the Settings controls receive the Sidebar's compensation");
+	const bounds = await page.locator("#app-settings-modal").boundingBox();
+	assert(bounds.width >= 392 && bounds.height >= 851, "the Settings backdrop still covers the viewport");
+
+	await modal.getByRole("button", { name: "Filters", exact: true }).click();
+	const filterFrame = () => page.frame("backchannel-sidebar-settings");
+	assert(await waitFor(filterFrame));
+	const search = filterFrame().getByRole("searchbox", { name: "Search topics" });
+	const size = await search.evaluate((field) => ({
+		placeholder: getComputedStyle(field, "::placeholder").fontSize,
+		input: getComputedStyle(field).fontSize,
+		touch: matchMedia("(pointer: coarse)").matches,
+	}));
+	assert.equal(size.placeholder, "12px");
+	if (size.touch) assert.equal(size.input, "16px");
+});
+
+test("Phone Sidebar Settings loads private sections when the publisher blocks inline scripts", async (t) => {
+	const shell = "https://backchnnl.app/sidebar-settings";
+	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const hash = createHash("sha256").update(source).digest("base64");
+	const app = await launchApp({
+		source, topHosts: [new URL(article.url).hostname], sharedStore: true, hasTouch: true, isMobile: true, contentPages: [shell],
+		viewport: { width: 393, height: 852 }, settings: { autoOpenSidebar: true, updateCheck: false, hiddenTopics: [privateTopic] },
+		values: { "HNewhere:blocked_sites": ["private.example.org"] },
+		pages: { [article.url]: {
+			html: '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Article with strict CSP</title><article><p>The publisher applies a script policy.</p></article>',
+			headers: { "content-security-policy": `script-src 'sha256-${hash}'` },
+		} },
+	});
+	t.after(() => app.browser.close());
+	await app.context.route(shell, (route) => route.fulfill({
+		contentType: "text/html", headers: { "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'" },
+		body: '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
+	}));
+	const { page } = app;
+	page.setDefaultTimeout(5000);
+	await page.goto(article.url);
+	await page.getByRole("button", { name: "Open Backchannel settings" }).click();
+	const sidebar = page.getByRole("dialog", { name: "Settings" });
+	for (const [section, control] of [
+		["Sidebar", (frame) => frame.getByRole("option", { name: /private.example.org/ })],
+		["Filters", (frame) => frame.getByRole("button", { name: `Show again, ${privateTopic}` })],
+		["Collection", (frame) => frame.getByRole("button", { name: "Download JSON" })],
+	]) {
+		await sidebar.getByRole("button", { name: section, exact: true }).click();
+		const getFrame = () => page.frames().find((entry) => entry.url().startsWith(shell));
+		assert(await waitFor(getFrame, 3500), `${section} loads inside Settings`);
+		const frame = getFrame();
+		await control(frame).waitFor();
+		assert.equal(await sidebar.getByRole("link", { name: /Open .*settings|Manage disabled sites/ }).count(), 0);
+	}
+	assert.equal(await page.getByText("private.example.org").count(), 0);
+	assert.equal(await page.getByText(privateTopic).count(), 0);
+	assert.deepEqual(app.context.pages(), [page]);
+});
+
+test("A publisher that blocks both Settings frames leaves an empty Filters table and opens the requested settings", async () => {
 	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
 	const hash = createHash("sha256").update(source).digest("base64");
 	const app = await launchApp({
@@ -116,7 +200,7 @@ test("A publisher that blocks the Sidebar settings frame opens only the requeste
 		settings: { autoOpenSidebar: true, updateCheck: false },
 		pages: { [article.url]: {
 			html: "<title>Article with strict CSP</title><article><p>The publisher applies a script policy.</p></article>",
-			headers: { "content-security-policy": `script-src 'sha256-${hash}'` },
+			headers: { "content-security-policy": `frame-src 'none'; script-src 'sha256-${hash}'` },
 		} },
 	});
 	try {
@@ -125,6 +209,11 @@ test("A publisher that blocks the Sidebar settings frame opens only the requeste
 		await page.goto(article.url);
 		await page.getByRole("button", { name: "Open Backchannel settings" }).click();
 		await page.getByRole("button", { name: "Filters", exact: true }).click();
+		const modal = page.getByRole("dialog", { name: "Settings" });
+		const list = modal.getByRole("listbox", { name: "Hidden links" });
+		await list.waitFor();
+		assert.equal(await list.getByRole("option").count(), 0);
+		assert(await modal.getByRole("button", { name: "Hide a link", exact: true }).isDisabled());
 		const [settings] = await Promise.all([
 			app.context.waitForEvent("page"),
 			page.getByRole("link", { name: "Open Filters settings", exact: true }).click(),

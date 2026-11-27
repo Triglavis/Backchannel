@@ -9,6 +9,19 @@ import { chromium } from 'playwright';
 import { launchApp, waitFor } from '../comment-capture/harness.mjs';
 import accountApp from '../../worker.js';
 
+test('the private Settings shell is frameable and restricts requests to Backchannel', async () => {
+  const url = 'https://backchnnl.app/sidebar-settings';
+  const page = await accountApp.fetch(new Request(url), {}, {});
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get('x-frame-options'), null);
+  assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'/);
+  assert.match(await page.text(), /<title>Backchannel&nbsp;Settings<\/title>/);
+  const head = await accountApp.fetch(new Request(url, { method: 'HEAD' }), {}, {});
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '');
+});
+
 const origin = 'http://localhost:3119';
 const fixtureVerifier = 'A'.repeat(43);
 const fixtureEnvelope = 'A'.repeat(80);
@@ -581,7 +594,7 @@ test('Reader Account POSTs reach the Worker with a same-origin browser request',
   await page.route(reader, route => route.fulfill({contentType:'text/html', body:'<!doctype html><title>Reader fixture</title>'}));
   await page.goto(reader);
   const source = await readFile(new URL('HNewhere.user.js', root), 'utf8');
-  const client = source.slice(source.indexOf('async function accountRequest('), source.indexOf('function accountPasskeysSupported('));
+  const client = source.slice(source.indexOf('let sidebarAccountSettingsActive = false;'), source.indexOf('function accountPasskeysSupported('));
   const incoming = page.waitForResponse(new URL('/account/login/options', local).href);
   const challenge = await page.evaluate(`(async () => {
     const START_PAGE_ORIGIN = location.origin;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.20
+// @version      1.6.20.1
 // @license      GPL-3.0-or-later
 // @copyright    2026 Triglavis LLC
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -79,11 +79,16 @@
 (function () {
 	"use strict";
 
+	const SIDEBAR_SETTINGS_FRAME = "backchannel-sidebar-settings";
+	const SIDEBAR_SETTINGS_URL = "https://backchnnl.app/sidebar-settings";
+	const SIDEBAR_SETTINGS_CONNECT = "backchannel-sidebar-settings-connect";
+	const isSidebarSettingsPage = location.origin + location.pathname === SIDEBAR_SETTINGS_URL;
+	const isSidebarSettingsFrame = isSidebarSettingsPage && window.name === SIDEBAR_SETTINGS_FRAME && window.top !== window.self;
 	const SIDEBAR_COMPOSER_FRAME = "backchannel-sidebar-composer";
 	const SIDEBAR_COMPOSER_URL = "https://topics.backchnnl.app/sidebar-composer";
 	const isSidebarComposerPage = location.origin + location.pathname === SIDEBAR_COMPOSER_URL;
 	const isSidebarComposerFrame = isSidebarComposerPage && window.name === SIDEBAR_COMPOSER_FRAME;
-	if (window.top !== window.self && window.name !== "backchannel-article" && !isSidebarComposerFrame) {
+	if (window.top !== window.self && window.name !== "backchannel-article" && !isSidebarComposerFrame && !isSidebarSettingsFrame) {
 		return;
 	}
 
@@ -12867,15 +12872,18 @@ button {
 				: 1;
 
 		if (panel) {
-			if (sidebarZoom === 1) {
-				panel.style.removeProperty("zoom");
-				panel.style.removeProperty("--viewport-zoom");
-			} else {
-				panel.style.setProperty("zoom", String(sidebarZoom));
-				panel.style.setProperty(
-					"--viewport-zoom",
-					viewportUnitsScaleWithZoom() ? String(sidebarZoom) : "1",
-				);
+			const settings = panel.getRootNode().getElementById("app-settings-modal");
+			const viewportZoom = sidebarZoom !== 1 && viewportUnitsScaleWithZoom() ? sidebarZoom : 1;
+
+			for (const surface of [panel, settings]) {
+				if (!surface) continue;
+				if (sidebarZoom === 1) {
+					surface.style.removeProperty("zoom");
+					surface.style.removeProperty("--viewport-zoom");
+				} else {
+					surface.style.setProperty("zoom", String(sidebarZoom));
+					surface.style.setProperty("--viewport-zoom", String(viewportZoom));
+				}
 			}
 		}
 
@@ -22782,6 +22790,7 @@ ${DISCUSSION_CHOICE_CSS}
 
 @media (pointer:coarse) {
 	#settings-topic-search { min-height:32px; font-size:16px; }
+	#settings-topic-search::placeholder { font-size:12px; }
 	.front-page-topic.settings-topic-chip { min-height:32px; }
 }
 
@@ -25306,9 +25315,9 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 		return `<div${group} data-sidebar-settings="${section}"></div>`;
 	}
 
-	function sidebarSettingsClient(connectKey, readyKey, options) {
+	function sidebarSettingsClient(connectKey, readyKey, options, origin = "", root = document, onConnect) {
 		window.addEventListener("message", function connect(event) {
-			if (!event.isTrusted || event.source !== parent || event.data !== connectKey || !event.ports.length) return;
+			if (!event.isTrusted || event.source !== parent || (origin && event.origin !== origin) || event.data !== connectKey || !event.ports.length) return;
 			window.removeEventListener("message", connect);
 			const port = event.ports[0];
 			const pending = new Map();
@@ -25318,8 +25327,9 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 				pending.set(id, { resolve, reject });
 				port.postMessage({ id, action, args });
 			});
-			const tabStops = () => [...document.querySelectorAll("button, input, [tabindex]")].filter((element) =>
-				!element.disabled && element.tabIndex >= 0 && element.getClientRects().length);
+			const tabStops = () => [...root.querySelectorAll("a[href], button, input, select, textarea, [tabindex], slot")].flatMap((element) =>
+				element.localName === "slot" ? element.assignedElements({ flatten: true }) : [element]).filter((element) =>
+				!element.disabled && element.tabIndex >= 0 && !element.closest("[inert]") && element.getClientRects().length);
 
 			port.onmessage = ({ data }) => {
 				if (typeof data.focusLast === "boolean") {
@@ -25329,6 +25339,7 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 				}
 				if (data.theme) {
 					paintSidebarFrameTheme(data.theme, options.darkClass);
+					root.host?.classList.toggle(options.darkClass, data.theme.dark);
 					return;
 				}
 				const reply = pending.get(data.id);
@@ -25337,9 +25348,10 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 				if (data.error) reply.reject(new Error(data.error));
 				else reply.resolve(data.result);
 			};
+			onConnect?.();
 			port.postMessage(readyKey);
 
-			const dialog = document.getElementById("bookmark-import");
+			const dialog = root.getElementById("bookmark-import");
 			const resize = () => port.postMessage({
 				height: Math.ceil(document.body.getBoundingClientRect().height),
 				modal: Boolean(dialog?.open),
@@ -25354,13 +25366,14 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 					port.postMessage({ close: true });
 				} else if (key.key === "Tab") {
 					const stops = tabStops();
-					if (document.activeElement === (key.shiftKey ? stops[0] : stops.at(-1))) {
+					if ((root.activeElement || document.activeElement) === (key.shiftKey ? stops[0] : stops.at(-1))) {
 						key.preventDefault();
 						port.postMessage({ tabBack: key.shiftKey });
 					}
 				}
 			});
 
+			if (options.section === "account") return;
 			if (options.section === "collection") {
 				wireBookmarkImport(document, { previewImport: call("previewImport"), importBookmarks: call("importBookmarks") });
 				wireCollectionDownloads(document, {
@@ -25385,28 +25398,77 @@ ${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 		});
 	}
 
-	function sidebarPrivateSettingsDocument(section, title, connectKey, readyKey) {
-		const collection = section === "collection";
+	const SIDEBAR_SETTINGS_TITLES = { account: "Account", collection: "Collection", filters: "Filters", sidebar: "Disabled sites" };
+
+	function sidebarSettingsMarkup(section, withDialog = true) {
+		if (section === "collection") return collectionSettingsHTML() + (withDialog ? bookmarkImportHTML() : "");
+		return section === "filters" ? filterSettingsHTML() : disabledSitesSettingsHTML();
+	}
+
+	function sidebarSettingsOptions(section) {
 		const filters = section === "filters";
-		const markup = collection ? collectionSettingsHTML() + bookmarkImportHTML() : filters ? filterSettingsHTML() : disabledSitesSettingsHTML();
-		const components = collection ? [pluralize, downloadFile, openBookmarkImport, wireBookmarkImport, wireCollectionDownloads]
-			: filters ? [topicFilterKey, topicDisplayName, wireSettingsTopicFilters, wireSettingsManageTable] : [wireSettingsManageTable];
 		const { empty, placeholder } = filters ? hiddenLinkSettings : disabledSiteSettings;
-		const options = { section, darkClass: DARK_CLASS, list: { empty, placeholder }, topics: filters ? settingsTopicFilterOptions() : null };
-		const theme = documentThemeCSS();
-		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>${title}</title><style>${theme}${CHROME_CSS}${BOOKMARK_DIALOG_CSS}
+		return { section, darkClass: DARK_CLASS, list: { empty, placeholder }, topics: filters ? settingsTopicFilterOptions() : null };
+	}
+
+	function sidebarSettingsFrameCSS() {
+		return `${documentThemeCSS()}${CHROME_CSS}${BOOKMARK_DIALOG_CSS}
 body { margin:0;color:var(--surface-text);font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 [hidden] { display:none !important; }
 main { display:flow-root; }
 .settings-group + .settings-group { margin-top:12px; }
-</style><body><main>${markup}</main>
+`;
+	}
+
+	function sidebarPrivateSettingsDocument(section, connectKey, readyKey) {
+		const components = section === "collection" ? [pluralize, downloadFile, openBookmarkImport, wireBookmarkImport, wireCollectionDownloads]
+			: section === "filters" ? [topicFilterKey, topicDisplayName, wireSettingsTopicFilters, wireSettingsManageTable] : [wireSettingsManageTable];
+		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>${SIDEBAR_SETTINGS_TITLES[section]}</title><style>${sidebarSettingsFrameCSS()}</style><body><main>${sidebarSettingsMarkup(section)}</main>
 <script>"use strict";
 ${paintSidebarFrameTheme.toString()}
 ${components.map((component) => component.toString()).join("\n")}
-(${sidebarSettingsClient.toString()})(${JSON.stringify(connectKey)},${JSON.stringify(readyKey)},${JSON.stringify(options)});
+(${sidebarSettingsClient.toString()})(${JSON.stringify(connectKey)},${JSON.stringify(readyKey)},${JSON.stringify(sidebarSettingsOptions(section))});
 </script></body></html>`;
+	}
+
+	async function runSidebarSettingsFrame() {
+		const nonce = /^#([a-f0-9]{32})$/.exec(location.hash)?.[1];
+		if (!nonce) return;
+		const staged = await readBridgePayload(nonce);
+		if (staged?.kind !== "sidebar-settings-frame" || staged.origin === location.origin || !Object.hasOwn(SIDEBAR_SETTINGS_TITLES, staged.section)) return;
+		await clearBridgePayload(nonce);
+		if (Date.now() - staged.ts > 60000) return;
+
+		await documentReady();
+		const { section } = staged;
+		const style = document.createElement("style");
+		style.textContent = sidebarSettingsFrameCSS();
+		document.head.append(style);
+		document.title = SIDEBAR_SETTINGS_TITLES[section];
+		let root = document;
+		let onConnect;
+		if (section === "account") {
+			const host = document.createElement("div");
+			document.body.append(host);
+			root = host.attachShadow({ mode: "open" });
+			root.innerHTML = `<style>${THEME_CSS}${CHROME_CSS}${SIDEBAR_SETTINGS_MODAL_CSS}
+#app-settings-content { display:flow-root; padding:0; overflow:visible; }
+[hidden] { display:none !important; }
+</style><main id="app-settings-content">${accountSettingsHTML()}</main>`;
+			adoptStyles(root);
+			onConnect = () => {
+				sidebarAccountSettingsActive = true;
+				const show = wireAccountSettings(root, wireDiagnosticSharing(root));
+				root.getElementById("settings-account-sync").dispatchEvent(new Event("account-settings-shown"));
+				show();
+			};
+		} else {
+			document.body.innerHTML = `<main>${sidebarSettingsMarkup(section)}</main>`;
+		}
+		sidebarSettingsClient(staged.connectKey, staged.readyKey, sidebarSettingsOptions(section), staged.origin, root, onConnect);
+		window.parent.postMessage(SIDEBAR_SETTINGS_CONNECT, staged.origin);
 	}
 
 	function wireSidebarPrivateSettings(shadow) {
@@ -25420,97 +25482,142 @@ ${components.map((component) => component.toString()).join("\n")}
 		return {
 			close,
 			focus(back) { focus?.(back); },
-			show(section, moveTab) {
+			show(section, moveTab, event) {
 				close();
+				if (section === "account" && !event?.isTrusted) return;
 				const slot = shadow.querySelector(`[data-sidebar-settings="${section}"]`);
 				if (!slot) return;
 
-				const title = { collection: "Collection", filters: "Filters", sidebar: "Disabled sites" }[section];
-				const connectKey = sidebarFrameKey();
-				const readyKey = sidebarFrameKey();
+				const title = SIDEBAR_SETTINGS_TITLES[section];
+				const origin = new URL(SIDEBAR_SETTINGS_URL).origin;
 				const host = document.createElement("div");
 				const root = host.attachShadow({ mode: "closed" });
-				const frame = document.createElement("iframe");
-				frame.title = title;
-				frame.name = "backchannel-sidebar-settings";
-				frame.style.cssText = "display:block;width:100%;height:0;border:0";
-				frame.setAttribute("sandbox", section === "collection" ? "allow-scripts allow-downloads" : "allow-scripts");
-				frame.srcdoc = sidebarPrivateSettingsDocument(section, title, connectKey, readyKey);
-				const loading = document.createElement("div");
-				loading.className = "settings-section-hint";
-				loading.setAttribute("role", "status");
-				loading.textContent = `Loading ${title.toLowerCase()}…`;
-				const timeout = window.setTimeout(() => {
-					close();
-					const fallback = document.createElement("a");
-					fallback.className = "settings-button";
-					fallback.href = settingsWindowURL(section);
-					fallback.target = "_blank";
-					fallback.rel = "noopener noreferrer";
-					fallback.textContent = section === "sidebar" ? "Manage disabled sites" : `Open ${title} settings`;
-					slot.append(fallback);
-				}, 2200);
-
+				const status = document.createElement("div");
+				status.className = "settings-section-hint";
+				status.setAttribute("role", "status");
+				status.textContent = `Loading ${title.toLowerCase()}…`;
 				let active = true;
+				let stopFrame;
 				const actions = section === "collection"
 					? { ...collectionImportActions(shadow, () => active && host.isConnected), notesCount: collectionNotesCount, bookmarkExportFile, notesExportFile }
-					: section === "filters" ? { ...hiddenLinkSettings, ...topicSettingsActions } : disabledSiteSettings;
-				const channel = new MessageChannel();
-				const port = channel.port1;
-				let ready = false;
-				const updateTheme = () => port.postMessage({ theme: sidebarFrameTheme(shadow) });
-				const observer = new MutationObserver(updateTheme);
-				channel.port1.onmessage = async ({ data }) => {
-					if (!active || !host.isConnected) return;
-					if (!ready) {
-						if (data !== readyKey) return;
-						ready = true;
+					: section === "filters" ? { ...hiddenLinkSettings, ...topicSettingsActions } : section === "sidebar" ? disabledSiteSettings : {};
+
+				const unavailable = () => {
+					if (!active) return;
+					status.textContent = `${title} couldn’t load on this page.`;
+					const empty = document.createElement("div");
+					if (section !== "account") empty.innerHTML = sidebarSettingsMarkup(section, false);
+					empty.querySelector("#settings-blocked-section")?.removeAttribute("id");
+					for (const control of empty.querySelectorAll("button, input, select, textarea")) control.disabled = true;
+					const link = document.createElement("a");
+					link.className = "settings-button";
+					link.href = settingsWindowURL(section);
+					link.target = "_blank";
+					link.rel = "noopener noreferrer";
+					link.textContent = section === "sidebar" ? "Open Sidebar settings" : `Open ${title} settings`;
+					slot.replaceChildren(status, empty, link);
+				};
+
+				const mount = (connectKey, readyKey, nonce = "") => {
+					const frame = document.createElement("iframe");
+					frame.name = SIDEBAR_SETTINGS_FRAME;
+					frame.title = title;
+					frame.style.cssText = "display:block;width:100%;height:0;border:0";
+					frame.referrerPolicy = "no-referrer";
+					frame.setAttribute("sandbox", "allow-scripts" + (nonce ? " allow-same-origin" : "") +
+						(section === "collection" ? " allow-downloads" : section === "account" ? " allow-forms allow-popups allow-popups-to-escape-sandbox" : ""));
+					if (nonce) frame.src = SIDEBAR_SETTINGS_URL + "#" + nonce;
+					else frame.srcdoc = sidebarPrivateSettingsDocument(section, connectKey, readyKey);
+
+					const events = new AbortController();
+					const channel = new MessageChannel();
+					const port = channel.port1;
+					let connected = false;
+					let ready = false;
+					const connect = () => {
+						if (connected || !active || !frame.contentWindow) return;
+						connected = true;
+						frame.contentWindow.postMessage(connectKey, nonce ? origin : "*", [channel.port2]);
+					};
+					if (nonce) {
+						window.addEventListener("message", (event) => {
+							if (event.isTrusted && event.source === frame.contentWindow && event.origin === origin && event.data === SIDEBAR_SETTINGS_CONNECT) connect();
+						}, { signal: events.signal });
+					} else {
+						frame.addEventListener("load", connect, { signal: events.signal, once: true });
+					}
+					const timeout = window.setTimeout(() => {
+						stopFrame();
+						if (nonce) unavailable();
+						else openHosted();
+					}, nonce ? 4000 : 1100);
+					const updateTheme = () => port.postMessage({ theme: sidebarFrameTheme(shadow) });
+					const observer = new MutationObserver(updateTheme);
+					stopFrame = () => {
 						window.clearTimeout(timeout);
-						loading.remove();
-						host.dataset.settingsFrame = "";
-						focus = (back) => {
-							frame.focus();
-							port.postMessage({ focusLast: back });
-						};
-						observer.observe(shadow.host, { attributeFilter: ["class", "style"] });
-						updateTheme();
-						return;
-					}
-					if (typeof data?.tabBack === "boolean") {
-						moveTab(host, data.tabBack);
-						return;
-					}
-					if (Number.isFinite(data?.height)) {
-						const minimum = data.modal ? Math.min(360, Math.max(260, innerHeight - 310)) : 1;
-						frame.style.height = Math.max(minimum, data.height) + "px";
-						if (data.modal) host.scrollIntoView({ block: "nearest" });
-						return;
-					}
-					if (data?.close) {
-						closeAppSettings();
-						return;
-					}
-					if (!Number.isInteger(data?.id) || !Array.isArray(data.args) || !Object.hasOwn(actions, data.action) || typeof actions[data.action] !== "function") return;
-					const { id, action, args } = data;
+						events.abort();
+						observer.disconnect();
+						port.close();
+						frame.remove();
+						if (nonce) clearBridgePayload(nonce).catch(console.error);
+					};
+					port.onmessage = async ({ data }) => {
+						if (!active || events.signal.aborted || !host.isConnected) return;
+						if (!ready) {
+							if (data !== readyKey) return;
+							ready = true;
+							window.clearTimeout(timeout);
+							status.remove();
+							host.dataset.settingsFrame = "";
+							focus = (back) => {
+								frame.focus();
+								port.postMessage({ focusLast: back });
+							};
+							observer.observe(shadow.host, { attributeFilter: ["class", "style"] });
+							updateTheme();
+							return;
+						}
+						if (typeof data?.tabBack === "boolean") moveTab(host, data.tabBack);
+						else if (Number.isFinite(data?.height)) {
+							const minimum = data.modal ? Math.min(360, Math.max(260, innerHeight - 310)) : 1;
+							frame.style.height = Math.max(minimum, data.height) + "px";
+							if (data.modal) host.scrollIntoView({ block: "nearest" });
+						} else if (data?.close) closeAppSettings();
+						else if (Number.isInteger(data?.id) && Array.isArray(data.args) && Object.hasOwn(actions, data.action) && typeof actions[data.action] === "function") {
+							const { id, action, args } = data;
+							try {
+								const result = await actions[action](...args);
+								if (active) port.postMessage({ id, result });
+							} catch (error) {
+								if (active) port.postMessage({ id, error: error.message || "Settings action failed" });
+							}
+						}
+					};
+					root.replaceChildren(frame);
+				};
+
+				const openHosted = async () => {
+					if (!active || location.origin === origin) return unavailable();
+					const nonce = sidebarFrameKey();
+					const connectKey = sidebarFrameKey();
+					const readyKey = sidebarFrameKey();
 					try {
-						const result = await actions[action](...args);
-						if (active) port.postMessage({ id, result });
+						await stageBridgePayload(nonce, { kind: "sidebar-settings-frame", section, origin: location.origin, connectKey, readyKey });
+						if (active) mount(connectKey, readyKey, nonce);
+						else await clearBridgePayload(nonce);
 					} catch (error) {
-						if (active) port.postMessage({ id, error: error.message || "Settings action failed" });
+						unavailable();
+						console.error(error);
 					}
 				};
-				frame.addEventListener("load", () => {
-					if (active) frame.contentWindow?.postMessage(connectKey, "*", [channel.port2]);
-				}, { once: true });
 				dispose = () => {
 					active = false;
-					window.clearTimeout(timeout);
-					observer.disconnect();
-					port.close();
+					stopFrame?.();
 					slot.replaceChildren();
 				};
-				root.append(frame);
-				slot.replaceChildren(loading, host);
+				slot.replaceChildren(status, host);
+				if (section === "account") openHosted();
+				else mount(sidebarFrameKey(), sidebarFrameKey());
 			},
 		};
 	}
@@ -26258,8 +26365,8 @@ ${components.map((component) => component.toString()).join("\n")}
 				setHideMenuOpen(false);
 				refreshNotesCount?.().catch(console.error);
 			},
-			show(section, moveTab) {
-				privateSettings.show(section, moveTab);
+			show(section, moveTab, event) {
+				privateSettings.show(section, moveTab, event);
 				if (section === "shortcuts") shortcutsPane.refresh().catch(console.error);
 				else shortcutsPane.close();
 				if (section === "sidebar") renderBlockedList().catch(console.error);
@@ -44019,8 +44126,14 @@ ${SETTINGS_MODAL_PHONE_CSS}
 		return accountPortableDocument(JSON.parse(await new Blob(chunks).text()));
 	}
 
+	let sidebarAccountSettingsActive = false;
+
+	function onAccountSettingsPage() {
+		return sidebarAccountSettingsActive || (onStartPage() && window.top === window.self);
+	}
+
 	async function accountRequest(path, { method = "GET", token, body, revision, syncProof, restoreRevision } = {}) {
-		if (!onStartPage() || window.top !== window.self) throw new Error("account-unavailable");
+		if (!onAccountSettingsPage()) throw new Error("account-unavailable");
 		const headers = {};
 		if (token) headers.Authorization = "Bearer " + token;
 		if (body) headers["Content-Type"] = "application/json";
@@ -44803,65 +44916,14 @@ ${accountBackButton("account-manage-back")}
 		return true;
 	}
 
-	function wireSidebarAccountSettings(shadow, panel) {
-		panel.innerHTML = `${accountProfileHTML()}
-<section class="account-section" id="account-sidebar-summary" hidden>
-<div class="account-setting-row">
-<div id="account-sidebar-sync" hidden>${accountSyncStatusHTML()}</div>
-<div><a id="account-sidebar-link" class="settings-button" href="${settingsWindowURL("account")}" target="_blank" rel="noopener noreferrer">Sign in to Backchannel</a></div>
-</div>
-</section>`;
-		const summary = panel.querySelector("#account-sidebar-summary");
-		const syncStatus = panel.querySelector("#account-sidebar-sync");
-		const link = panel.querySelector("#account-sidebar-link");
-		const last = panel.querySelector("#account-last-sync");
-		const time = last.querySelector("time");
-		const avatarElement = panel.querySelector("#account-profile-avatar");
-		const navStatus = shadow.getElementById("account-nav-status");
-		navStatus.textContent = "Backchannel\u00a0Account";
-		let request = 0;
-
-		const refresh = async () => {
-			const current = ++request;
-			const state = await load(ACCOUNT_SYNC_KEY, null);
-			const signedIn = hasAccountSyncSession(state) && state.expiresAt > Date.now();
-			const setupPending = signedIn && state.keyBackupPending;
-			const avatar = signedIn ? await load(ACCOUNT_AVATAR_PREFIX + state.account, null) : null;
-			if (current !== request) return;
-
-			navStatus.textContent = signedIn ? "Backchannel\u00a0Account" : "Sign in to Backchannel";
-			panel.querySelector("#account-email-value").textContent = signedIn ? "Signed in on this device" : ACCOUNT_SIGN_IN_HINT;
-			paintAccountAvatar(shadow.getElementById("account-nav-avatar"), avatar);
-			paintAccountAvatar(avatarElement, avatar);
-			syncStatus.hidden = !signedIn || setupPending;
-			last.querySelector("span").hidden = writeAccountTime(time, syncStatus.hidden ? null : state.lastSync);
-			link.textContent = setupPending ? "Finish setup" : signedIn ? "Manage account" : "Sign in to Backchannel";
-			summary.hidden = false;
-		};
-		const onFocus = () => {
-			if (shadow.host.isConnected) refresh().catch(console.error);
-		};
-		panel.addEventListener("account-section-hidden", () => {
-			request++;
-			window.removeEventListener("focus", onFocus);
-			summary.hidden = true;
-			writeAccountTime(time, null);
-			paintAccountAvatar(avatarElement, null);
-		});
-		return (event) => {
-			if (!event?.isTrusted) return;
-			window.addEventListener("focus", onFocus);
-			return refresh();
-		};
-	}
-
 	function wireAccountSettings(shadow, updateDiagnosticSharing) {
 		const panel = shadow.getElementById("settings-account-sync");
-		if (!onStartPage() || window.top !== window.self) {
-			return wireSidebarAccountSettings(shadow, panel);
-		}
+		if (!onAccountSettingsPage()) return () => {};
 
 		const find = (id) => shadow.getElementById("account-" + id);
+		const openPasskeySettings = (event) => {
+			if (event.isTrusted) window.open(settingsWindowURL("account"), "_blank", "noopener,noreferrer");
+		};
 		const stage = find("stage");
 		const manageStage = find("manage-stage");
 		const status = find("status");
@@ -45101,13 +45163,16 @@ ${accountBackButton("account-manage-back")}
 				else screen = passkey ? "passkey-" + passkey.mode : "code-screen";
 			}
 			else if (managing) screen = "manage-page";
-			const navigationName = signedIn && email ? email : "Account";
-			find("nav-title").textContent = navigationName;
-			find("nav-title").title = navigationName;
-			find("nav-status").textContent = signedIn ? "Backchannel\u00a0Account" : "Sign in to Backchannel";
 			const navTab = find("nav-tab");
-			if (signedIn && email) navTab.setAttribute("aria-describedby", "account-nav-title");
-			else navTab.removeAttribute("aria-describedby");
+			if (navTab) {
+				const navigationName = signedIn && email ? email : "Account";
+				find("nav-title").textContent = navigationName;
+				find("nav-title").title = navigationName;
+				find("nav-status").textContent = signedIn ? "Backchannel\u00a0Account" : "Sign in to Backchannel";
+				if (signedIn && email) navTab.setAttribute("aria-describedby", "account-nav-title");
+				else navTab.removeAttribute("aria-describedby");
+				paintAccountAvatar(find("nav-avatar"), signedIn ? avatar : null);
+			}
 			find("sign-in-actions").hidden = !available;
 			find("create-unavailable").hidden = !available || emailAvailable;
 			find("profile-name").textContent = signingUp ? "Create your account" : "Backchannel\u00a0Account";
@@ -45123,7 +45188,6 @@ ${accountBackButton("account-manage-back")}
 			find("actions").hidden = deleting;
 			find("delete-confirm").hidden = !deleting;
 			find("delete").setAttribute("aria-expanded", String(deleting));
-			paintAccountAvatar(find("nav-avatar"), signedIn ? avatar : null);
 			paintAccountAvatar(find("profile-avatar"), signup ? emailFlow.avatar : editingAvatar ? selectedAvatar : signedIn ? avatar : null);
 			for (const button of buttons) button.disabled = busy || !available;
 			entryEmail.disabled = busy || !available || !emailAvailable;
@@ -45264,7 +45328,7 @@ ${accountBackButton("account-manage-back")}
 		}
 
 		async function signalPasskeyEmail({ account, email }) {
-			if (!account || !email || typeof window.PublicKeyCredential?.signalCurrentUserDetails !== "function") return;
+			if (sidebarAccountSettingsActive || !account || !email || typeof window.PublicKeyCredential?.signalCurrentUserDetails !== "function") return;
 			if (lastPasskeyUpdate?.account === account && lastPasskeyUpdate.email === email) return;
 			const current = { account, email };
 			lastPasskeyUpdate = current;
@@ -45625,6 +45689,7 @@ ${accountBackButton("account-manage-back")}
 		find("entry").onsubmit = (event) => {
 			event.preventDefault();
 			if (!event.isTrusted || entryEmail.disabled || !validateEmailField(entryEmail, "entry")) return;
+			if (sidebarAccountSettingsActive) return openPasskeySettings(event);
 			openEmail("register", entryEmail.value.trim());
 			requestVerificationCode();
 		};
@@ -45655,7 +45720,10 @@ ${accountBackButton("account-manage-back")}
 		function updateEmail(event) {
 			if (event.isTrusted && emailFlow?.mode === "email" && !emailFlow.address && !emailInput.disabled &&
 				emailInput.value.trim() && validateEmailField(emailInput, "email") &&
-				!find("send-code").disabled) requestVerificationCode();
+				!find("send-code").disabled) {
+				if (sidebarAccountSettingsActive) openPasskeySettings(event);
+				else requestVerificationCode();
+			}
 		}
 		find("manage-email").onsubmit = (event) => {
 			event.preventDefault();
@@ -45736,7 +45804,7 @@ ${accountBackButton("account-manage-back")}
 			if (accountAction === "manage") {
 				openEmail("email");
 				void updateDiagnosticSharing();
-				if (emailAvailable) prepareEmailChangePasskey(state.token);
+				if (emailAvailable && !sidebarAccountSettingsActive) prepareEmailChangePasskey(state.token);
 			}
 			paint();
 			if (accountAction === "avatar") avatarInputs.find((input) => input.checked)?.focus({ preventScroll: true });
@@ -45962,7 +46030,7 @@ ${accountBackButton("account-manage-back")}
 			accountAvailabilityPending = busy;
 			if (busy) return;
 			return run(async () => {
-				if (!accountPasskeysSupported()) return "This browser doesn’t support account sync.";
+				if (!sidebarAccountSettingsActive && !accountPasskeysSupported()) return "This browser doesn’t support account sync.";
 				const capabilities = await accountRequest("/status").catch(() => null);
 				available = capabilities?.available === true;
 				emailAvailable = capabilities?.emailAvailable === true;
@@ -45976,6 +46044,16 @@ ${accountBackButton("account-manage-back")}
 				}
 				return "";
 			}, "", "availability");
+		}
+
+		if (sidebarAccountSettingsActive) {
+			find("login").onclick = openPasskeySettings;
+			find("delete").onclick = openPasskeySettings;
+			find("revoke-other-sessions").addEventListener("click", (event) => {
+				if (!deviceStepUp || !event.isTrusted) return;
+				event.stopImmediatePropagation();
+				openPasskeySettings(event);
+			}, true);
 		}
 
 		const canSyncEdits = () => !document.hidden && !busy && !conflict && !expired && !editTimer && accountAction !== "delete";
@@ -46010,13 +46088,14 @@ ${accountBackButton("account-manage-back")}
 	}
 
 	function settingsModalHTML({ privateContent = false } = {}) {
+		const privateAccount = onAccountSettingsPage();
 		return `
 <div id="app-settings-modal" class="app-settings-modal" hidden>
 <div class="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1">
 <div class="app-settings-top"><span id="app-settings-title" class="app-settings-title">Settings</span><span class="app-settings-top-spacer"></span><button id="app-settings-close" class="app-head-icon" type="button" aria-label="Close settings" title="Close">${APP_CLOSE_ICON}</button></div>
 <div class="app-settings-body">
 <nav class="app-settings-nav" aria-label="Settings sections">
-<button type="button" id="account-nav-tab" class="app-settings-tab app-account-tab" data-settings-section="account" aria-label="Account"><span id="account-nav-avatar" class="app-account-avatar account-default-avatar" aria-hidden="true"></span><span class="app-account-tab-text"><span id="account-nav-title" class="app-account-tab-title">Account</span><span id="account-nav-status" class="app-account-tab-subtitle">Sign in to Backchannel</span></span></button>
+<button type="button" id="account-nav-tab" class="app-settings-tab app-account-tab" data-settings-section="account" aria-label="Account"><span id="account-nav-avatar" class="app-account-avatar account-default-avatar" aria-hidden="true"></span><span class="app-account-tab-text"><span id="account-nav-title" class="app-account-tab-title">Account</span><span id="account-nav-status" class="app-account-tab-subtitle">${privateAccount ? "Sign in to Backchannel" : "Backchannel\u00a0Account"}</span></span></button>
 <button type="button" class="app-settings-tab" data-settings-section="general"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M2.5 5h6.6M12.9 5h.6M2.5 11h.6M6.9 11h6.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="11" cy="5" r="1.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5" cy="11" r="1.9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>General</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="collection"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M5 2.5h6a1 1 0 0 1 1 1v10L8 10.8l-4 2.7v-10a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Collection</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="appearance"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M8 2.2a5.8 5.8 0 1 0 0 11.6c.9 0 1.4-.6 1.4-1.3 0-.7-.5-1-.5-1.6 0-.7.6-1.2 1.3-1.2h1.4a2.2 2.2 0 0 0 2.2-2.2C13.8 4.5 11.2 2.2 8 2.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.2" cy="7.6" r=".95" fill="currentColor"/><circle cx="7.4" cy="5.1" r=".95" fill="currentColor"/><circle cx="10.5" cy="5.6" r=".95" fill="currentColor"/></svg><span>Appearance</span></button>
@@ -46027,7 +46106,7 @@ ${accountBackButton("account-manage-back")}
 <div class="settings-credits"><a href="${escapeHTML(REPO_URL)}/issues" target="_blank" rel="noopener noreferrer">Report an issue</a></div>
 </nav>
 <div id="app-settings-content" class="app-settings-content" tabindex="-1" role="group" aria-labelledby="app-settings-heading"><div id="app-settings-heading" class="app-settings-heading">General</div>
-${accountSettingsHTML()}
+${privateAccount ? accountSettingsHTML() : `<div id="settings-account-sync">${sidebarPrivateSettingsHTML("account")}</div>`}
 ${settingsPanelHTML(privateContent)}
 </div>
 </div>
@@ -47232,7 +47311,7 @@ ${readingListShareHTML()}
 			section = tab.dataset.settingsSection;
 			modal.dataset.section = section;
 			for (const group of groups) group.hidden = group.dataset.appSection !== section;
-			settingsControls.show(section, moveTab);
+			settingsControls.show(section, moveTab, event);
 			shadow.querySelector("#app-settings-heading").textContent = tab.dataset.settingsSection === "account" ? "Account" : tab.textContent.trim();
 
 			for (const each of tabs) {
@@ -60680,7 +60759,9 @@ ${frontPageChooserHTML()}
 		stopButtonSpinner(await createCollapsedButton(storyRefs));
 	}
 
-	if (window.top === window.self) {
+	if (isSidebarSettingsPage) {
+		if (isSidebarSettingsFrame) runSidebarSettingsFrame().catch(console.error);
+	} else if (window.top === window.self) {
 		if (isSidebarComposerPage) {
 			runSidebarComposerWindow().catch(console.error);
 		} else {

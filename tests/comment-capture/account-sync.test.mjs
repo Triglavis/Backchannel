@@ -1355,54 +1355,73 @@ test('a passkey timeout cannot appear on sign-in after the account session is re
   } finally { await app.browser.close(); }
 });
 
-test('Sidebar Account opens account controls on Backchannel’s origin without opening Reader', {timeout:15000}, async () => {
+test('Phone Sidebar Account uses the private Account settings in place', {timeout:15000}, async () => {
   const article = STORIES[0].url;
+  const shell = appURL + 'sidebar-settings';
   const lastSync = Date.now() - 60_000;
   const app = await launchApp({
-    topHosts:[new URL(article).hostname], sharedStore:true, settings:{autoOpenSidebar:true,updateCheck:false},
+    topHosts:[new URL(article).hostname], sharedStore:true, hasTouch:true, isMobile:true,
+    viewport:{width:393,height:852}, contentPages:[shell],
+    settings:{autoOpenSidebar:true,updateCheck:false},
     values:{[storage]:{...session,lastSync},['HNewhere:account_avatar:' + account]:{shape:'wide',color:'blue',background:'sky'}},
   });
   try {
-    const api = mockAccount(app, {email:'birb@example.com',capabilities:{emailAvailable:true}});
+    await app.context.route(shell, (route) => route.fulfill({
+      contentType:'text/html',headers:{'content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'"},
+      body:'<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
+    }));
+    const remote = {revision:0,ciphertext:null,email:'birb@example.com',capabilities:{emailAvailable:true}};
+    const api = mockAccount(app, remote);
     await api.start;
-    const panel = await settings(app, article);
-    const manage = panel.getByRole('link', {name:'Manage account',exact:true});
-    await manage.waitFor({timeout:2500});
-    assert.equal(await manage.getAttribute('href'), appURL + '#settings/account');
-    assert.equal(await manage.getAttribute('target'), '_blank');
+    const accountWrites = [];
+    await app.context.route(appURL + "account/**", async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET") accountWrites.push(await request.allHeaders());
+      await route.fallback();
+    });
+    await app.page.goto(article);
+    app.page.setDefaultTimeout(5000);
+    await app.page.getByRole("button", { name: "Open Backchannel settings" }).click();
+    const accountTab = app.page.getByRole("button", { name: "Account", exact: true });
+    await accountTab.evaluate((button) => button.click());
+    assert.equal(app.page.frames().some((frame) => frame.url().startsWith(shell)), false);
+    assert.deepEqual(api.requests, []);
+    await accountTab.click();
+    const accountFrame = () => app.page.frames().find((frame) => frame.url().startsWith(shell));
+    assert(await waitFor(accountFrame, 4500), 'Account is loaded inside Sidebar Settings');
+    const frame = accountFrame();
+    const panel = frame.locator('#settings-account-sync');
+    const sync = panel.getByRole('button', {name:'Sync now',exact:true});
+    await sync.waitFor();
     assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'), 'wide');
-    assert(await panel.getByText('Signed in on this device', {exact:true}).isVisible());
-    assert.equal(await panel.locator('#account-last-sync time').getAttribute('datetime'), new Date(lastSync).toISOString());
-    assert.equal(await panel.getByRole('button', {name:'Create passkey'}).count(),0);
-    const markup = await panel.innerHTML();
-    for (const privateValue of [session.token, session.account, session.recoveryKey, 'birb@example.com']) {
-      assert(!markup.includes(privateValue), 'private account fields stay out of the page');
+    assert(await panel.getByRole('button', {name:'Sign out',exact:true}).isVisible());
+    assert(await panel.getByRole('button', {name:'Delete account…',exact:true}).isVisible());
+    const beforeSync = api.requests.filter(path => path === '/account/snapshot').length;
+    await sync.click();
+    assert(await waitFor(() => api.requests.filter(path => path === '/account/snapshot').length > beforeSync));
+    await panel.getByRole('button', {name:'Manage account',exact:true}).click();
+    await panel.getByRole('heading', {name:'Privacy',exact:true}).waitFor();
+    assert.equal(await panel.locator('#account-email-input').getAttribute('placeholder'), 'birb@example.com');
+    assert.equal(await app.page.getByText('birb@example.com', { exact:true }).count(), 0);
+    assert.deepEqual(app.context.pages(), [app.page]);
+    assert.equal(app.page.url(), article);
+    assert.equal(await frame.locator('#app-rail').count(),0);
+    assert(accountWrites.length > 0, 'Account sends an authenticated same-origin write');
+    for (const headers of accountWrites) {
+      assert.equal(headers.origin, new URL(appURL).origin);
+      assert(!['same-site', 'cross-site'].includes(headers['sec-fetch-site']));
     }
-    assert.deepEqual(api.requests,[]);
-    const [accountWindow] = await Promise.all([app.context.waitForEvent('page'), manage.click()]);
-    accountWindow.setDefaultTimeout(6000);
-    const accountPanel = accountWindow.locator('#settings-account-sync');
-    await accountPanel.getByRole('button', {name:'Sync now',exact:true}).waitFor();
-    await accountPanel.getByRole('button', {name:'Manage account',exact:true}).click();
-    await accountPanel.getByText('birb@example.com', {exact:true}).first().waitFor();
-    assert.equal(await accountWindow.locator('#app-rail').count(),0);
-    assert.equal(new URL(accountWindow.url()).origin,new URL(appURL).origin);
-    await Promise.all([
-      accountWindow.waitForEvent('close', {timeout:6000}),
-      accountWindow.getByRole('button', {name:'Close settings'}).click().catch(error => {
-        if (!accountWindow.isClosed()) throw error;
-      }),
+    await panel.locator('#account-manage-back').click();
+    const [passkeyWindow] = await Promise.all([
+      app.context.waitForEvent('page'),
+      panel.getByRole('button', {name:'Delete account…',exact:true}).click(),
     ]);
-    assert.equal(app.page.url(),article);
-
-    app.store.delete(storage);
-    await app.page.locator('#app-settings-close').click();
-    await app.page.locator('#settings-toggle').click();
-    await app.page.getByRole('button', {name:'Account',exact:true}).click();
-    await panel.getByRole('link', {name:'Sign in to Backchannel'}).waitFor({timeout:2500});
-    assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'),null);
-    assert.equal(await panel.locator('#account-last-sync').isVisible(),false);
-    assert(!app.requests.some(({url})=>url.startsWith(appURL + 'account/')));
+    await passkeyWindow.waitForURL(appURL + '#settings/account');
+    assert.equal(await passkeyWindow.locator('#app-rail').count(),0);
+    assert.equal(await passkeyWindow.evaluate(() => Boolean(window.opener)), false);
+    assert(!api.requests.includes('/account/delete/options'), 'Account deletion still requires the user to confirm in Backchannel');
+    await passkeyWindow.close();
+    assert(await panel.isVisible());
     assert.deepEqual(app.errors,[]);
   } finally { await app.browser.close(); }
 });
