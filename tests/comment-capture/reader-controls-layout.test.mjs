@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {launchApp,STORIES,waitFor} from './harness.mjs';
+import { fillComposer, launchApp,STORIES,waitFor} from './harness.mjs';
 
 async function ready(app){
   await app.page.goto('https://backchnnl.app/');
@@ -31,7 +31,7 @@ test('wide Reader Front Pages toggle overlaps its panel and pane controls remain
   try{
     await ready(app);
     const actions = app.page.locator('#app-list > .app-pane-head .app-pane-actions');
-    await assertToolbarOrder(app.page, actions, ['#app-list-sync', '#app-mark-read', '.app-select-links']);
+    await assertToolbarOrder(app.page, actions, ['#app-list-sync', '#app-mark-read', '#app-unread-filter', '.app-select-links']);
     const edges=await app.page.locator('#app-reading').evaluate(reading=>{
       const root=reading.getRootNode(),list=root.querySelector('#app-list').getBoundingClientRect(),panel=root.querySelector('#panel').getBoundingClientRect();
       const b=id=>{const r=root.querySelector(id).getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,center:r.x+r.width/2}};
@@ -253,22 +253,22 @@ for(const width of [390])test(`${width}px Reader retains its bottom-right mobile
     await compose.waitFor();
     const header = app.page.locator('#panel > header');
     assert.equal(await header.getByRole('button', {name: 'Comment and note composer'}).count(), 1);
-    const field = app.page.locator('#app-discussion-compose textarea');
+    const field = app.page.locator('#app-discussion-compose .composer-text');
     assert.equal(await field.isVisible(), false);
     await compose.click();
     await field.waitFor();
     assert.equal(await compose.getAttribute('aria-expanded'), 'true');
     const metrics = await field.evaluate(node => ({
       input: parseFloat(getComputedStyle(node).fontSize),
-      placeholder: parseFloat(getComputedStyle(node, '::placeholder').fontSize),
+      placeholder: parseFloat(getComputedStyle(node, '::before').fontSize),
       padding: parseFloat(getComputedStyle(node).paddingBlockStart),
     }));
     assert(metrics.input >= 16 && metrics.placeholder < metrics.input && metrics.padding > 3);
-    await field.fill('Keep the draft between openings');
+    await fillComposer(field, 'Keep the draft between openings');
     await compose.click();
     assert.equal(await field.isVisible(), false);
     await compose.click();
-    assert.equal(await field.inputValue(), 'Keep the draft between openings');
+    assert.equal(await field.innerText(), 'Keep the draft between openings');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
 });

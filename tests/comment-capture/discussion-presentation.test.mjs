@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {launchApp, STORIES, NOW, waitFor} from './harness.mjs';
+import {articleFor, launchApp, STORIES, NOW, waitFor} from './harness.mjs';
 import {discussionFixture} from './fixtures.mjs';
 
 const url=STORIES[0].url;
@@ -10,7 +10,147 @@ async function settled(app){
   assert(await waitFor(async()=>await app.page.locator('#comments-content .comment[data-comment-id]').count()>0&&await app.page.locator('#comments-content .discussion-loading').count()===0&&await app.page.locator('.discussion-progress-strip:not([aria-hidden="true"])').count()===0,15000),'the discussion finishes rendering');
 }
 
-test('Reader removes its single-discussion banner when a second source arrives',{timeout:30000},async()=>{
+test('Sidebar aligns Sort and Sources on the right and uses the Reader Sources menu', {timeout:20000}, async(t)=>{
+  const app = await launchApp({topHosts:[new URL(url).hostname], sharedStore:true, settings:{sources:{hn:true},autoOpenSidebar:true,updateCheck:false}});
+  t.after(()=>app.browser.close());
+  const {page}=app;
+  await page.goto(url);
+  await settled(app);
+  const panel=page.locator('#panel');
+  const header=panel.locator(':scope > header');
+  const trigger=panel.getByRole('button',{name:'Sources',exact:true});
+  assert(await trigger.isVisible(),'even one discussion has a Sources button');
+  assert.equal(await header.locator('.wordmark-where').textContent(),'Discussion');
+  assert.equal(await page.locator('#comments-content .submission-details, #comments-content .page-header-title').count(),0);
+  const [sort, sources, bounds]=await Promise.all([panel.locator('#comment-sort').boundingBox(),trigger.boundingBox(),panel.boundingBox()]);
+  assert(Math.abs(sort.y+sort.height/2-sources.y-sources.height/2)<2,'Sort and Sources share a row');
+  assert(sources.x>=sort.x+sort.width && bounds.x+bounds.width-sources.x-sources.width<16,'Sources follows Sort at the right edge');
+  await trigger.press('Enter');
+  const menu=panel.locator('#source-menu');
+  assert.equal(await menu.locator('.app-discussion-summary').textContent(),'30 comments');
+  assert.equal(await menu.locator('.app-sources-sync').count(),1);
+  assert.equal(await menu.locator('+ .app-drop-arrow').count(),1);
+  const source=menu.getByRole('link',{name:STORIES[0].title,exact:false});
+  assert(await source.isVisible());
+  assert.equal(await source.getAttribute('href'),'https://news.ycombinator.com/item?id=9001');
+  assert.equal(await menu.locator('[data-discussion-key="hn:9001"] .choice-label').textContent(),'Hacker\u00a0News');
+  await page.keyboard.press('Escape');
+  assert(await source.isHidden());
+  assert(await trigger.evaluate(button=>button.matches(':focus')));
+  await trigger.click();
+  await header.locator('#browse-toggle .wordmark-root').click();
+  await page.locator('#panel.browsing').waitFor();
+  assert(await trigger.isHidden());
+  assert(await source.isHidden());
+  assert.deepEqual(app.errors,[]);
+});
+
+test('a narrow phone Sidebar keeps Sources compact and clips the wordmark within the header', {timeout:20000}, async(t)=>{
+  const fixture=discussionFixture(url,{rootCount:2,replyRoots:0});
+  fixture.posts.splice(2);
+  const article=articleFor(url);
+  const app=await launchApp({
+    topHosts:[new URL(url).hostname],sharedStore:true,handler:'Tampermonkey',
+    hasTouch:true,isMobile:true,viewport:{width:393,height:852},
+    settings:{sources:{hn:true,reddit:true},autoOpenSidebar:true,updateCheck:false},
+    values:redditValues,responses:fixture.responses,
+    pages:{[url]:{...article,html:article.html.replace('<head>','<head><meta name="viewport" content="width=device-width, initial-scale=1">')}},
+  });
+  t.after(()=>app.browser.close());
+  const {page}=app;
+  await page.goto(url);
+  await page.locator('#comments-content [data-comment-id="reddit:root1"]').waitFor();
+  await settled(app);
+
+  const handle=await page.locator('#resize-handle').boundingBox();
+  const x=handle.x+handle.width/2;
+  const y=handle.y+72;
+  await page.mouse.move(x,y);
+  await page.mouse.down();
+  await page.mouse.move(x+200,y);
+  await page.mouse.up();
+  const wordmark=page.locator('#panel > header .wordmark-root');
+  assert(await wordmark.evaluate(node=>{
+    const button=node.closest('button');
+    return node.scrollWidth>node.clientWidth &&
+      getComputedStyle(node).textOverflow==='ellipsis' &&
+      node.getBoundingClientRect().right<=button.getBoundingClientRect().right;
+  }),'Backchannel ellipsizes inside its button at the minimum Sidebar width');
+
+  await page.getByRole('button',{name:'Sources',exact:true}).tap();
+  const menu=page.locator('#source-menu');
+  const group=menu.getByRole('button',{name:/Reddit discussions/});
+  assert((await group.boundingBox()).height<=30,'the source group fits a compact row');
+  assert(await menu.evaluate(node=>{
+    const {left,right}=node.getBoundingClientRect();
+    const panel=node.closest('#panel').getBoundingClientRect();
+    return left>=panel.left-1 && right<=panel.right+1;
+  }),'the menu fits within the resized Sidebar');
+  const first=menu.getByRole('checkbox',{name:'r/community0',exact:true});
+  assert(await first.isVisible());
+  await group.tap();
+  assert(await first.isHidden());
+  await group.tap();
+  await first.uncheck();
+  assert(await menu.isVisible());
+  await page.keyboard.press('Escape');
+  await wordmark.tap();
+  await page.locator('#panel.browsing').waitFor();
+  await wordmark.tap();
+  await page.locator('#sidebar-discussion-tools').waitFor();
+  assert.deepEqual(app.errors,[]);
+});
+
+test('Sidebar header saves and removes the current page from Collection', {timeout:20000}, async(t)=>{
+  const app=await launchApp({topHosts:[new URL(url).hostname],sharedStore:true,settings:{sources:{hn:true},autoOpenSidebar:true,updateCheck:false}});
+  t.after(()=>app.browser.close());
+  await app.page.goto(url);
+  await settled(app);
+  const save=app.page.locator('#panel > header').getByRole('button',{name:'Save to Collection',exact:true});
+  assert(await save.isVisible());
+  assert.equal(await save.getAttribute('aria-pressed'),'false');
+  await save.click();
+  assert(await waitFor(()=>app.store.get('HNewhere:favorites')?.some(entry=>entry.url===url)));
+  const remove=app.page.locator('#panel > header').getByRole('button',{name:'Remove from Collection',exact:true});
+  assert.equal(await remove.getAttribute('aria-pressed'),'true');
+  await remove.click();
+  assert(await waitFor(()=>app.store.get('HNewhere:favorites')?.length===0));
+  assert.equal(await save.getAttribute('aria-pressed'),'false');
+});
+
+for(const surface of ['Reader','Sidebar'])test(`${surface} names the selected discussions in the comment eyebrow style`,{timeout:20000},async(t)=>{
+  const sidebar=surface==='Sidebar';
+  const fixture=discussionFixture(url,{rootCount:2,replyRoots:0});
+  fixture.posts.splice(3);
+  const app=await launchApp({
+    topHosts:[new URL(url).hostname],sharedStore:true,handler:'Tampermonkey',
+    settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',autoOpenSidebar:sidebar,updateCheck:false},
+    values:redditValues,responses:fixture.responses,
+  });
+  t.after(()=>app.browser.close());
+  const {page}=app;
+  await page.goto(sidebar?url:'https://backchnnl.app/');
+  if(!sidebar)await page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
+  await page.locator('#comments-content .comment[data-comment-id="reddit:aux2x0"]').waitFor();
+  await settled(app);
+  await page.locator(`${sidebar?'#sidebar-discussion-meta':'#app-discussion-meta'} .page-header-disclosure`).click();
+  await page.locator('#source-menu [data-discussion-key="hn:9001"] input').uncheck();
+  const byline=page.locator('#filter-banner .app-discussion-byline');
+  assert.equal(await byline.textContent(),'Only showing 3 discussions: r/community0, r/community1, & r/community2');
+  const links=byline.getByRole('link');
+  assert.equal(await links.count(),3);
+  assert.equal(await links.first().getAttribute('href'),'https://www.reddit.com'+fixture.posts[0].permalink);
+  const style=node=>node.evaluate(element=>{
+    const {fontFamily,fontSize,fontWeight,color}=getComputedStyle(element);
+    return {fontFamily,fontSize,fontWeight,color};
+  });
+  const eyebrow=page.locator('#comments-content .comment-attribution .comment-source').first();
+  assert.deepEqual(await style(links.first()),await style(eyebrow));
+  assert.equal(await links.first().evaluate(link=>getComputedStyle(link).textDecorationStyle),'dotted');
+  assert.deepEqual(app.errors,[]);
+});
+
+test('Reader keeps the unfiltered byline hidden as sources arrive',{timeout:30000},async()=>{
   const fixture=discussionFixture(url,{rootCount:2,replyRoots:0});
   const app=await launchApp({sharedStore:true,handler:'Tampermonkey',settings:{sources:{hn:true,reddit:true},frontPageMode:'sources',updateCheck:false},values:redditValues,responses:fixture.responses});
   try{
@@ -26,29 +166,28 @@ test('Reader removes its single-discussion banner when a second source arrives',
     });
     await app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
     await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor();
-    assert(await waitFor(async()=>await app.page.locator('#filter-banner.app-pinned:not(.hidden)').count()===1,5000),'the first source initially has its single-discussion banner');
     const byline = app.page.locator('#filter-banner');
-    const hn = byline.getByRole('link',{name:'Hacker News',exact:true});
-    assert(await hn.isVisible(),'the single discussion starts with its source link');
-    assert.match(await byline.innerText(),/Hacker News.*30 comments/s);
-    assert.equal(await byline.getByRole('button').count(),0,'the byline offers a close icon only when a filter is active');
+    assert(await byline.isHidden(),'the unfiltered single discussion starts with comments');
     await app.page.locator('#app-discussion-meta .page-header-disclosure').click();
     assert.equal(await app.page.locator('#app-discussion-meta .source-menu').isVisible(),true);
-    const hnDiscussions = app.page.getByRole('button',{name:/Hacker News discussions/i});
-    assert.equal(await hnDiscussions.count(),1,'the source has a disclosure independent of its checkbox');
+    const menu = app.page.locator('#app-discussion-meta .source-menu');
+    assert.equal(await menu.getByRole('link',{name:STORIES[0].title,exact:true}).getAttribute('href'),'https://news.ycombinator.com/item?id=9001');
+    assert.equal(await menu.locator('.app-discussion-summary').textContent(),'30 comments');
+    const hnDiscussions = menu.locator('[data-discussion-key="hn:9001"] input');
+    assert(await hnDiscussions.isVisible(),'the Hacker News filter is visible directly in Sources');
+    assert.equal(await menu.getByRole('button',{name:/Hacker\sNews discussions/i}).count(),0);
     await hnDiscussions.focus();
     await app.page.waitForFunction(()=>window.__releaseRedditDiscovery);
     await app.page.evaluate(()=>window.__releaseRedditDiscovery());
     await app.page.locator('#comments-content .comment[data-comment-id="reddit:root0"]').waitFor();
     await settled(app);
-    assert.equal(await app.page.locator('#app-discussion-meta [data-select-all] input').isChecked(),true,'All sources is selected when the stale pinned banner appears');
+    assert.equal(await app.page.locator('#app-discussion-meta [data-select-all] input').isChecked(),true,'newly discovered sources are included');
     assert(await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]:not(.comment-filter-hidden)').count()>0);
     assert.equal(await app.page.locator('#filter-banner:not(.hidden)').count(),0,'an unfiltered discussion with multiple sources has no focus banner');
     assert(await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').count()>0);
     assert.equal(await app.page.locator('#app-discussion-meta .source-menu').isVisible(),true,'the open Sources menu stays open when the discussion choices update');
-    assert.equal(await hnDiscussions.getAttribute('aria-expanded'),'true','an expanded platform stays open as the source list grows');
-    assert(await hnDiscussions.evaluate(button=>button.matches(':focus')),'keyboard focus stays on the source disclosure during discovery');
-    const menu = app.page.locator('#app-discussion-meta .source-menu');
+    assert(await hnDiscussions.isChecked(),'the selected source remains checked as the source list grows');
+    assert(await hnDiscussions.evaluate(input=>input.matches(':focus')),'keyboard focus stays on the source checkbox during discovery');
     const all = menu.getByRole('checkbox', {name:'All sources',exact:true});
     await all.uncheck();
     const empty = app.page.locator('#comments-content .app-discussion-empty').getByText('No discussions selected.', {exact:true});
@@ -96,7 +235,7 @@ test('Reader removes its single-discussion banner when a second source arrives',
   }finally{await app.browser.close()}
 });
 
-test('the phone Reader discussion byline opens the original discussion in a new tab',{timeout:20000},async()=>{
+test('the phone Reader opens a single discussion from Sources',{timeout:20000},async()=>{
   const app=await launchApp({
     sharedStore:true, hasTouch:true, viewport:{width:390,height:844},
     settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false},
@@ -109,21 +248,11 @@ test('the phone Reader discussion byline opens the original discussion in a new 
     await page.locator('#app[data-stage="article"]:not([data-moving])').waitFor();
     await page.locator('#app-bar-discussion').click();
     await settled(app);
-    const source=page.locator('#filter-banner').getByRole('link',{name:'Hacker News',exact:true});
+    assert(await page.locator('#filter-banner').isHidden());
+    await page.locator('#app-discussion-meta .page-header-disclosure').click();
+    const source=page.locator('#source-menu').getByRole('link',{name:STORIES[0].title,exact:true});
     const permalink='https://news.ycombinator.com/item?id='+STORIES[0].id;
-    assert(await source.isVisible(),'single-source attribution is available in the phone Discussion panel');
-    const [titleBox, sourceBox] = await Promise.all([
-      page.locator('#panel .header-static-title').boundingBox(), source.boundingBox(),
-    ]);
-    assert(Math.abs(sourceBox.x - titleBox.x) < 1,'the single-source byline aligns with the Discussion title');
-    const divider = await page.locator('#filter-banner').evaluate(banner => {
-      const comments = banner.closest('#comments');
-      const start = comments.getBoundingClientRect().left + comments.clientLeft;
-      const {left, right} = banner.getBoundingClientRect();
-      return {left: left - start, right: start + comments.clientWidth - right, border: getComputedStyle(banner).borderBottomWidth};
-    });
-    assert.equal(divider.border,'1px','the byline has a horizontal divider');
-    assert(Math.abs(divider.left) < 1 && Math.abs(divider.right) < 1,'the byline divider spans the Discussion pane');
+    assert(await source.isVisible());
     assert.equal(await source.getAttribute('href'),permalink);
     assert.equal(await source.getAttribute('target'),'_blank');
     const [tab]=await Promise.all([app.context.waitForEvent('page',{timeout:5000}),source.click()]);
@@ -136,7 +265,7 @@ test('the phone Reader discussion byline opens the original discussion in a new 
 });
 
 for (const sidebar of [true, false]) {
-  test(`the ${sidebar ? 'Sidebar keeps the title above the focused byline' : 'phone Reader gives the focused quote room above its divider'}`, {timeout:20000}, async(t)=>{
+  test(`the ${sidebar ? 'Sidebar keeps the focused byline above the comments' : 'phone Reader gives the focused quote room above its divider'}`, {timeout:20000}, async(t)=>{
     const app = await launchApp({
       topHosts: [new URL(url).hostname],
       ...(sidebar ? {} : {hasTouch: true, viewport: {width: 390, height: 844}}),
@@ -169,14 +298,12 @@ for (const sidebar of [true, false]) {
       const comments = node.closest('#comments');
       const {left, right, top, bottom} = node.getBoundingClientRect();
       const frame = comments.getBoundingClientRect();
-      const details = comments.querySelector('.submission-details').getBoundingClientRect();
       const list = comments.querySelector('.top-level-comments').getBoundingClientRect();
       const quote = node.querySelector('.filter-banner-quote').getBoundingClientRect();
       return {
         start: left-frame.left-comments.clientLeft,
         end: frame.left+comments.clientLeft+comments.clientWidth-right,
         top: top-frame.top+comments.scrollTop,
-        afterDetails: top >= details.bottom - 1,
         beforeComments: bottom <= list.top + 1,
         quoteGap: bottom - quote.bottom - parseFloat(getComputedStyle(node).borderBottomWidth),
         border: getComputedStyle(node).borderBottomWidth,
@@ -185,20 +312,21 @@ for (const sidebar of [true, false]) {
     assert.equal(layout.border, '1px');
     assert(Math.abs(layout.start)<1 && Math.abs(layout.end)<1, 'the divider spans the discussion pane');
     if (sidebar) {
-      assert(layout.afterDetails && layout.beforeComments, 'the byline sits between the discussion details and the comments');
-      assert(await waitFor(()=>page.locator('#comments').evaluate(node=>node.scrollTop <= 1)), 'focusing a lower comment reveals the title above the byline');
+      assert.equal(await page.locator('#comments-content .submission-details').count(),0);
+      assert(layout.beforeComments, 'the byline sits above the focused discussion');
+      assert(await waitFor(()=>page.locator('#comments').evaluate(node=>node.scrollTop <= 1)), 'focusing a lower comment reveals the byline');
     } else {
       assert(Math.abs(layout.top-12)<1, 'the byline uses the same top inset even when the story details are visible');
       assert(layout.quoteGap >= 12, 'the quote has bottom padding before the horizontal rule');
     }
     await close.click();
-    await close.waitFor({state: 'hidden'});
+    await banner.waitFor({state: 'hidden'});
     assert(await focus.isVisible());
     assert.deepEqual(app.errors, []);
   });
 }
 
-test('an open Reader source group keeps keyboard focus when the first comments finish loading', {timeout:25000}, async(t)=>{
+test('an open Reader Sources menu keeps keyboard focus when the first comments finish loading', {timeout:25000}, async(t)=>{
   const app = await launchApp({sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   t.after(()=>app.browser.close());
   const {page} = app;
@@ -217,13 +345,13 @@ test('an open Reader source group keeps keyboard focus when the first comments f
   const trigger = page.locator('#app-discussion-meta .page-header-disclosure');
   await trigger.press('Enter');
   const menu = page.getByRole('group',{name:'Filter discussions by source'});
-  const toggle = menu.getByRole('button',{name:/Hacker News discussions/i});
-  await toggle.press('Space');
+  const choice = menu.locator('[data-discussion-key="hn:9001"] input');
+  await choice.focus();
   await page.evaluate(()=>window.__releaseSourceThread());
   await settled(app);
   assert(await menu.isVisible(),'loading the first comments keeps the Source menu open');
-  assert.equal(await toggle.getAttribute('aria-expanded'),'false');
-  assert(await toggle.evaluate(button=>button.matches(':focus')));
+  assert(await choice.isChecked());
+  assert(await choice.evaluate(input=>input.matches(':focus')));
   assert.deepEqual(app.errors,[]);
 });
 
@@ -277,7 +405,11 @@ for(const pendingFocus of [false,true])test(`Reader clears ${pendingFocus?'a pen
     await app.page.goto('https://backchnnl.app/');
     await app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
     await settled(app);
-    assert.equal(await app.page.locator('#filter-banner:not(.hidden)').count(),1);
+    const focus=app.page.locator('#comments-content .focus-link').first();
+    if (!pendingFocus) {
+      await focus.click();
+      await app.page.locator('#filter-banner').getByText('Focused comment',{exact:true}).waitFor();
+    }
     await app.page.evaluate(()=>{
       const request=window.__gmXHR;
       window.__gmXHR=async options=>{
@@ -286,7 +418,7 @@ for(const pendingFocus of [false,true])test(`Reader clears ${pendingFocus?'a pen
       };
     });
     if(pendingFocus){
-      await app.page.locator('#comments-content .focus-link').first().evaluate((element,title)=>{
+      await focus.evaluate((element,title)=>{
         element.click();
         [...element.getRootNode().querySelectorAll('#app-list-body .browse-title-link')].find(link=>link.textContent.trim()===title).click();
       },STORIES[1].title);
@@ -306,6 +438,8 @@ for(const pendingFocus of [false,true])test(`Reader clears ${pendingFocus?'a pen
 
 for(const mode of ['Sidebar','Reader'])test(`${mode} Sources shows a single reported count without partial-refresh diagnostics`,{timeout:30000},async()=>{
   const fixture=discussionFixture(url,{rootCount:2,replyRoots:0});
+  const title='A long source post title with enough detail to wrap across several lines in the menu. '.repeat(4).trim();
+  fixture.posts[0].title=title;
   const tree=fixture.responses.find(response=>response.match('https://fixture/api/comments/tree?link_id=t3_fixture0'));
   const sidebar=mode==='Sidebar';
   const app=await launchApp({...(sidebar?{appHost:new URL(url).hostname}:{}),sharedStore:true,handler:'Tampermonkey',settings:{sources:{hn:!sidebar,reddit:true},autoOpenSidebar:sidebar,frontPageMode:'sources',updateCheck:false},values:redditValues,responses:fixture.responses});
@@ -314,12 +448,20 @@ for(const mode of ['Sidebar','Reader'])test(`${mode} Sources shows a single repo
     if(!sidebar)await app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first().click();
     await app.page.locator('#comments-content .comment[data-comment-id="reddit:root0"]').waitFor();
     await settled(app);
-    const disclosure=app.page.locator(sidebar?'#comments-content .page-header-disclosure':'#app-discussion-meta .page-header-disclosure');
+    const disclosure=app.page.locator(sidebar?'#sidebar-discussion-meta .page-header-disclosure':'#app-discussion-meta .page-header-disclosure');
     await disclosure.click();
-    const menu=app.page.locator(sidebar?'#comments-content .source-menu':'#app-discussion-meta .source-menu');
+    const menu=app.page.locator('#source-menu');
     await menu.getByRole('button',{name:/Reddit discussions/i}).click();
     const entry=menu.locator('.source-menu-entry').filter({has:app.page.locator('[data-discussion-key="reddit:fixture0"]')});
-    assert.equal((await entry.locator('.source-menu-hint').innerText()).trim(),'2156 comments','only the source comment total is presented');
+    assert.match(await menu.locator('.app-discussion-summary').textContent(),/^\d+ comments across \d+ discussions$/);
+    assert.equal(await app.page.locator('#comments-content .page-header-meta').count(),0);
+    const link=entry.locator('.discussion-thread-link');
+    assert.equal(await link.textContent(),title);
+    const size=await link.evaluate(element=>({height:element.getBoundingClientRect().height,line:parseFloat(getComputedStyle(element).lineHeight),clamp:getComputedStyle(element).webkitLineClamp}));
+    assert.equal(size.clamp,'2');
+    assert(Math.abs(size.height-2*size.line)<1,'long titles are clipped to two lines');
+    assert.equal(await entry.locator('.source-menu-row .source-menu-count').textContent(),'2156','the count is on the same row as the community');
+    assert.doesNotMatch(await entry.innerText(),/\b2156 comments\b/);
     assert.equal(await menu.locator('.discussion-source-status').count(),0,'partial load diagnostics are not displayed');
     await disclosure.click();
     tree.json={data:fixture.trees.get('fixture0').slice(0,1)};
@@ -351,13 +493,15 @@ for(const commentsAvailable of [false,true])test(`Sources ${commentsAvailable?'k
     assert.equal(await entry.count(),commentsAvailable?1:0,'only a discussion that can contribute comments is selectable');
     if(commentsAvailable){
       assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="lemmy:72"]').count(),1);
-      assert.equal((await entry.locator('.source-menu-hint').innerText()).trim(),'1 comment');
+      assert.equal((await entry.locator('.source-menu-hint').innerText()).trim(),'A matching article');
+      assert.equal(await entry.locator('.source-menu-count').textContent(),'1');
       await app.page.locator('#app-discussion-meta [data-select-all] input').uncheck();
       await entry.locator('input').check();
       assert(await waitFor(async()=>await app.page.locator('#filter-banner:not(.hidden)').count()===1,3000));
-      assert.match(await app.page.locator('#filter-banner .app-discussion-byline').textContent(),/\b1 comment\b/,'focusing the source uses the same meaningful comment count');
+      assert.match(await app.page.locator('#filter-banner .app-discussion-byline').textContent(),/^Only showing 1 discussion: /);
     }else{
-      const source = app.page.locator('#filter-banner').getByRole('link',{name:'Hacker News',exact:true});
+      assert(await app.page.locator('#filter-banner').isHidden());
+      const source = app.page.locator('#source-menu').getByRole('link',{name:STORIES[0].title,exact:true});
       assert.equal(await source.isVisible(),true,'the single remaining discussion can still be opened at its source');
       assert.equal(await source.getAttribute('href'),'https://news.ycombinator.com/item?id=9001');
     }
@@ -366,7 +510,7 @@ for(const commentsAvailable of [false,true])test(`Sources ${commentsAvailable?'k
   }finally{await app.browser.close()}
 });
 
-test('Sidebar shows the remaining discussion details when an empty source is omitted',{timeout:20000},async()=>{
+test('Sidebar shows comments and the Sources link when an empty source is omitted',{timeout:20000},async()=>{
   const post={post:{id:71,name:'An empty match',url,published:new Date().toISOString()},creator:{name:'reader'},community:{name:'empty'},counts:{comments:0}};
   const app=await launchApp({appHost:new URL(url).hostname,sharedStore:true,settings:{sources:{hn:true,lemmy:true},autoOpenSidebar:true,updateCheck:false},responses:[
     {match:path=>path.includes('lemmy.world/api/v3/search'),json:{posts:[post]}},
@@ -375,9 +519,13 @@ test('Sidebar shows the remaining discussion details when an empty source is omi
   try{
     await app.page.goto(url);
     await settled(app);
-    const details=app.page.locator('#comments-content .submission-detail[data-discussion-key="hn:9001"]');
-    assert(await waitFor(()=>details.isVisible()),'the source post details stay visible without an extra filter selection');
-    assert.equal(await app.page.locator('#comments-content .source-menu [data-discussion-key="lemmy:71"]').count(),0);
+    assert.equal(await app.page.locator('#comments-content .submission-details').count(),0);
+    assert(await app.page.locator('#comments-content .comment[data-story-id="9001"]').first().isVisible());
+    await app.page.getByRole('button',{name:'Sources',exact:true}).click();
+    const source=app.page.locator('#source-menu').getByRole('link',{name:STORIES[0].title,exact:true});
+    assert(await source.isVisible());
+    assert.equal(await source.getAttribute('href'),'https://news.ycombinator.com/item?id=9001');
+    assert.equal(await app.page.locator('#source-menu [data-discussion-key="lemmy:71"]').count(),0);
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
 });

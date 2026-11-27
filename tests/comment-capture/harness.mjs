@@ -231,7 +231,7 @@ function answer({ url, responseType = "" }, stories = STORIES, votable = {}, liv
 	return { status: 404, finalUrl: url, responseHeaders: "", text: "" };
 }
 
-function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts = [], shared = false, version = "check", handler = undefined, injectDelay = 0, tabs = false }) {
+function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts = [], shared = false, version = "check", handler = undefined, injectDelay = 0, tabs = false, contentPages = [] }, runInContent) {
 	const inFrame = window.top !== window.self;
 
 	if (!/^https?:$/.test(location.protocol)) {
@@ -304,6 +304,10 @@ function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts =
 	};
 
 	const run = () => {
+		if (contentPages.includes(location.origin + location.pathname)) {
+			runInContent();
+			return;
+		}
 		const script = document.createElement("script");
 
 		script.textContent = window.__bcSource;
@@ -327,6 +331,7 @@ export async function launchApp({
 	settings = {},
 	values = {},
 	hasTouch = false,
+	isMobile = false,
 	timezoneId = undefined,
 	engine = process.env.ENGINE || "chromium",
 	resubmissions = Number(process.env.BC_RESUBMISSIONS || 0),
@@ -346,6 +351,7 @@ export async function launchApp({
 	appHeaders = {},
 	launchOptions = {},
 	injectDelay = 0,
+	contentPages = [],
 	slowGets = { key: "", ms: 0, armed: false },
 	slowSets = { prefix: "", ms: 0, armed: false },
 } = {}) {
@@ -353,7 +359,8 @@ export async function launchApp({
 
 	source = source ?? (await readFile(process.env.BC_SCRIPT || join(ROOT, "HNewhere.user.js"), "utf8"));
 	const browser = await ({ chromium, firefox, webkit }[engine] || chromium).launch(launchOptions);
-	const context = await browser.newContext({ viewport, colorScheme, hasTouch, deviceScaleFactor: scale, ...(timezoneId ? { timezoneId } : {}) });
+	const context = await browser.newContext({ viewport, colorScheme, hasTouch, deviceScaleFactor: scale,
+		...(isMobile && engine !== "firefox" ? { isMobile } : {}), ...(timezoneId ? { timezoneId } : {}) });
 	await context.route("**/*", (route) => route.abort("blockedbyclient"));
 	if (tabs) {
 		const managerTabs = new Map();
@@ -466,7 +473,7 @@ export async function launchApp({
 	});
 	await context.addInitScript({ content: `window.__bcSource = ${JSON.stringify(source)};` });
 	await context.addInitScript({
-		content: `(${boot.toString()})(${JSON.stringify({ injectTop, skipFrameHosts, values, appHost, topHosts, shared: sharedStore, version, handler, injectDelay, tabs, settings: { sources: { hn: true }, annotations: true, frontPageMode: "sources", ...settings } })});`,
+		content: `(${boot.toString()})(${JSON.stringify({ injectTop, skipFrameHosts, values, appHost, topHosts, shared: sharedStore, version, handler, injectDelay, tabs, contentPages, settings: { sources: { hn: true }, annotations: true, frontPageMode: "sources", ...settings } })}${contentPages.length ? `, function () {\n${source}\n}` : ""});`,
 	});
 
 	const page = await context.newPage();
@@ -505,4 +512,23 @@ export async function waitFor(fn, timeout = 8000) {
 	}
 
 	return false;
+}
+
+export async function showAllFrontPages(page, unread = false) {
+	await page.locator('#app-rail [data-app-view="all"]').click();
+	const filter = page.getByRole("button", { name: "Unread only", exact: true });
+	if (await filter.getAttribute("aria-pressed") !== String(unread)) await filter.click();
+}
+
+export async function sidebarComposer(page) {
+	const frame = () => page.frame("backchannel-sidebar-composer");
+	if (!await waitFor(frame)) throw new Error("The Sidebar composer frame did not load");
+	return frame();
+}
+
+export async function fillComposer(field, text) {
+	await field.click();
+	await field.press("ControlOrMeta+a");
+	if (text) await field.page().keyboard.insertText(text);
+	else await field.press("Backspace");
 }

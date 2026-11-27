@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {frontPageHTML, launchApp, STORIES, waitFor} from './harness.mjs';
+import {fillComposer, frontPageHTML, launchApp, STORIES, waitFor} from './harness.mjs';
 
 const appURL = 'https://backchnnl.app/';
 const storage = 'HNewhere:account_sync';
@@ -65,10 +65,14 @@ for (const notes of [false, true]) test(`two Reader tabs keep both ${notes ? 'no
       await page.locator('#app-rail [data-app-view="queue"]').click();
       await list.getByRole('link', {name: stories[0].title, exact: true}).click();
       await page.locator(`#app .comment[data-comment-id="hn:${stories[0].id}01"]`).waitFor();
-      const composer = page.locator('#app-discussion-compose');
-      await composer.locator('.composer-text').fill(texts[i]);
-      return composer.locator('.compose-send-note');
+      return page.locator('#app-discussion-compose .compose-send-note');
     }));
+    if (notes) {
+      for (const [i, page] of pages.entries()) {
+        await page.bringToFront();
+        await fillComposer(page.locator('#app-discussion-compose .composer-text'), texts[i]);
+      }
+    }
     const saved = () => notes
       ? (app.store.get(key)?.notes || []).map(note => note.text)
       : app.store.get(key).map(link => link.url);
@@ -506,7 +510,7 @@ test('Account sync uploads a private snapshot and another local profile can appl
     assert.equal(await nav.getAttribute('data-settings-section'), 'account');
     await nav.getByText('birb@example.com', {exact:true}).waitFor({timeout:2500});
     assert.equal(await nav.locator('.app-account-tab-title').textContent(), 'birb@example.com');
-    assert.equal(await nav.locator('.app-account-tab-subtitle').textContent(), 'Backchannel Account');
+    assert.equal(await nav.locator('.app-account-tab-subtitle').textContent(), 'Backchannel\u00a0Account');
     assert.equal(await nav.evaluate(node => getComputedStyle(node).borderTopWidth), '0px');
     await firstPanel.getByText('Mac · Safari · This device', {exact:true}).waitFor();
     await firstPanel.getByRole('button', {name:'Sign out iPhone · Safari'}).waitFor();
@@ -1351,20 +1355,20 @@ test('a passkey timeout cannot appear on sign-in after the account session is re
   } finally { await app.browser.close(); }
 });
 
-test('Sidebar Account shows the saved profile and sync status without loading account APIs', {timeout:15000}, async () => {
+test('Sidebar Account opens account controls on Backchannel’s origin without opening Reader', {timeout:15000}, async () => {
   const article = STORIES[0].url;
   const lastSync = Date.now() - 60_000;
   const app = await launchApp({
-    appHost:new URL(article).hostname, sharedStore:true, settings:{autoOpenSidebar:true,updateCheck:false},
+    topHosts:[new URL(article).hostname], sharedStore:true, settings:{autoOpenSidebar:true,updateCheck:false},
     values:{[storage]:{...session,lastSync},['HNewhere:account_avatar:' + account]:{shape:'wide',color:'blue',background:'sky'}},
   });
   try {
     const api = mockAccount(app, {email:'birb@example.com',capabilities:{emailAvailable:true}});
     await api.start;
     const panel = await settings(app, article);
-    const manage = panel.getByRole('link', {name:'Manage account in Reader'});
+    const manage = panel.getByRole('link', {name:'Manage account',exact:true});
     await manage.waitFor({timeout:2500});
-    assert.equal(await manage.getAttribute('href'), appURL + '#account-sync');
+    assert.equal(await manage.getAttribute('href'), appURL + '#settings/account');
     assert.equal(await manage.getAttribute('target'), '_blank');
     assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'), 'wide');
     assert(await panel.getByText('Signed in on this device', {exact:true}).isVisible());
@@ -1374,6 +1378,22 @@ test('Sidebar Account shows the saved profile and sync status without loading ac
     for (const privateValue of [session.token, session.account, session.recoveryKey, 'birb@example.com']) {
       assert(!markup.includes(privateValue), 'private account fields stay out of the page');
     }
+    assert.deepEqual(api.requests,[]);
+    const [accountWindow] = await Promise.all([app.context.waitForEvent('page'), manage.click()]);
+    accountWindow.setDefaultTimeout(6000);
+    const accountPanel = accountWindow.locator('#settings-account-sync');
+    await accountPanel.getByRole('button', {name:'Sync now',exact:true}).waitFor();
+    await accountPanel.getByRole('button', {name:'Manage account',exact:true}).click();
+    await accountPanel.getByText('birb@example.com', {exact:true}).first().waitFor();
+    assert.equal(await accountWindow.locator('#app-rail').count(),0);
+    assert.equal(new URL(accountWindow.url()).origin,new URL(appURL).origin);
+    await Promise.all([
+      accountWindow.waitForEvent('close', {timeout:6000}),
+      accountWindow.getByRole('button', {name:'Close settings'}).click().catch(error => {
+        if (!accountWindow.isClosed()) throw error;
+      }),
+    ]);
+    assert.equal(app.page.url(),article);
 
     app.store.delete(storage);
     await app.page.locator('#app-settings-close').click();
@@ -1382,7 +1402,6 @@ test('Sidebar Account shows the saved profile and sync status without loading ac
     await panel.getByRole('link', {name:'Sign in to Backchannel'}).waitFor({timeout:2500});
     assert.equal(await panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'),null);
     assert.equal(await panel.locator('#account-last-sync').isVisible(),false);
-    assert.deepEqual(api.requests,[]);
     assert(!app.requests.some(({url})=>url.startsWith(appURL + 'account/')));
     assert.deepEqual(app.errors,[]);
   } finally { await app.browser.close(); }

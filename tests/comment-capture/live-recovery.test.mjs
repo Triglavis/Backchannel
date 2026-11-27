@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { launchApp, STORIES, waitFor } from "./harness.mjs";
+import { launchApp, sidebarComposer, STORIES, waitFor } from "./harness.mjs";
 
 for (const mode of ['Reader', 'Sidebar']) test(`${mode} does not start a delayed automatic Reddit refresh after a manual sync`, { timeout: 45000 }, async () => {
   const original = await readFile(new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
@@ -522,7 +522,7 @@ test("the Reddit tab identifies its purpose and closes before local comment rend
     assert(await waitFor(async () => await app.page.locator('#comments-content .top-level-comments').count() === 1, 15000), 'local rendering has started');
     assert(await waitFor(() => opened.every((page) => page.isClosed()), 2500), 'the Reddit tab closes before local rendering finishes');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count(), 0, 'the controlled rendering pause is still in effect');
-    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
+    const write = (await sidebarComposer(app.page)).getByRole('textbox');
     await write.waitFor();
     assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     assert(await waitFor(async () => await app.page.locator('#comments-content .comment[data-comment-id="reddit:freshcomment"]').count() === 1, 10000));

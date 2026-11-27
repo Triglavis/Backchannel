@@ -28,7 +28,7 @@ test('dragging sources across topics persists order without opening a different 
     assert.equal(await app.page.locator('#app-rail-sources .rail-button').first().getAttribute('data-app-view'),'top-stories');
     assert.deepEqual(await app.page.locator('#app-list-tags [data-app-view]').evaluateAll(nodes=>nodes.map(n=>n.dataset.appView)),['top-stories',...await order(app)],'mobile filter chips keep Headlines first and share the reordered rail order');
     assert(await waitFor(()=>app.store.get('HNewhere:app_rail_order')?.[0]==='source:lemmy',3000),'order is saved');
-    assert.equal(await app.page.locator('#app-rail [data-app-view="unread"]').getAttribute('aria-pressed'),'true','dropping does not navigate');
+    assert.equal(await app.page.locator('#app-rail [data-app-view="all"]').getAttribute('aria-pressed'),'true','dropping does not navigate');
     assert.deepEqual(await app.page.locator('#app-rail > .rail-button').evaluateAll(nodes=>nodes.map(n=>n.id||n.dataset.appView)),fixed,'fixed navigation stays in place');
     await app.page.reload();
     await app.page.locator('#app-rail-sources [data-app-view="source:lemmy"]').waitFor();
@@ -49,7 +49,7 @@ test('Escape cancels a drag and keyboard reordering preserves temporarily disabl
     await new Promise(resolve=>setTimeout(resolve,100));
     await app.page.mouse.up();
     assert.deepEqual(await order(app),original);
-    assert.equal(await app.page.locator('#app-rail [data-app-view="unread"]').getAttribute('aria-pressed'),'true','releasing a cancelled drag does not navigate');
+    assert.equal(await app.page.locator('#app-rail [data-app-view="all"]').getAttribute('aria-pressed'),'true','releasing a cancelled drag does not navigate');
     const button=app.page.locator('#app-rail-sources [data-app-view="source:lemmy"]');
     await button.focus();await button.press('Alt+ArrowUp');await button.press('Alt+ArrowUp');await button.press('Alt+ArrowUp');
     assert.deepEqual(await order(app),['source:lemmy','topic:technology','source:hn']);

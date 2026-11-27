@@ -126,7 +126,7 @@ test("Reader shows related links between an embedded article and the queue", asy
 		const story = rowFor(page, original.title);
 		await story.locator(".browse-title-link").waitFor();
 
-		for (const view of ["unread", "all", "source:hn", "topic:technology", "queue"]) {
+		for (const view of ["all", "source:hn", "topic:technology", "queue"]) {
 			await clickView(page, view);
 			await story.locator(".browse-title-link").waitFor();
 			assert.equal(await story.getByText("Related coverage", { exact: true }).count(), 0, view);
@@ -153,6 +153,7 @@ test("Reader shows related links between an embedded article and the queue", asy
 		assert.equal(await coverage.getByRole("link", { name: related.title, exact: true }).count(), 0, "the old coverage clears when switching articles");
 
 		await clickView(page, "all");
+		await page.getByRole("button", { name: "Unread only", exact: true }).click();
 		await story.locator(".browse-title-link").waitFor();
 		await story.locator(".browse-comments-total").click();
 		await discussion.locator('.comment[data-comment-id="hn:926000"]').getByText("Comment 1 on " + original.title).waitFor();

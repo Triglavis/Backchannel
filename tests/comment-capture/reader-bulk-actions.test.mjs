@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { frontPageHTML, launchApp, STORIES, waitFor } from "./harness.mjs";
+import { frontPageHTML, launchApp, showAllFrontPages, STORIES, waitFor } from "./harness.mjs";
 
 const url = "https://backchnnl.app/";
 const settings = { sources: { hn: true }, frontPageMode: "sources", updateCheck: false, sourceRefreshMinutes: 0 };
@@ -89,7 +89,7 @@ test("Right-click opens the same article menu as More, without view names", asyn
 		await page.emulateMedia({ reducedMotion: "reduce" });
 		await page.goto(url);
 		await page.locator("#app-list-sync").click();
-		for (const [view, section, action] of [["unread", "Unread", "Hide"], ["all", "All articles", "Hide"], ["queue", "Queue", "Unqueue"], ["collection", "Collection", "Delete"]]) {
+		for (const [view, section, action] of [["all", "All Front Pages", "Hide"], ["queue", "Queue", "Unqueue"], ["collection", "Collection", "Remove"]]) {
 			await page.locator(`#app-rail [data-app-view="${view}"]`).click();
 			const row = page.locator("#app-list-body .browse-row").filter({ has: page.getByRole("link", { name: story.title, exact: true }) });
 			const more = row.locator(".browse-more");
@@ -205,6 +205,7 @@ test("Unqueue immediately removes each row and updates the Queue badge and empty
 			await row.waitFor({ state: "detached", timeout: 2000 });
 		}
 		await body.getByText(/Nothing queued yet/).waitFor();
+		await queue.waitFor({ state: "hidden", timeout: 2000 });
 		assert.deepEqual(app.errors, []);
 	} finally {
 		await app.browser.close();
@@ -225,7 +226,7 @@ test("returning to Unread on a phone removes the link just read", async () => {
 		const list = page.locator("#app-list-body");
 		const article = list.getByRole("link", { name: first.title, exact: true });
 		const next = list.getByRole("link", { name: second.title, exact: true });
-		const unread = page.locator('#app-rail [data-app-view="unread"]');
+		const unread = page.getByRole("button", { name: "Unread only", exact: true });
 		await page.goto(url);
 		await next.waitFor();
 		assert.equal(await unread.getAttribute("aria-pressed"), "true");
@@ -259,7 +260,7 @@ test("an article read in Reader stays out of Unread when the same link is repost
 		page.setDefaultTimeout(5000);
 		const list = page.locator("#app-list-body");
 		const link = (story) => list.getByRole("link", { name: story.title, exact: true });
-		const unread = page.locator('#app-rail [data-app-view="unread"]');
+		const unread = page.getByRole("button", { name: "Unread only", exact: true });
 		await page.goto(url);
 		await link(first).click();
 		assert(await waitFor(() => app.store.get("HNewhere:seen_comments")?.[`hn:${first.id}`] > 0));
@@ -269,7 +270,7 @@ test("an article read in Reader stays out of Unread when the same link is repost
 		await link(second).waitFor();
 		assert.equal(await unread.getAttribute("aria-pressed"), "true");
 		assert.equal(await link(repost).count(), 0);
-		await page.locator('#app-rail [data-app-view="all"]').click();
+		await unread.click();
 		await link(repost).waitFor();
 		assert.equal(app.store.get("HNewhere:seen_comments")[`hn:${repost.id}`], undefined, "the new discussion has its own comment history");
 		assert.deepEqual(app.errors, []);
@@ -326,7 +327,7 @@ test("Mark all as read stays available during selection and includes unselected 
 					window.__gmXHR = (options) => options.url === "https://news.ycombinator.com/news"
 						? ready.then(() => request(options)) : request(options);
 				});
-				await page.locator('#app-rail [data-app-view="all"]').click();
+				await showAllFrontPages(page);
 				await heading.click();
 				await page.getByRole("menuitem", { name: "Sync", exact: true }).click();
 			} else {

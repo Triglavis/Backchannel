@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { launchApp, STORIES, waitFor } from "./harness.mjs";
+import { fillComposer, launchApp, STORIES, waitFor } from "./harness.mjs";
 
 const reader = "https://backchnnl.app/";
 const folders = "HNewhere:collected";
@@ -58,7 +58,7 @@ test("Undo removes newly imported links while keeping an existing link and a new
 		await other.locator(`#app .comment[data-comment-id="hn:${story.id}01"]`).waitFor();
 		const noteText = "A note made after importing";
 		const composer = other.locator("#app-discussion-compose");
-		await composer.locator(".composer-text").fill(noteText);
+		await fillComposer(composer.locator(".composer-text"), noteText);
 
 		const undo = await importBookmarks(page, [
 			[existing.url, "Duplicate title"],

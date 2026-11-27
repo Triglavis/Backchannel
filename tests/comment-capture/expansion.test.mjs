@@ -186,11 +186,10 @@ test("unexpandable missing replies keep the available comments without a load di
   const initial = [comment("root", "t3_fixture0", "Parent"), { kind: "more", data: { children: [], count: 3 } }];
   const app = await openArchive(initial, []);
   try {
-    const disclosure = app.page.locator("#comments-content .page-header-disclosure");
-    assert(await waitFor(async () => await disclosure.count() === 1, 15000), "a single affected discussion still has a sources menu");
-    assert.match(await disclosure.textContent(), /1 discussion/);
+    const disclosure = app.page.locator("#sidebar-discussion-meta").getByRole("button", { name: "Sources", exact: true });
+    await disclosure.waitFor({ timeout: 15000 });
     await disclosure.click();
-    assert.equal(await app.page.locator("#comments-content .discussion-source-status").count(), 0);
+    assert.equal(await app.page.locator("#source-menu .discussion-source-status").count(), 0);
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:root"]').count(), 1);
     assert.deepEqual(app.errors, []);
   } finally {

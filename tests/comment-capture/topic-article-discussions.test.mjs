@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { launchApp, waitFor } from "./harness.mjs";
+import { fillComposer, launchApp, waitFor } from "./harness.mjs";
 
 const api = "https://topics.backchnnl.app/api/topics";
 const now = Math.floor(Date.now() / 1000);
@@ -216,6 +216,108 @@ test("scrolling one busy topic thread reaches its final comment without duplicat
 	assert.deepEqual(errors, []);
 });
 
+test("Best ranks a slower core discussion ahead of the first reply batch from a side story", async (t) => {
+	const hnText = "I inspected the harbor last week. The inspection log recorded 2.4 m of clearance at low tide, which explains why the pilot moved the berth.";
+	const thread = { source: "lemmy", url: "https://lemmy.world/post/15192", title: "Memes about the harbor inspection", comments: 120 };
+	const sideReplies = [
+		"Is this The Onion? I had to check twice.",
+		"I’m so sick of this timeline.",
+		"What a joke.",
+		"Well, there goes my coffee.",
+		"Glad everyone's having a normal one.",
+		"The comments here are better than the headline.",
+		"What timeline is this?",
+		"I see the circus is back in town.",
+	];
+	const { aside, errors } = await openTopic(t, { threads: [thread], responses: [
+		{ match: (url) => url === hnItem(9741), delay: 800, json: { id: 9741, kids: [982401] } },
+		{ match: (url) => url === hnItem(9742), json: { id: 9742, kids: [] } },
+		{ match: (url) => url === hnItem(982401), json: { id: 982401, type: "comment", by: "pilot", time: now - 600, text: hnText } },
+		{ match: (url) => new URL(url).searchParams.get("post_id") === "15192", json: { comments: sideReplies.map((content, i) => ({
+			comment: { id: 920040 + i, path: "0." + (920040 + i), content }, creator: { name: "observer" },
+			counts: { score: 100 - i },
+		})) } },
+	] });
+	const bodies = feedList(aside).locator(".app-topic-comment-body");
+	await bodies.filter({ hasText: hnText }).waitFor();
+	assert.equal(await bodies.first().textContent(), hnText);
+	assert.equal(await bodies.count(), sideReplies.length + 1);
+	assert.deepEqual(errors, []);
+});
+
+test("Best previews grounded replies and holds reactions while another platform is still pending", async (t) => {
+	const reaction = "I’m so sick of this timeline.";
+	const finding = "The harbor inspection found the east berth was obstructed by a broken mooring cable.";
+	const official = "The harbor inspection measured 3 m of clearance because a mooring cable was suspended across the channel.";
+	const thread = { source: "lemmy", url: "https://lemmy.world/post/15193", title: "Harbor inspection report", comments: 2 };
+	const { aside, page, errors } = await openTopic(t, { threads: [thread], holdURL: hnItem(9741), responses: [
+		{ match: (url) => url === hnItem(9741), json: { id: 9741, kids: [982402] } },
+		{ match: (url) => url === hnItem(9742), json: { id: 9742, kids: [] } },
+		{ match: (url) => url === hnItem(982402), json: { id: 982402, type: "comment", by: "pilot", time: now - 200, text: official } },
+		{ match: (url) => new URL(url).searchParams.get("post_id") === "15193", json: { comments: [reaction, finding].map((content, i) => ({
+			comment: { id: 920060 + i, path: "0." + (920060 + i), content }, creator: { name: "observer" },
+			counts: { score: 100 - i },
+		})) } },
+	] });
+	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
+	const bodies = feedList(aside).locator(".app-topic-comment-body");
+	await bodies.filter({ hasText: finding }).waitFor();
+	assert.deepEqual(await bodies.allTextContents(), [finding]);
+	await page.evaluate(() => window.__releaseTopicResponse());
+	assert(await waitFor(async () => await bodies.count() === 3));
+	assert.deepEqual(await bodies.allTextContents(), [finding, official, reaction]);
+	assert.deepEqual(errors, []);
+});
+
+test("Best uses the brief to lift a factual explanation when the headline's words are absent", async (t) => {
+	const reaction = "Ridiculous stuff, really.";
+	const explanation = "The pier audit measured 2.4 m of clearance at the east berth because a mooring cable sagged into the passage.";
+	const comments = [reaction, "The timeline just gets dumber.", "I can't believe this.", "What a day.", explanation];
+	const thread = { source: "lemmy", url: "https://lemmy.world/post/15194", title: "Notes from the pilots", comments: comments.length };
+	const { aside, errors } = await openTopic(t, { local: [], enabled: { hn: false }, threads: [thread],
+		brief: ["The pier audit reports that a faulty mooring cable blocked the east berth."], responses: [
+			{ match: (url) => new URL(url).searchParams.get("post_id") === "15194", json: { comments: comments.map((content, i) => ({
+				comment: { id: 920080 + i, path: "0." + (920080 + i), content }, creator: { name: "observer" },
+				counts: { score: 100 - i },
+			})) } },
+		] });
+	const bodies = feedList(aside).locator(".app-topic-comment-body");
+	assert(await waitFor(async () => await bodies.count() === comments.length));
+	assert.equal(await bodies.first().textContent(), explanation);
+	assert.deepEqual(errors, []);
+});
+
+test("Best appends a slow discussion after the comments already visible", async (t) => {
+	const threads = [
+		{ source: "lemmy", url: "https://lemmy.world/post/15190", title: "Dock inspection logs", comments: 20 },
+		{ source: "lemmy", url: "https://lemmy.world/post/15191", title: "Port survey observations", comments: 10 },
+	];
+	const comments = (id, scores) => ({ comments: scores.map((score, i) => ({
+		comment: { id: id + i, path: "0." + (id + i), content: "Inspection finding " + (id + i) + " identifies a change the port recorded during the overnight survey." },
+		creator: { name: "pilot" }, counts: { score },
+	})) });
+	const { aside, page, errors } = await openTopic(t, { threads, enabled: { hn: false },
+		holdURL: "https://lemmy.world/api/v3/comment/list?post_id=15191&type_=All&sort=Top&limit=50&page=1",
+		responses: [
+			{ match: (url) => new URL(url).searchParams.get("post_id") === "15190", json: comments(920010, [20, 10]) },
+			{ match: (url) => new URL(url).searchParams.get("post_id") === "15191", json: comments(920020, [300, 600]) },
+		],
+	});
+	const items = feedList(aside).getByRole("listitem");
+	const keys = () => items.evaluateAll((nodes) => nodes.map((node) => node.dataset.commentKey));
+	await page.waitForFunction(() => typeof window.__releaseTopicResponse === "function");
+	await items.nth(1).waitFor();
+	const first = await keys();
+	assert.deepEqual(first, ["lemmy:920010", "lemmy:920011"]);
+	const focus = items.first().getByRole("button", { name: "Focus" });
+	await focus.focus();
+	await page.evaluate(() => window.__releaseTopicResponse());
+	await items.nth(3).waitFor();
+	assert.deepEqual(await keys(), [...first, "lemmy:920021", "lemmy:920020"]);
+	assert(await focus.evaluate((node) => node.getRootNode().activeElement === node));
+	assert.deepEqual(errors, []);
+});
+
 test("new batches in Best follow the comments already reached", async (t) => {
 	const threads = Array.from({ length: 16 }, (_, i) => ({ source: "lemmy", url: "https://lemmy.world/post/" + (15200 + i),
 		title: "Dock " + i, comments: 40 - i, sourceIndex: i % 2 }));
@@ -287,7 +389,7 @@ for (const phone of [false, true]) test(`the ${phone ? "phone" : "desktop"} topi
 		}), "the shared field is reachable at the bottom of the discussion");
 	}
 	if (!phone) assert(await scroller.evaluate((node) => node.scrollTop > 0));
-	await field.fill("What did the port operators decide?");
+	await fillComposer(field, "What did the port operators decide?");
 	await aside.getByRole("button", { name: "Add a comment", exact: true }).click();
 	const menu = aside.getByRole("group", { name: "Choose a discussion" });
 	await menu.waitFor();
@@ -381,7 +483,7 @@ test("an unavailable and an empty conversation give way to replies from another 
 	await feedList(aside).getByText(reply, { exact: true }).waitFor();
 	await aside.getByRole("button", { name: "Discussion sources" }).click();
 	const sourceChoice = aside.getByRole("checkbox", { name: thread.title, exact: true }).locator("xpath=ancestor::div[contains(@class, 'source-menu-entry')][1]");
-	assert.equal(await sourceChoice.getByRole("link").textContent(), "1 comment");
+	assert.equal(await sourceChoice.getByRole("link", { name: "1 comment", exact: true }).textContent(), "1");
 	await sourceChoice.getByRole("checkbox").press("Escape");
 	assert.equal(await aside.getByText("Comments couldn’t be loaded.", { exact: true }).count(), 0);
 	assert(requests.filter(({ url }) => url.includes("/api/v3/comment/list?post_id=112233")).every(({ anonymous }) => anonymous));
@@ -391,7 +493,7 @@ test("an unavailable and an empty conversation give way to replies from another 
 	await detail.getByRole("button", { name: "Retry comments" }).waitFor();
 	const opened = context.waitForEvent("page");
 	const banner = detail.locator(".app-topic-focus-banner");
-	assert.match(await banner.textContent(), /Hacker News.*35 comments/);
+	assert.equal(await banner.textContent(), "Only showing 1 discussion: Hacker\u00a0News");
 	assert.equal(await detail.getByRole("heading").count(), 0);
 	await banner.getByRole("link", { name: "Hacker News" }).click();
 	const original = await opened;
@@ -1088,24 +1190,7 @@ for (const [width, withoutPopover, paper] of [[1280, false, "paper"], [320, fals
 		await sources.click();
 		const menu = aside.getByRole("group", { name: "Filter discussions by source" });
 		if (withoutPopover) assert(await page.locator("#app-bar-back").isHidden(), "the floating Back button yields to the open menu");
-		const disclosure = menu.getByRole("button", { name: /Hacker News discussions/i });
-		const arrow = () => disclosure.evaluate((button) => getComputedStyle(button, "::after").transform);
-		const foldedArrow = await arrow();
-		assert.equal(await disclosure.getAttribute("aria-expanded"), "false");
-		if (width === 320) {
-			const folded = await disclosure.evaluate((button) => {
-				const menu = button.closest(".source-menu");
-				const rect = button.getBoundingClientRect();
-				const hit = button.getRootNode().elementFromPoint(rect.right - 8, rect.top + rect.height / 2);
-				const chevron = getComputedStyle(button, "::after");
-				return { reachable: button.contains(hit) && rect.width >= 44 && rect.height >= 40,
-					visible: parseFloat(chevron.borderRightWidth) > 0 && chevron.borderRightColor === getComputedStyle(button).color &&
-						chevron.borderRightColor !== getComputedStyle(menu).backgroundColor, paper: getComputedStyle(menu).backgroundColor };
-			});
-			assert.deepEqual(folded, { reachable: true, visible: true, paper: paper === "night" ? "rgb(18, 18, 18)" : "rgb(244, 236, 216)" });
-		}
-		await disclosure.press("Enter");
-		assert.notEqual(await arrow(), foldedArrow);
+		assert.equal(await menu.locator(".source-group-disclosure").count(), 0);
 		const last = menu.getByRole("checkbox").last();
 		await menu.evaluate((el) => { el.scrollTop = el.scrollHeight; });
 		const geometry = await menu.evaluate((el) => {
@@ -1128,7 +1213,6 @@ for (const [width, withoutPopover, paper] of [[1280, false, "paper"], [320, fals
 		if (withoutPopover) assert(await page.locator("#app-bar-back").isVisible());
 		assert(await sources.evaluate((el) => el.matches(":focus")));
 		await sources.press("Enter");
-		assert.equal(await disclosure.getAttribute("aria-expanded"), "true");
 		assert(!(await last.isChecked()));
 		assert(await last.evaluate((input) => input.matches(":focus")));
 		assert(await waitFor(() => last.evaluate((input) => {
@@ -1241,6 +1325,52 @@ test("several discussions on one platform leave room for a smaller source's seco
 		"the second Bluesky reply competes with leaders from four separate Lobsters conversations");
 });
 
+test("Best surfaces evidence ahead of a highly liked reaction with Hacker News disabled", async (t) => {
+	const did = "did:plc:abcdefghijklmnopqrstuvwx";
+	const uri = "at://" + did + "/app.bsky.feed.post/";
+	const sky = (id, text, likes, time) => ({ post: { uri: uri + id, author: { did, handle: "port.example" },
+		record: { text, createdAt: new Date((now + time) * 1000).toISOString() }, likeCount: likes } });
+	const reaction = "Well, duh!";
+	const evidence = "I inspected the harbor last week. The inspection log recorded 2.4 m of clearance at low tide, which explains why the pilot moved the berth.";
+	const correction = "The harbor reopened Monday.";
+	const { aside } = await openTopic(t, { local: [], enabled: { hn: false }, threads: [
+		{ source: "bsky", url: "https://bsky.app/profile/" + did + "/post/evidence", title: "Harbor inspection log", comments: 3 },
+	], responses: [
+		{ match: (url) => new URL(url).searchParams.get("uri") === uri + "evidence", json: {
+			thread: { ...sky("evidence", "Harbor inspection", 15, -500), replies: [
+				sky("reaction", reaction, 200, -100), sky("correction", correction, 4, -200), sky("results", evidence, 1, -300),
+			] },
+		} },
+	] });
+	const bodies = feedList(aside).locator(".app-topic-comment-body");
+	assert(await waitFor(async () => (await bodies.count()) === 3));
+	assert.deepEqual(await bodies.allTextContents(), [evidence, correction, reaction]);
+	await asideSort(aside).click();
+	await aside.getByRole("menuitemradio", { name: "Newest" }).click();
+	assert(await waitFor(async () => (await bodies.first().textContent()) === reaction));
+});
+
+test("Best lowers thread housekeeping and preserves it in the original thread", async (t) => {
+	const redirect = "Comments moved to " + threadURL(9742) + ".";
+	const edit = "Had to shorten the end of the title to fit the limit.";
+	const correction = "The harbor reopened Monday.";
+	const { aside, page } = await openTopic(t, { responses: [
+		{ match: (url) => url === hnItem(9741), json: { id: 9741, kids: [982301, 982302, 982303] } },
+		{ match: (url) => url === hnItem(9742), json: { id: 9742, kids: [] } },
+		...[
+			[982301, redirect], [982302, edit], [982303, correction],
+		].map(([id, text]) => ({ match: (url) => url === hnItem(id), json: {
+			id, type: "comment", by: "pilot", time: now - 200, text,
+		} })),
+	] });
+	const bodies = feedList(aside).locator(".app-topic-comment-body");
+	assert(await waitFor(async () => (await bodies.count()) === 3));
+	assert.deepEqual(await bodies.allTextContents(), [correction, redirect, edit]);
+	await (await sourceThread(page, threadURL(9741))).click();
+	const detail = threadDetail(aside);
+	assert(await waitFor(async () => (await threadContent(detail).locator(".app-topic-comment-body").allTextContents())[0] === redirect));
+});
+
 test("Best compares engagement across discussions on the same site and preserves HN's native order", async (t) => {
 	const did = "did:plc:abcdefghijklmnopqrstuvwx";
 	const uri = "at://" + did + "/app.bsky.feed.post/";
@@ -1315,10 +1445,11 @@ test("topic sorting uses comment dates and the saved per-discussion unread times
 	assert.deepEqual(store.get("HNewhere:seen_comments"), { "hn:9741": now - 350, "hn:9742": now - 250 });
 });
 
-test("topic Sources retains an expanded platform and its focused disclosure when comment counts arrive", async (t) => {
+test("topic Sources retains focus on a flat source when comment counts arrive", async (t) => {
 	const id = 98150;
+	const title = "Harbor field notes from the coast guard detail about inspections and findings. ".repeat(4).trim();
 	const threads = Array.from({ length: 5 }, (_, i) => ({ source: "hn", url: threadURL(id + i),
-		title: "Harbor field notes " + (i + 1), comments: i === 0 ? 3 : 1 }));
+		title: i === 0 ? title : "Harbor field notes " + (i + 1), comments: i === 0 ? 3 : 1 }));
 	const kids = [981501, 981502, 981503, 981504];
 	const { aside, page, errors } = await openTopic(t, { phone: true, threads, holdURL: hnItem(id), responses: [
 		{ match: (url) => url === hnItem(id), json: { id, kids } },
@@ -1330,20 +1461,26 @@ test("topic Sources retains an expanded platform and its focused disclosure when
 	await trigger.press("Enter");
 	const menu = aside.getByRole("group", { name: "Filter discussions by source" });
 	const leaf = menu.getByRole("checkbox", { name: threads[0].title, exact: true });
-	assert(await leaf.isHidden(), "long topic source lists start folded");
-	const toggle = menu.getByRole("button", { name: /Hacker News discussions/i });
-	await toggle.press("Space");
-	const entry = leaf.locator("xpath=ancestor::div[contains(@class, 'source-menu-entry')][1]");
-	assert(await entry.getByRole("link", { name: "3 comments" }).isVisible());
+	assert(await leaf.isVisible(), "Hacker News threads are directly visible in Sources");
+	const entry = menu.locator(".source-menu-entry").filter({ has: page.getByRole("checkbox", { name: title, exact: true }) });
+	const lines = await entry.locator(".choice-label").evaluate((label) => {
+		const height = label.getBoundingClientRect().height;
+		return Math.round(height / parseFloat(getComputedStyle(label).lineHeight));
+	});
+	assert.equal(lines, 2);
+	const initialCount = entry.getByRole("link", { name: "3 comments" });
+	assert.equal(await initialCount.textContent(), "3");
+	await initialCount.focus();
 	await page.evaluate(() => window.__releaseTopicResponse());
-	await entry.getByRole("link", { name: "4 comments" }).waitFor();
-	assert(await toggle.evaluate((button) => button.matches(":focus")));
-	assert.equal(await toggle.getAttribute("aria-expanded"), "true");
-	await toggle.press("Escape");
+	const updatedCount = entry.getByRole("link", { name: "4 comments" });
+	await updatedCount.waitFor();
+	assert.equal(await updatedCount.textContent(), "4");
+	assert(await updatedCount.evaluate((link) => link.matches(":focus")));
+	await updatedCount.press("Escape");
 	assert(await trigger.evaluate((button) => button.matches(":focus")));
 	await trigger.press("Enter");
-	assert(await leaf.isVisible(), "reopening the topic menu retains the disclosure choice");
-	assert(await toggle.evaluate((button) => button.matches(":focus")));
+	assert(await leaf.isVisible());
+	assert(await updatedCount.evaluate((link) => link.matches(":focus")));
 	assert.equal(await menu.getByRole("checkbox", { name: "All sources", exact: true }).isChecked(), true);
 	assert.deepEqual(errors, []);
 });
@@ -1476,9 +1613,9 @@ test("thread controls target the chosen comment, preserve drafts, and save under
 	assert(await waitFor(() => store.get("HNewhere:collapsed_comments")?.includes("hn:974201")));
 	await row.getByRole("button", { name: "Expand comment" }).press("Enter");
 	const topDraft = detail.getByRole("textbox", { name: /Add a comment/ });
-	assert(await waitFor(async () => (await topDraft.inputValue()) === "Draft from the Reader discussion"));
+	assert(await waitFor(async () => (await topDraft.innerText()) === "Draft from the Reader discussion"));
 	assert.equal(await topDraft.evaluate((node) => getComputedStyle(node.closest(".compose-field")).display), "grid");
-	await topDraft.fill("Local note on the harbor findings");
+	await fillComposer(topDraft, "Local note on the harbor findings");
 	await detail.getByRole("button", { name: "Keep a note" }).click();
 	assert(await waitFor(() => store.get("HNewhere:notes:url:journal.example/findings")?.notes?.some((note) => note.text === "Local note on the harbor findings")));
 	assert(await waitFor(() => !store.get("HNewhere:comment_draft:9742")));
@@ -1525,16 +1662,18 @@ test("the mixed topic message bar sends the written comment to the chosen empty 
 	const draft = aside.getByRole("textbox", { name: /Add a comment/ });
 	assert(await draft.isVisible(), "the mixed feed exposes the message field immediately");
 	const send = aside.getByRole("button", { name: "Add a comment", exact: true });
-	assert.equal(await send.isVisible(), false);
-	await draft.fill(message);
-	assert(await send.locator("svg").isVisible(), "the compact send arrow appears beside the draft");
+	assert(await send.isVisible());
+	assert(await send.isDisabled());
+	await fillComposer(draft, message);
+	assert.equal(await send.innerText(), "Comment");
+	assert(await send.isEnabled());
 	await send.press("Enter");
 	const chooser = aside.getByRole("group", { name: "Choose a discussion" });
 	const choice = chooser.getByRole("button", { name: new RegExp(stories[0].title) });
 	assert(await chooser.getByRole("button").first().evaluate((node) => node.matches(":focus")));
 	await choice.press("Escape");
 	assert(await send.evaluate((node) => node.matches(":focus")));
-	assert.equal(await draft.inputValue(), message);
+	assert.equal(await draft.innerText(), message);
 	await send.press("Enter");
 	await context.route("https://news.ycombinator.com/**", (route) => {
 		const request = route.request();
@@ -1548,7 +1687,7 @@ test("the mixed topic message bar sends the written comment to the chosen empty 
 	await choice.press("Enter");
 	assert(await waitFor(() => submitted));
 	assert.deepEqual(submitted, { parent: "9741", text: message });
-	assert(await waitFor(async () => (await draft.inputValue()) === ""));
+	assert(await waitFor(async () => (await draft.innerText()) === ""));
 	assert(await waitFor(() => ![...store.values()].includes(message)));
 	assert(await feedList(aside).isVisible());
 	assert.deepEqual(errors, []);
@@ -1563,7 +1702,7 @@ test("a topic draft survives an immediate reload after opening and leaving a thr
 		const box = field.closest(".compose-box");
 		const pane = field.closest("aside");
 		field.focus();
-		field.value = message;
+		field.textContent = message;
 		field.dispatchEvent(new Event("input", { bubbles: true }));
 		const send = box.querySelector(".compose-send-comment");
 		send.focus();
@@ -1573,19 +1712,19 @@ test("a topic draft survives an immediate reload after opening and leaving a thr
 		target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 		pane.querySelector(".app-topic-feed-focus").click();
 		pane.querySelector('.app-topic-thread-detail button[aria-label="Show all comments"]').click();
-		return !pane.querySelector(".app-topic-thread-detail") && field.value === message;
+		return !pane.querySelector(".app-topic-thread-detail") && field.textContent === message;
 	}, text);
 	assert(entered);
 	await page.reload();
 	await openPhoneDiscussion(page, true);
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
-	assert(await waitFor(async () => (await draft.inputValue()) === text, 1500));
+	assert(await waitFor(async () => (await draft.innerText()) === text, 1500));
 	const edit = "Keep the latest change while the field still has focus";
-	await draft.fill(edit);
+	await fillComposer(draft, edit);
 	await page.reload();
 	await openPhoneDiscussion(page, true);
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
-	assert(await waitFor(async () => (await draft.inputValue()) === edit, 1500));
+	assert(await waitFor(async () => (await draft.innerText()) === edit, 1500));
 	assert.deepEqual(errors, []);
 });
 
@@ -1594,27 +1733,28 @@ test("the mixed topic message bar keeps its draft and saves a note to the select
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
 	const field = aside.getByRole("textbox", { name: /Add a comment/ });
 	assert(await field.isVisible(), "the phone feed offers the message bar");
-	await field.fill("A local note about the operator interviews");
+	await fillComposer(field, "A local note about the operator interviews");
 	await feedList(aside).getByRole("button", { name: /^focus$/i }).first().tap();
-	assert.equal(await threadDetail(aside).getByRole("textbox", { name: /Add a comment/ }).inputValue(), "");
+	assert.equal(await threadDetail(aside).getByRole("textbox", { name: /Add a comment/ }).innerText(), "");
 	await threadDetail(aside).getByRole("button", { name: "Show all comments" }).tap();
-	assert.equal(await field.inputValue(), "A local note about the operator interviews");
+	assert.equal(await field.innerText(), "A local note about the operator interviews");
 	assert(await waitFor(() => [...store.values()].includes("A local note about the operator interviews")));
 	await page.reload();
 	await openPhoneDiscussion(page, true);
 	await feedList(aside).getByText(/Comment 1 on Operators/).waitFor();
-	assert(await waitFor(async () => (await field.inputValue()) === "A local note about the operator interviews"));
+	assert(await waitFor(async () => (await field.innerText()) === "A local note about the operator interviews"));
 	const save = aside.getByRole("button", { name: "Keep a note" });
 	const choices = aside.getByRole("group", { name: "Choose a source article" });
 	await save.tap();
 	await choices.waitFor();
-	await field.press("End");
+	await field.press("ControlOrMeta+a");
+	await field.press("ArrowRight");
 	await field.press("!");
 	assert(await choices.isHidden(), "editing a draft dismisses the pending note destination");
 	await save.tap();
 	await choices.getByRole("button", { name: new RegExp(stories[1].title) }).tap();
 	assert(await waitFor(() => store.get("HNewhere:notes:url:journal.example/findings")?.notes?.some((note) => note.text === "A local note about the operator interviews!")));
-	assert(await waitFor(async () => (await field.inputValue()) === ""));
+	assert(await waitFor(async () => (await field.innerText()) === ""));
 	assert(!store.get("HNewhere:notes:url:maritime.example/inspection")?.notes?.length);
 	assert.deepEqual(errors, []);
 });
@@ -1627,7 +1767,7 @@ test("the phone message bar keeps its app-sized typography, Aa colors and draft"
 	const destination = aside.getByRole("group", { name: "Choose a discussion" });
 	const appearance = page.getByRole("button", { name: "Style settings", exact: true }).filter({ visible: true });
 	assert(await aside.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), "the blank field fits on a phone");
-	await field.fill("Keep the harbor report draft while filtering");
+	await fillComposer(field, "Keep the harbor report draft while filtering");
 	for (const [paper, background, ink, link] of [
 		["night", "rgb(18, 18, 18)", "rgb(216, 216, 216)", "rgb(143, 201, 165)"],
 		["sepia", "rgb(244, 236, 216)", "rgb(59, 46, 30)", "rgb(123, 74, 18)"],
@@ -1641,17 +1781,17 @@ test("the phone message bar keeps its app-sized typography, Aa colors and draft"
 		await appearance.tap();
 		const style = await field.evaluate((node) => {
 			const box = node.closest(".compose-box");
-			const arrow = box.querySelector(".compose-send-comment");
+			const comment = box.querySelector(".compose-send-comment");
 			const article = node.closest("article");
 			return {
 				paper: getComputedStyle(box.querySelector(".compose-field")).backgroundColor, ink: getComputedStyle(node).color,
-				arrow: getComputedStyle(arrow).backgroundColor, glyph: getComputedStyle(arrow).color,
+				comment: getComputedStyle(comment).backgroundColor, label: getComputedStyle(comment).color,
 				face: getComputedStyle(node).fontFamily, articleFace: getComputedStyle(article).fontFamily,
-				placeholder: getComputedStyle(node, "::placeholder").color, secondary: getComputedStyle(article.querySelector(".bc-reader-byline")).color,
+				placeholder: getComputedStyle(node, "::before").color, secondary: getComputedStyle(article.querySelector(".bc-reader-byline")).color,
 				size: parseFloat(getComputedStyle(node).fontSize),
 			};
 		});
-		assert.deepEqual([style.paper, style.ink, style.arrow, style.glyph], [background, ink, link, background]);
+		assert.deepEqual([style.paper, style.ink, style.comment, style.label], [background, ink, link, background]);
 		assert.match(style.articleFace, /Georgia/);
 		assert.notEqual(style.face, style.articleFace);
 		assert.equal(style.placeholder, style.secondary);
@@ -1673,7 +1813,7 @@ test("the phone message bar keeps its app-sized typography, Aa colors and draft"
 	await excluded.uncheck();
 	await excluded.press("Escape");
 	assert(await sources.evaluate((node) => node.matches(":focus")));
-	assert.equal(await field.inputValue(), "Keep the harbor report draft while filtering");
+	assert.equal(await field.innerText(), "Keep the harbor report draft while filtering");
 	await aside.getByRole("button", { name: "Keep a note" }).tap();
 	assert(await waitFor(() => store.get("HNewhere:notes:url:journal.example/findings")?.notes?.some((note) => note.text === "Keep the harbor report draft while filtering")));
 	assert.deepEqual(errors, []);
@@ -1686,7 +1826,7 @@ test("a read-only source offers a note-only message bar and saves directly to it
 	await aside.getByText("No comments yet.", { exact: true }).waitFor();
 	const draft = aside.getByRole("textbox", { name: /Keep a note/ });
 	assert(await draft.isVisible(), "a note can be written directly in the mixed feed");
-	await draft.fill("An observation from the port community");
+	await fillComposer(draft, "An observation from the port community");
 	assert.equal(await aside.getByRole("button", { name: "Add a comment", exact: true }).isVisible(), false);
 	await aside.getByRole("button", { name: "Keep a note" }).click();
 	assert(await waitFor(() => store.get("HNewhere:notes:url:maritime.example/inspection")?.notes?.some((note) => note.text === "An observation from the port community")));
@@ -1695,11 +1835,11 @@ test("a read-only source offers a note-only message bar and saves directly to it
 	const detail = threadDetail(aside);
 	await threadContent(detail).getByText("No comments yet.", { exact: true }).waitFor();
 	const noteDraft = detail.getByRole("textbox", { name: /Keep a note/ });
-	assert.equal(await noteDraft.inputValue(), "", "a read-only thread has its own note draft");
-	await noteDraft.fill("Continue this port note later");
+	assert.equal(await noteDraft.innerText(), "", "a read-only thread has its own note draft");
+	await fillComposer(noteDraft, "Continue this port note later");
 	await detail.getByRole("button", { name: "Show all discussions" }).click();
 	await thread.click();
-	assert(await waitFor(async () => await noteDraft.inputValue() === "Continue this port note later"));
+	assert(await waitFor(async () => await noteDraft.innerText() === "Continue this port note later"));
 	assert.equal(store.get("HNewhere:comment_draft:112233"), "Separate Hacker News draft");
 	assert.deepEqual(errors, []);
 });

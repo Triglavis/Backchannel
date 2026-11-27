@@ -62,13 +62,17 @@ async function recordToggleFrames(app){
   }));
 }
 
-for(const view of ['source:hn','all','unread','queue','collection']){
+for(const view of ['source:hn','all','queue','collection']){
   test(`collapsed Front Pages temporarily opens for ${view} rail navigation`,{timeout:15000},async()=>{
     const app=await launchApp({sharedStore:true,viewport:{width:1600,height:900},settings,values});
     try{
       await ready(app);
       await openPreview(app,view);
       assert.equal(await rail(app,view).getAttribute('aria-pressed'),'true','navigation selects the clicked real view');
+      if(view==='all'){
+        assert(await app.page.getByRole('button',{name:'Unread only',exact:true}).isVisible());
+        assert.equal(await rail(app,'unread').count(),0);
+      }
       await app.page.locator('#app-list-body .browse-title-link').first().waitFor({timeout:3000});
       assert.equal(app.store.get(PANES).list,false,'opening a preview does not persist a pinned panel');
       await hoverPanel(app);

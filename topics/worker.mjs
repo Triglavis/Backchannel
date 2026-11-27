@@ -1024,6 +1024,17 @@ export default {
   async fetch(request, env, context) {
     const url = new URL(request.url);
     const { pathname } = url;
+    if (pathname === "/sidebar-composer" && ["GET", "HEAD"].includes(request.method)) {
+      const body = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Backchannel Composer</title><body></body></html>';
+      return new Response(request.method === "HEAD" ? null : body, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
     if (pathname === "/internal/review" && request.method === "GET") return serveTopicReviewPage();
     if (pathname === "/api/topics" && ["GET", "HEAD"].includes(request.method)) return serveIndex(request, env.TOPICS_DB);
     if (pathname === "/api/topics/article" && request.method === "GET") return serveTopicArticle(request, url, env, context).catch(articleStorageError);

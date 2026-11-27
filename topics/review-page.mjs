@@ -765,7 +765,7 @@ export function serveTopicReviewPage() {
                   <label for="edit">Edit</label>
                   <select id="edit">
                     <option value="label">Rename topic</option>
-                    <option value="image">Set Wikimedia Commons cover</option>
+                    <option value="image">Set Wikimedia&nbsp;Commons cover</option>
                     <option value="automatic">Use automatic cover image</option>
                   </select>
                 </div>

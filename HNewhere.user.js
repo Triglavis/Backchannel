@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Backchannel
 // @namespace    https://github.com/twalichiewicz/HNewhere
-// @version      1.6.19.4
+// @version      1.6.20
 // @license      GPL-3.0-or-later
 // @copyright    2026 Triglavis LLC
 // @updateURL    https://raw.githubusercontent.com/twalichiewicz/Backchannel/main/HNewhere.user.js
@@ -79,7 +79,11 @@
 (function () {
 	"use strict";
 
-	if (window.top !== window.self && window.name !== "backchannel-article") {
+	const SIDEBAR_COMPOSER_FRAME = "backchannel-sidebar-composer";
+	const SIDEBAR_COMPOSER_URL = "https://topics.backchnnl.app/sidebar-composer";
+	const isSidebarComposerPage = location.origin + location.pathname === SIDEBAR_COMPOSER_URL;
+	const isSidebarComposerFrame = isSidebarComposerPage && window.name === SIDEBAR_COMPOSER_FRAME;
+	if (window.top !== window.self && window.name !== "backchannel-article" && !isSidebarComposerFrame) {
 		return;
 	}
 
@@ -1526,7 +1530,7 @@
 			items.push({ id: "tab", label: "Open in new tab" });
 		}
 
-		items.push({ id: "delete", label: "Delete" });
+		items.push({ id: "delete", label: "Remove" });
 
 		if (doc?.fresh && !inTag) {
 			items.push({ id: "seen", label: "Mark as seen" });
@@ -2363,7 +2367,7 @@
 		}, true));
 	}
 
-	async function exportBookmarks() {
+	async function bookmarkExportFile() {
 		const seen = new Set();
 		const links = [];
 		for (const doc of await loadCollectionDocuments()) {
@@ -2375,10 +2379,7 @@
 			const date = Number.isFinite(added) && added > 0 ? ` ADD_DATE="${added}"` : "";
 			links.push(`    <DT><A HREF="${escapeHTML(doc.url)}"${date}>${escapeHTML(doc.title || doc.url)}</A>`);
 		}
-		if (!links.length) {
-			showToast("No bookmarks to export");
-			return;
-		}
+		if (!links.length) return null;
 		const html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
 <META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
 <TITLE>Backchannel bookmarks</TITLE>
@@ -2387,11 +2388,10 @@
 ${links.join("\n")}
 </DL><p>
 `;
-		downloadFile(html, "text/html;charset=utf-8", "backchannel-bookmarks.html");
+		return { text: html, type: "text/html;charset=utf-8", name: "backchannel-bookmarks.html" };
 	}
 
-	function collectionSettingsHTML(reader) {
-		if (!reader) return `<div data-app-section="collection"><a class="settings-button" href="${START_PAGE_ORIGIN}/#collection-settings" target="_blank" rel="noopener noreferrer">Open Collection settings in Reader</a></div>`;
+	function collectionSettingsHTML() {
 		return `
 <div data-app-section="collection">
 <section id="collection-import-settings" class="settings-group" aria-labelledby="collection-import-heading">
@@ -2437,14 +2437,74 @@ ${links.join("\n")}
 </dialog>`;
 	}
 
-	function openBookmarkImport() {
-		const input = appState?.ui.shadow.getElementById("bookmark-import-file");
+	function openBookmarkImport(shadow = appState?.ui.shadow) {
+		const input = shadow?.getElementById("bookmark-import-file");
 		if (!input) return;
 		input.value = "";
 		input.click();
 	}
 
-	function wireBookmarkImport(shadow) {
+	function collectionImportActions(shadow, isCurrent = () => true) {
+		let selection = null;
+		let revision = 0;
+		return {
+			async previewImport(file) {
+				const id = ++revision;
+				selection = null;
+				const [html, identity, documents] = await Promise.all([file.text(), bookmarkImportIdentity(), loadCollectionDocuments()]);
+				const parsed = parseBookmarkHTML(html);
+				if (parsed.bookmarks.length + parsed.skipped > 10000) throw new Error("bookmark-too-many-links");
+				if (id === revision) selection = { id, parsed, identity };
+				const { additions, duplicates, skipped } = previewBookmarkImport(parsed, documents);
+				return { id, additions: additions.length, duplicates, skipped };
+			},
+			async importBookmarks(id) {
+				if (selection?.id !== id) throw new Error("bookmark-import-selection-changed");
+				const { parsed, identity } = selection;
+				selection = null;
+				const result = await applyBookmarkImport(parsed, identity).catch((error) => {
+					if (id === revision) selection = { id, parsed, identity };
+					throw error;
+				});
+				if (!result.added) return { additions: 0, duplicates: result.duplicates, skipped: result.skipped };
+
+				if (appState?.ui.shadow === shadow) {
+					closeAppSettings();
+					chooseAppView("collection", true);
+				} else if (sidebarUI?.shadow === shadow && isCurrent()) {
+					closeAppSettings();
+					refreshCollectionSignal().then(() => {
+						if (sidebarUI?.shadow !== shadow) return;
+						if (isBrowsing(sidebarUI)) return renderBrowseView(sidebarUI, { view: "collection" });
+						setBrowseMode(sidebarUI, true, { tab: "collection", animate: false });
+					}).catch(console.error);
+				}
+				refreshCollectionViews().catch(console.error);
+				const next = result.syncReady ? "They’ll sync with your account." : "Saved on this device. Sign in to sync across devices.";
+				showToast(`Imported ${pluralize(result.added, "link")}. ${next}`, {
+					page: !sidebarUI,
+					duration: 12000,
+					action: {
+						label: "Undo",
+						onAct: async () => {
+							try {
+								const removed = await undoBookmarkImport(result.imported, identity);
+								refreshCollectionViews().catch(console.error);
+								showToast(removed ? `Removed ${pluralize(removed, "imported link")}.` : "No unchanged imported links to remove.", { page: !sidebarUI });
+							} catch (error) {
+								showToast(error.message === "bookmark-import-owner-changed"
+									? "The local library or account changed. The import couldn't be undone."
+									: "Couldn't undo the bookmark import.", { page: !sidebarUI });
+							}
+						},
+					},
+				});
+				return { additions: result.added };
+			},
+		};
+	}
+
+	function wireBookmarkImport(shadow, { previewImport, importBookmarks }) {
 		const find = (name) => shadow.getElementById("bookmark-import-" + name);
 		const input = find("file");
 		const dialog = shadow.getElementById("bookmark-import");
@@ -2479,7 +2539,7 @@ ${links.join("\n")}
 			}[error.message] || "Couldn't import bookmarks. Try again.";
 		};
 
-		shadow.getElementById("collection-import-open").onclick = openBookmarkImport;
+		shadow.getElementById("collection-import-open").onclick = () => openBookmarkImport(shadow);
 		cancel.onclick = () => dialog.close();
 		dialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
 		dialog.addEventListener("close", () => { generation++; selection = null; });
@@ -2495,13 +2555,10 @@ ${links.join("\n")}
 			dialog.showModal();
 			try {
 				if (file.size > 32 * 1024 * 1024) throw new Error("bookmark-file-too-large");
-				const [html, identity, documents] = await Promise.all([file.text(), bookmarkImportIdentity(), loadCollectionDocuments()]);
+				const preview = await previewImport(file);
 				if (request !== generation || !dialog.open) return;
-				const parsed = parseBookmarkHTML(html);
-				if (parsed.bookmarks.length + parsed.skipped > 10000) throw new Error("bookmark-too-many-links");
-				const preview = previewBookmarkImport(parsed, documents);
-				selection = { parsed, identity };
-				paint({ ...preview, additions: preview.additions.length });
+				selection = preview.id;
+				paint(preview);
 			} catch (error) {
 				if (request === generation && dialog.open) showError(error);
 			}
@@ -2511,40 +2568,44 @@ ${links.join("\n")}
 			if (!selection || busy) return;
 			busy = confirm.disabled = cancel.disabled = true;
 			status.textContent = "Importing bookmarks…";
-			const { parsed, identity } = selection;
 			try {
-				const result = await applyBookmarkImport(parsed, identity);
-				if (!result.added) {
-					paint({ ...result, additions: 0 });
-					return;
-				}
-				dialog.close();
-				closeAppSettings();
-				chooseAppView("collection", true);
-				refreshCollectionViews().catch(console.error);
-				const next = result.syncReady ? "They’ll sync with your account." : "Saved on this device. Sign in to sync across devices.";
-				showToast(`Imported ${pluralize(result.added, "link")}. ${next}`, {
-					duration: 12000,
-					action: {
-						label: "Undo",
-						onAct: async () => {
-							try {
-								const removed = await undoBookmarkImport(result.imported, identity);
-								refreshCollectionViews().catch(console.error);
-								showToast(removed ? `Removed ${pluralize(removed, "imported link")}.` : "No unchanged imported links to remove.");
-							} catch (error) {
-								showToast(error.message === "bookmark-import-owner-changed"
-									? "The local library or account changed. The import couldn't be undone."
-									: "Couldn't undo the bookmark import.");
-							}
-						},
-					},
-				});
+				const result = await importBookmarks(selection);
+				if (result.additions) dialog.close();
+				else paint(result);
 			} catch (error) {
 				showError(error);
 			} finally {
 				busy = confirm.disabled = cancel.disabled = false;
 			}
+		};
+	}
+
+	function wireCollectionDownloads(shadow, { notesCount, bookmarkExportFile, notesExportFile }) {
+		const notes = shadow.getElementById("settings-notes-export");
+		const bookmarks = shadow.getElementById("settings-bookmarks-export");
+		const count = shadow.getElementById("settings-notes-count");
+		const download = async (event, loadFile, empty, success) => {
+			if (!event.isTrusted) return;
+			const button = event.currentTarget;
+			const label = button.textContent;
+			button.disabled = true;
+			try {
+				const file = await loadFile();
+				if (file) downloadFile(file.text, file.type, file.name);
+				button.textContent = file ? success || label : empty;
+			} catch (error) {
+				console.error(error);
+				button.textContent = "Download failed";
+			}
+			window.setTimeout(() => {
+				button.textContent = label;
+				button.disabled = false;
+			}, 1800);
+		};
+		bookmarks.onclick = (event) => download(event, bookmarkExportFile, "No bookmarks to export");
+		notes.onclick = (event) => download(event, notesExportFile, "No notes yet", "Exported");
+		return async () => {
+			count.textContent = pluralize(await notesCount(), "note");
 		};
 	}
 
@@ -3320,6 +3381,13 @@ ${links.join("\n")}
 	}
 
 	function setActionLabel(button, label) {
+		if (button.id === "sidebar-save-page") {
+			const saved = label === "unsave";
+			const name = saved ? "Remove from Collection" : "Save to Collection";
+			button.setAttribute("aria-label", name);
+			button.setAttribute("aria-pressed", String(saved));
+			button.title = name;
+		}
 		button.textContent = button.closest(".browse-row-menu") ? label.charAt(0).toUpperCase() + label.slice(1) : label;
 	}
 
@@ -3455,9 +3523,7 @@ ${links.join("\n")}
 		}
 	}
 
-	async function refreshSaveControls() {
-		const root = sidebarUI?.shadow;
-
+	async function refreshSaveControls(root = sidebarUI?.shadow) {
 		if (!root) {
 			return;
 		}
@@ -5578,7 +5644,8 @@ ${links.join("\n")}
 		out = out
 			.replace(/\*\*(\S(?:[^*\n]*\S)?)\*\*/g, "<strong>$1</strong>")
 			.replace(/(^|[^*\w])\*(\S(?:[^*\n]*\S)?)\*(?!\*)/g, "$1<em>$2</em>")
-			.replace(/(^|[^_\w])_(\S(?:[^_\n]*\S)?)_(?!\w)/g, "$1<em>$2</em>");
+			.replace(/(^|[^_\w])_(\S(?:[^_\n]*\S)?)_(?!\w)/g, "$1<em>$2</em>")
+			.replace(/~~(\S(?:[^~\n]*\S)?)~~/g, "<del>$1</del>");
 
 		return out.replace(/\u0000(\d+)\u0000/g, (m, index) => held[Number(index)]);
 	}
@@ -6499,7 +6566,7 @@ ${
 	registerSource({
 		id: "hn",
 		origins: ["news.ycombinator.com"],
-		label: "Hacker News",
+		label: "Hacker\u00a0News",
 		shortLabel: "HN",
 		points: [
 			"Tech, startups and science",
@@ -6554,7 +6621,7 @@ ${
 				new DOMParser().parseFromString(response.text, "text/html"),
 			).map(hnStory);
 
-			if (!stories.length) throw new Error("Hacker News feed unavailable");
+			if (!stories.length) throw new Error("Hacker\u00a0News feed unavailable");
 			return stories;
 		},
 
@@ -8154,6 +8221,7 @@ ${
 		origins: ["reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com"],
 		label: "Reddit",
 		shortLabel: "Reddit",
+		hasSubsources: true,
 		points: [
 			"Communities on almost any topic",
 			"Threaded comments with votes",
@@ -9336,7 +9404,7 @@ ${
 		return (
 			(note.exact
 				? `<blockquote data-hnewhere-exact="1"${context}>${escapeHTML(note.exact)}</blockquote>`
-				: "") + noteTextHTML(note.text)
+				: "") + (typeof note.rich === "string" ? cleanComposeMarkup(note.rich) : noteTextHTML(note.text))
 		);
 	}
 
@@ -9726,6 +9794,7 @@ button {
 		return {
 			...note,
 			text: parsed.text,
+			...(parsed.rich ? { rich: parsed.rich } : {}),
 			exact: parsed.exact,
 			prefix: anchor?.prefix || "",
 			suffix: anchor?.suffix || "",
@@ -9735,9 +9804,11 @@ button {
 
 	function editedNote(note, parsed) {
 		const changed = parsed.exact !== String(note.exact || "").trim();
+		const { rich, ...existing } = note;
 
 		return {
-			...(changed ? reanchoredNote(note, parsed) : note),
+			...(changed ? reanchoredNote(existing, parsed) : existing),
+			...(rich && parsed.text === note.text ? { rich } : {}),
 			text: parsed.text,
 			exact: parsed.exact,
 			edited: Math.floor(Date.now() / 1000),
@@ -9962,11 +10033,7 @@ button {
 			return;
 		}
 
-		ui.body.insertBefore(
-			section,
-			ui.body.querySelector(".page-sort") ||
-				ui.body.querySelector(".top-level-comments"),
-		);
+		ui.body.insertBefore(section, ui.body.querySelector(".top-level-comments"));
 	}
 
 	function retireNotesSection(section) {
@@ -10352,17 +10419,14 @@ button {
 		window.setTimeout(() => URL.revokeObjectURL(href), 10000);
 	}
 
-	async function exportNotes() {
+	async function collectionNotesCount() {
+		return notedDocuments(await load(NOTES_INDEX_KEY, [])).reduce((sum, entry) => sum + (entry.count || 0), 0);
+	}
+
+	async function notesExportFile() {
 		const now = new Date();
 		const payload = notesExportPayload(await collectNotes(), now.toISOString());
-
-		if (!payload.noteCount) {
-			return payload;
-		}
-
-		downloadFile(JSON.stringify(payload, null, 2), "application/json", notesExportName(now));
-
-		return payload;
+		return payload.noteCount ? { text: JSON.stringify(payload, null, 2), type: "application/json", name: notesExportName(now) } : null;
 	}
 
 	const MASTODON_INSTANCE = "https://mastodon.social";
@@ -10488,6 +10552,7 @@ button {
 		],
 		label: "Lemmy",
 		shortLabel: "Lemmy",
+		hasSubsources: true,
 		slow: true,
 		points: [
 			"Federated communities, like Reddit",
@@ -11390,7 +11455,7 @@ button {
 		}
 
 		const sorted = [...matches.values()].sort(compareStoriesByDiscussion);
-		if (!signal?.aborted && !answered.some(Boolean)) throw failure || new Error("Hacker News discovery unavailable");
+		if (!signal?.aborted && !answered.some(Boolean)) throw failure || new Error("Hacker\u00a0News discovery unavailable");
 
 		if (!signal?.aborted && epoch === sourceCacheEpoch && shouldCacheDiscovery(answered)) {
 			const now = Date.now();
@@ -12053,16 +12118,20 @@ button {
 	// -------------------------
 
 	// #region hnewhere-test-export
-	function adoptStyles(shadow) {
-		for (const style of shadow.querySelectorAll("style")) {
-			try {
-				const sheet = new CSSStyleSheet();
+	function adoptStyle(root, css) {
+		try {
+			const sheet = new CSSStyleSheet();
+			sheet.replaceSync(css);
+			root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+			return true;
+		} catch {
+			return false;
+		}
+	}
 
-				sheet.replaceSync(style.textContent);
-				shadow.adoptedStyleSheets = [...shadow.adoptedStyleSheets, sheet];
-				style.remove();
-			} catch {
-			}
+	function adoptStyles(root) {
+		for (const style of root.querySelectorAll("style")) {
+			if (adoptStyle(root, style.textContent)) style.remove();
 		}
 	}
 
@@ -12460,6 +12529,9 @@ button {
 			"STRONG",
 			"I",
 			"EM",
+			"U",
+			"S",
+			"DEL",
 			"BLOCKQUOTE",
 			"BR",
 			"TT",
@@ -13940,7 +14012,7 @@ html[data-backchannel-installed] .chin {
 		return { kind: "reader-article", url: url.href, title: pageDocumentTitle().slice(0, 512) };
 	}
 
-	function openSidebarArticleInReader({ note = null, compose = false } = {}) {
+	function openSidebarArticleInReader({ note = null } = {}) {
 		const article = sidebarArticlePayload();
 		if (!article) return;
 		let popup;
@@ -13949,7 +14021,7 @@ html[data-backchannel-installed] .chin {
 			if (popup) popup.opener = null;
 		} catch {}
 		const nonce = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
-		stageBridgePayload(nonce, { ...article, note, compose })
+		stageBridgePayload(nonce, { ...article, note })
 			.then(() => {
 				const destination = `${START_PAGE_ORIGIN}/#reader-article=${nonce}`;
 				if (popup && !popup.closed) popup.location.replace(destination);
@@ -13971,7 +14043,6 @@ html[data-backchannel-installed] .chin {
 		await clearBridgePayload(nonce);
 		const url = readerURL(staged.url);
 		if (!url || url.username || url.password || isHiddenSite(url.href) || Date.now() - staged.ts > 60000) return;
-		const draft = staged.composeFrame ? receiveSidebarDraft(nonce) : null;
 		const opened = openAppStory({ url: url.href, title: staged.title });
 		if (!sameURL(pageHref(), url.href)) return;
 		if (staged.note && typeof staged.note.exact === "string") {
@@ -13982,50 +14053,6 @@ html[data-backchannel-installed] .chin {
 			revealAppDiscussion();
 		}
 		await opened;
-		if (staged.compose || draft) {
-			const received = await draft;
-			if (!sameURL(pageHref(), url.href)) return;
-			const ui = appState.ui;
-			const composer = "#app-discussion-compose .compose-box";
-			let box = ui.shadow.querySelector(composer);
-			if (!box && (received?.mode === "note" || staged.compose)) {
-				const settings = await loadSettings();
-				if (!sameURL(pageHref(), url.href)) return;
-				box = ui.shadow.querySelector(composer) || mountComposeBox(ui, [], settings);
-			}
-			const field = box?.querySelector(".composer-text");
-			if (!field) return;
-			if (received?.text) {
-				field.value = received.text;
-				field.dispatchEvent(new Event("sidebar-draft"));
-			}
-			if (appIsPhone()) setAppPhoneComposer(true);
-			const send = received?.mode === "note" ? box.querySelector(".compose-send-note") : box.querySelector(".compose-send-comment");
-			(received?.text && send && !send.hidden ? send : field).focus({ preventScroll: true });
-		}
-	}
-
-	function receiveSidebarDraft(nonce) {
-		const opener = window.opener;
-		if (!opener) return Promise.resolve(null);
-		return new Promise((resolve) => {
-			const finish = (draft) => {
-				clearTimeout(timer);
-				window.removeEventListener("message", onMessage);
-				window.opener = null;
-				resolve(draft);
-			};
-			const onMessage = (event) => {
-				const data = event.data;
-				if (!event.isTrusted || event.source !== opener || event.origin !== "null" ||
-					data?.type !== "backchannel-sidebar-draft" || data.nonce !== nonce) return;
-				if (typeof data.text !== "string" || !["comment", "note"].includes(data.mode)) return;
-				finish({ text: data.text.slice(0, 20000), mode: data.mode });
-			};
-			const timer = setTimeout(() => finish(null), 5000);
-			window.addEventListener("message", onMessage);
-			opener.postMessage({ type: "backchannel-sidebar-reader", nonce }, "*");
-		});
 	}
 
 	async function sweepBridgePayloads() {
@@ -14459,7 +14486,7 @@ html[data-backchannel-installed] .chin {
 
 			installed = true;
 			window.addEventListener("message", (event) => {
-				if (event.origin !== pending.get(event.data?.nonce)?.origin) {
+				if (!event.isTrusted || event.origin !== pending.get(event.data?.nonce)?.origin) {
 					return;
 				}
 
@@ -14469,11 +14496,11 @@ html[data-backchannel-installed] .chin {
 
 		return function openBridge(
 			nonce,
-			{ origin = HN_ORIGIN, timeout = 60000, features, onInterim } = {},
+			{ origin = HN_ORIGIN, timeout = 60000, features, onInterim, openedPopup } = {},
 		) {
 			install();
 
-			const popup = window.open(
+			const popup = openedPopup ?? window.open(
 				"about:blank",
 				source + "_" + nonce,
 				features || "width=760,height=680,resizable=yes,scrollbars=yes",
@@ -16373,6 +16400,8 @@ html[data-backchannel-installed] .chin {
 
 		const swap = () => {
 			closeBrowseRowMenus(ui.shadow);
+			if (on) closeSourceMenu(ui.shadow);
+			else closeSidebarSavedList(ui);
 			panel.classList.toggle("browsing", on);
 			ui.frontPageTransitioning = false;
 			scheduleFrontPageRefresh();
@@ -16494,7 +16523,16 @@ html[data-backchannel-installed] .chin {
 			return;
 		}
 
-		const records = Promise.allSettled([
+		const records = rememberBrowseArrival(story, { openPanel, focus });
+		if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+			return;
+		}
+		event.preventDefault();
+		records.then(() => { location.href = story.url; });
+	}
+
+	function rememberBrowseArrival(story, { openPanel = false, focus = "" } = {}) {
+		return Promise.allSettled([
 			save(STORAGE.last, {
 				url: story.url,
 				source: story.source || "",
@@ -16504,20 +16542,19 @@ html[data-backchannel-installed] .chin {
 			}),
 			focus ? rememberPendingFocus(story.url, focus) : null,
 		]);
-
-		if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-			return;
-		}
-
-		event.preventDefault();
-
-		records.then(() => {
-			location.href = story.url;
-		});
 	}
 
 	function storyHasCommentCount(story) {
 		return !story.collective && (story.source !== "mastodon" || Boolean(story.permalink));
+	}
+
+	function linkTitleHTML(title) {
+		const escaped = escapeHTML(title);
+		const references = escaped.replace(/&amp;((?:[a-z][a-z0-9]+|#(?:[0-9]+|x[0-9a-f]+));)/gi, "&$1");
+		if (references === escaped) return escaped;
+		const parser = document.createElement("template");
+		parser.innerHTML = `<span title="${references}"></span>`;
+		return escapeHTML(parser.content.firstElementChild.title);
 	}
 
 	function renderBrowseRow(story, container, rank, options = {}) {
@@ -16611,7 +16648,7 @@ html[data-backchannel-installed] .chin {
 	${readerRow && !isWriting ? appRowThumbHTML(story, { look: options.look }) : ""}
 	<div class="browse-main">
 	<div class="story-title">
-	<a class="browse-title-link${isWriting ? " browse-quote" : ""}" href="${escapeHTML(story.url)}">${escapeHTML(story.title)}</a>
+	<a class="browse-title-link${isWriting ? " browse-quote" : ""}" href="${escapeHTML(story.url)}">${isWriting ? escapeHTML(story.title) : linkTitleHTML(story.title)}</a>
 	${metadata && !isWriting ? `<span class="browse-site">(${metadata})</span>` : ""}
 	</div>
 	<div class="story-meta">
@@ -16653,7 +16690,7 @@ html[data-backchannel-installed] .chin {
 				await mutateHiddenStories((entries) => addHiddenStory(entries, story));
 				await options.reload?.();
 
-				showToast("Article hidden from Front Pages", {
+				showToast("Article hidden from Front\u00a0Pages", {
 					action: {
 						label: "undo",
 						onAct: () => {
@@ -16737,11 +16774,12 @@ html[data-backchannel-installed] .chin {
 	let frontPageAvailable = true;
 
 	function browseLabel() {
-		return frontPageAvailable ? "Front Pages and your queue" : "Your queue";
+		if (frontPageAvailable) return queueHasItems ? "Front\u00a0Pages and your queue" : "Front\u00a0Pages";
+		return queueHasItems ? "Your queue" : "Collection";
 	}
 
 	async function refreshBrowseAffordances(root) {
-		const frontTab = root?.querySelector?.("#browse-tab-front");
+		const frontTab = root?.querySelector?.("#browse-tab-all, #browse-tab-front");
 		const wordmark = root?.querySelector?.("#browse-toggle");
 
 		if (!frontTab && !wordmark) {
@@ -16753,11 +16791,6 @@ html[data-backchannel-installed] .chin {
 
 		if (frontTab) {
 			frontTab.hidden = !frontPageAvailable;
-			const allTab = root.querySelector("#browse-tab-all");
-
-			if (allTab) {
-				allTab.hidden = !frontPageAvailable;
-			}
 		}
 
 		if (wordmark) {
@@ -17072,7 +17105,7 @@ html[data-backchannel-installed] .chin {
 		if (id === "delete") {
 			const snapshot = await removeCollectedDocument(doc);
 			const removals = [...(removalToastShowing() ? removalUndo.removals : []), { snapshot, notes: doc.notes?.length || 0 }];
-			const notes = removals.reduce((sum, each) => sum + each.notes, 0);
+			const notes = appState ? removals.reduce((sum, each) => sum + each.notes, 0) : 0;
 			const message = `${removals.length > 1 ? `Removed ${removals.length} pages from Collection` : "Removed from Collection"}${notes ? `, with ${pluralize(notes, "note")}` : ""}`;
 
 			removalUndo = { removals, message };
@@ -17792,7 +17825,7 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			tag.dataset.collectionKey = doc.key;
 		}
 
-		const anchor = body.querySelector(":scope > .submission-details") || body.querySelector(":scope > .page-header");
+		const anchor = body.querySelector(":scope > .submission-details");
 		previousTag?.remove();
 
 		if (anchor) {
@@ -18548,24 +18581,26 @@ ${model.yours.length ? `<ul class="collection-tag-yours">${model.yours.map(colle
 			empty.textContent = "No saved pages match this filter.";
 		} else {
 			empty.innerHTML = `<p>No saved pages yet.</p><button type="button" class="settings-byline-action">Import bookmarks</button>`;
-			empty.querySelector("button").onclick = openBookmarkImport;
+			empty.querySelector("button").onclick = () => openBookmarkImport();
 		}
 		return empty;
 	}
 
-	function readerCollectionRow(doc, tags) {
+	function readerCollectionRow(doc, tags, privateList = false) {
 		const row = document.createElement("div");
 		row.className = "story browse-row reader-collection-row";
 		row.classList.toggle("is-fresh", doc.fresh);
 		row.dataset.documentKey = doc.key;
-		const title = escapeHTML(doc.title);
+		const title = linkTitleHTML(doc.title);
 		const tagLabels = TOPICS.filter(({ id }) => tags.has(id)).map(({ label }) => `<span>${escapeHTML(label)}</span>`).join(", ");
 		row.innerHTML = `
-${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
+${privateList ? '<span class="browse-thumb-wrap is-generic" aria-hidden="true"></span>' : appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 <div class="browse-main">
 	<div class="story-title">${doc.url ? `<a class="browse-title-link" href="${escapeHTML(doc.url)}">${title}</a>` : title}</div>
 	<div class="browse-site reader-collection-meta">${escapeHTML(doc.site)}${doc.fresh ? `<span class="reader-collection-new">${doc.site ? " · " : ""}${doc.found ? escapeHTML(pluralize(doc.found, "new comment")) : "New discussion"}</span>` : ""}${tagLabels ? `${doc.site || doc.fresh ? " · " : ""}${tagLabels}` : ""}</div>
 </div>`;
+		if (privateList) return row;
+
 		const link = row.querySelector(".browse-title-link");
 		if (link) link.onclick = (event) => openStoryFromRow(documentStory(doc), event);
 		mountAppRowMenu(row, (button) => appLinkRowMenuItems(row, button, doc), { label: "Actions for this page" });
@@ -18656,7 +18691,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			return;
 		}
 
-		queueHasItems = true;
+		queueHasItems = (await loadQueue()).length > 0;
 
 		paintBrowseTab(
 			tab,
@@ -18767,6 +18802,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		closeComposeDock(ui.shadow);
 		ui.shadow?.getElementById("app-discussion-compose")?.replaceChildren();
+		clearSidebarDiscussionControls(ui);
 		resetFilterBanner();
 		body.replaceChildren();
 
@@ -18781,33 +18817,11 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		body.appendChild(message);
 		if (!appState) {
 			loadSettings().then((settings) => {
-				if (message.isConnected) mountSidebarComposer(ui, false, Boolean(settings.notepad));
+				if (message.isConnected) mountSidebarComposer(ui, [], Boolean(settings.notepad));
 			}).catch(console.error);
 			ui.syncStatus = { ...(ui.syncStatus || {}), onSync: (releaseRead, redditReady) => syncDiscussions(ui, [], releaseRead, { redditReady }) };
 			ui.syncAgeDismissed = true;
 			paintSidebarSyncButton(ui);
-		}
-
-		const address = pageAddress();
-		const keep = appState
-			? ""
-			: saveButtonHTML({
-					key: normalizeURL(address) || "",
-					url: address,
-					title: pageDocumentTitle(),
-					site: hostLabel(address),
-					kind: "discussion",
-				});
-
-		if (keep) {
-			const line = document.createElement("div");
-
-			line.className = "no-discussion-keep";
-			line.innerHTML = keep;
-			registerSidebarSaveControls(line);
-			line.firstElementChild.title = "Save this page to your Collection and hear when a discussion starts";
-			body.appendChild(line);
-			refreshSaveControls().catch(console.error);
 		}
 
 		learnOpenPage()
@@ -19066,7 +19080,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			const empty = document.createElement("div");
 			empty.className = "browse-empty";
 			empty.textContent =
-				"Nothing queued yet. Use queue on any article, here or on Hacker News, to read it later.";
+				"Nothing queued yet. Use queue on any article, here or on Hacker\u00a0News, to read it later.";
 			list.appendChild(empty);
 			return;
 		}
@@ -19183,10 +19197,15 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 	}
 
 	function sidebarHomeChromeHTML() {
-		const tabs = APP_VIEWS.map((view) => `<button id="browse-tab-${view.id === "unread" ? "front" : view.id}" class="browse-tab browse-home-tab${view.id === "unread" ? " is-current" : ""}" data-browse-view="${view.id}" type="button" role="tab" aria-label="${view.label}" aria-selected="${view.id === "unread"}" aria-controls="browse-list" tabindex="${view.id === "unread" ? 0 : -1}"${view.id === "queue" || view.id === "collection" ? " hidden" : ""}>${browseTabContents(view.label, view.icon)}</button>`).join("");
+		const tabs = APP_VIEWS.map(({ id, label, icon }) => {
+			const current = id === "all";
+			return `<button id="browse-tab-${id}" class="browse-tab browse-home-tab${current ? " is-current" : ""}" data-browse-view="${id}" type="button" role="tab" aria-label="${label}" aria-selected="${current}" aria-controls="browse-list" tabindex="${current ? 0 : -1}"${current ? "" : " hidden"}>${browseTabContents(label, icon)}</button>`;
+		}).join("");
 
-		return `<div class="browse-home-nav-row"><button id="browse-home-search-toggle" type="button" aria-label="Search Backchannel" title="Search Backchannel" aria-expanded="false" aria-controls="browse-home-search-page">${APP_ICON('<circle cx="7" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10 10 3.5 3.5" stroke="currentColor" stroke-width="1.5"/>')}</button><nav class="browse-tabs browse-home-nav browse-home-scroll" role="tablist" aria-label="Backchannel views">${tabs}</nav></div>
-<div id="browse-home-filters" hidden></div>
+		return `<div class="browse-home-toolbar">
+<div class="browse-home-nav-row"><button id="browse-home-search-toggle" type="button" aria-label="Search Backchannel" title="Search Backchannel" aria-expanded="false" aria-controls="browse-home-search-page">${APP_ICON('<circle cx="7" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10 10 3.5 3.5" stroke="currentColor" stroke-width="1.5"/>')}</button><nav class="browse-tabs browse-home-nav browse-home-scroll" role="tablist" aria-label="Backchannel views">${tabs}</nav></div>
+<div id="browse-home-filters" class="is-collapsed" hidden><div class="browse-home-filter-section"><div class="browse-home-scroll" role="group" aria-label="Front\u00a0Pages"></div></div></div>
+</div>
 <div id="browse-home-search-page" class="app-search-page" role="dialog" aria-label="Search Backchannel" hidden><div class="app-search-head"><input id="browse-home-search" class="app-search-input" type="search" placeholder="Search Backchannel" aria-label="Search Backchannel" autocomplete="off" autocorrect="off" spellcheck="false"><button id="browse-home-search-close" class="app-search-close" type="button">Cancel</button></div><div id="browse-home-search-results" class="app-search-results"></div></div>`;
 	}
 
@@ -19261,6 +19280,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		const markable = isBrowsing(ui) && !state.searchOpen && appViewIsFrontPage(view);
 
 		ui.shadow.querySelector("#browse-home-mark-read").hidden = !markable;
+		paintFrontPageUnreadFilter(ui.shadow.getElementById("browse-home-unread-filter"), state, markable);
 		paintSidebarSyncButton(ui);
 
 		for (const button of ui.shadow.querySelectorAll(".browse-home-nav [data-browse-view]")) {
@@ -19269,69 +19289,47 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 			button.classList.toggle("is-current", current);
 			button.setAttribute("aria-selected", String(current));
-			button.tabIndex = matches ? 0 : -1;
+			button.tabIndex = matches && !button.hidden ? 0 : -1;
 			if (current) ui.shadow.querySelector("#browse-list").setAttribute("aria-labelledby", button.id);
 		}
 
-		for (const section of ui.shadow.querySelectorAll("[data-filter-group]")) {
-			const visible = !state.searchOpen && appViewIsFrontPage(view) && (section.dataset.filterGroup !== "sources" || view !== "unread");
+		const filters = ui.shadow.getElementById("browse-home-filters");
+		const visible = !filters.hidden && !state.searchOpen && appViewIsFrontPage(view);
 
-			section.classList.toggle("is-collapsed", !visible);
-			section.setAttribute("aria-hidden", String(!visible));
-			section.inert = !visible;
-		}
+		filters.classList.toggle("is-collapsed", !visible);
+		filters.setAttribute("aria-hidden", String(!visible));
+		filters.inert = !visible;
 	}
 
 	function renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view, hasHeadlines) {
-		const filters = ui.shadow.querySelector("#browse-home-filters");
-		const focused = filters.contains(ui.shadow.activeElement) ? ui.shadow.activeElement?.dataset.browseView : "";
-		const scrolls = new Map([...filters.querySelectorAll("[data-filter-group]")].map((section) => [section.dataset.filterGroup, section.querySelector(".browse-home-scroll").scrollLeft]));
+		const filters = ui.shadow.getElementById("browse-home-filters");
+		const scroller = filters.querySelector(".browse-home-scroll");
+		const focused = scroller.contains(ui.shadow.activeElement) ? ui.shadow.activeElement.dataset.browseView : "";
+		const scrollLeft = scroller.scrollLeft;
 		const interests = topicIds.map((id) => ({ view: "topic:" + id, mark: TOPIC_ICONS[id], count: counts.topics[id] }));
 		const sources = sourceIds.map((id) => ({ view: "source:" + id, mark: APP_SOURCE_ICONS[id], count: counts.sources[id] }));
 		if (hasHeadlines) interests.unshift(APP_HEADLINES);
 
-		for (const [group, label, views] of [["topics", "Front Pages", interests], ["sources", "Sources", sources]]) {
-			let section = filters.querySelector(`[data-filter-group="${group}"]`);
+		const buttons = [...interests, ...sources].map(({ view: key, mark, count }) => {
+			const name = appViewLabel(key);
+			const icon = mark || `<span class="rail-monogram">${escapeHTML(name.slice(0, 2))}</span>`;
+			const button = document.createElement("button");
 
-			if (!views.length) {
-				section?.remove();
-				continue;
-			}
-
-			if (!section) {
-				section = document.createElement("div");
-				section.className = "browse-home-filter-reveal is-collapsed";
-				section.dataset.filterGroup = group;
-				section.innerHTML = `<section class="browse-home-filter-section">${group === "topics" ? `<h3 class="browse-home-filter-label">${label}</h3>` : ""}<div class="browse-home-scroll" role="group" aria-label="${label}"></div></section>`;
-				filters.append(section);
-			}
-
-			const scroller = section.querySelector(".browse-home-scroll");
-
-			scroller.replaceChildren();
-
-			for (const { view: key, mark, count } of views) {
-				const name = appViewLabel(key);
-				const icon = mark || `<span class="rail-monogram">${escapeHTML(name.slice(0, 2))}</span>`;
-				const button = document.createElement("button");
-
-				button.type = "button";
-				button.className = "browse-home-tab browse-home-filter";
-				button.dataset.browseView = key;
-				button.setAttribute("aria-pressed", String(view === key));
-				button.innerHTML = browseTabContents(name, icon, count);
-				button.onclick = () => renderBrowseView(ui, { view: ui.browseHome.view === key ? "all" : key }).catch(console.error);
-				scroller.append(button);
-			}
-
-			scroller.scrollLeft = scrolls.get(group) || 0;
-		}
-
-		filters.hidden = !filters.childElementCount;
+			button.type = "button";
+			button.className = "browse-home-tab browse-home-filter";
+			button.dataset.browseView = key;
+			button.setAttribute("aria-pressed", String(view === key));
+			button.innerHTML = browseTabContents(name, icon, count);
+			button.onclick = () => renderBrowseView(ui, { view: ui.browseHome.view === key ? "all" : key }).catch(console.error);
+			return button;
+		});
+		scroller.replaceChildren(...buttons);
+		filters.hidden = !buttons.length;
 		paintBrowseHome(ui);
-		const restore = [...filters.querySelectorAll("[data-browse-view]")].find((button) => button.dataset.browseView === focused);
+		scroller.scrollLeft = scrollLeft;
+		const restore = buttons.find((button) => button.dataset.browseView === focused);
 
-		if (restore && !restore.closest("[data-filter-group]").inert) {
+		if (restore && !filters.inert) {
 			restore.focus({ preventScroll: true });
 			restore.scrollIntoView({ block: "nearest", inline: "nearest" });
 		}
@@ -19515,6 +19513,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		};
 		shadow.querySelector("#browse-home-mark-read").onclick = () => markBrowseHomeRead(ui).catch(console.error);
+		shadow.getElementById("browse-home-unread-filter").onclick = () => {
+			if (toggleFrontPageUnread(state)) renderBrowseView(ui).catch(console.error);
+		};
 		list.addEventListener("click", (event) => {
 			if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.target.closest("a, button, input, textarea, .browse-row-menu")) return;
 
@@ -19543,7 +19544,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 	async function renderFrontPageView(ui, list, options = {}, isCurrent = () => true) {
 		if (!list.childElementCount) {
-			renderBrowseSkeleton(list, "Loading Front Pages…");
+			renderBrowseSkeleton(list, "Loading Front\u00a0Pages…");
 		}
 
 		const settings = await loadSettings();
@@ -19557,6 +19558,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		if (!frontPageViewAvailable(view, sourceIds, topicIds, hasHeadlines)) {
 			view = state.view = state.frontView = "all";
 		}
+		const unread = state?.unreadViews.has(view);
 
 		const metadata = () => Promise.all([
 			loadQueue(),
@@ -19578,8 +19580,8 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 				? (await readerFrontPageTopics(candidates, readerArticleCoverage(frontPageRowStories(candidates), settings, hiddenKeys), settings.hiddenTopics)).rows
 				: candidates;
 			if (!isCurrent() || browseTab !== "front" || revision !== paintRevision) return;
-			const shown = appViewRows(rows, view, seen || {});
-			const filteredEmpty = !shown.length && rows !== candidates && appViewRows(candidates, view, seen || {}).length > 0;
+			const shown = appViewRows(rows, view, seen || {}, unread);
+			const filteredEmpty = !shown.length && rows !== candidates && appViewRows(candidates, view, seen || {}, unread).length > 0;
 			const failureText = frontPageFailureText(feedStates, view);
 
 			setBlendNote(ui, sources, topics);
@@ -19595,7 +19597,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 				const allHidden = frontPageTopicRows(allRows, view).length && !frontPageTopicRows(candidates, view).length;
 
 				note.className = "browse-empty";
-				note.textContent = pending ? "Loading Front Pages…" : failureText || (unavailable ? "Could not load Front Pages." : filteredEmpty ? "No links match your topic filters." : allHidden ? "Everything in Front Pages is hidden." : view === "unread" ? "All caught up." : "Nothing here right now.");
+				note.textContent = pending ? "Loading Front\u00a0Pages…" : failureText || (unavailable ? "Could not load Front\u00a0Pages." : filteredEmpty ? "No links match your topic filters." : allHidden ? "Everything in Front\u00a0Pages is hidden." : unread ? "All caught up." : "Nothing here right now.");
 				list.append(note);
 			} else if (failureText) {
 				const notice = document.createElement("div");
@@ -19636,11 +19638,9 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 					counts.topics[view.slice("topic:".length)] = shown.filter((row) => rowIsUnread(row, state.seen)).length;
 				}
 
-				for (const id of ["unread", "all"]) {
-					const badge = ui.shadow.querySelector(`[data-browse-view="${id}"] .rail-badge`);
-
-					badge.textContent = counts[id] ? compactCount(counts[id]) : "";
-				}
+				const badge = ui.shadow.querySelector("#browse-tab-all .rail-badge");
+				const count = state.unreadViews.has("all") ? counts.unread : counts.all;
+				badge.textContent = count ? compactCount(count) : "";
 
 				renderBrowseHomeFilters(ui, sourceIds, topicIds, counts, view, hasHeadlines);
 			}
@@ -19654,6 +19654,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		if (!list) {
 			return;
 		}
+		closeSidebarSavedList(ui);
 
 		if (options.tab) {
 			browseTab = options.tab;
@@ -19666,7 +19667,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		if (state) {
 			const previous = state.view;
 
-			state.view = options.view || (browseTab === "front" ? state.frontView : browseTab) || "unread";
+			state.view = options.view || (browseTab === "front" ? state.frontView : browseTab) || "all";
 			browseTab = appViewIsFrontPage(state.view) ? "front" : state.view;
 			if (browseTab === "front") state.frontView = state.view;
 			sequence = ++state.sequence;
@@ -19704,10 +19705,10 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		if (browseTab === "queue") {
 			setBrowseNote(ui, QUEUE_NOTE);
-			renderReaderPrivateLink(list, "Open the reading queue in Reader", "queue");
+			await renderSidebarSavedList(ui, list, "queue", isCurrent);
 		} else if (browseTab === "collection") {
 			setBrowseNote(ui, COLLECTION_NOTE);
-			renderReaderPrivateLink(list, "Open Collection in Reader", "collection");
+			await renderSidebarSavedList(ui, list, "collection", isCurrent);
 		} else {
 			outcome = await renderFrontPageView(ui, list, options, isCurrent);
 		}
@@ -19720,14 +19721,260 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 		return outcome;
 	}
 
-	function renderReaderPrivateLink(list, label, hash) {
-		const link = document.createElement("a");
-		link.className = "settings-button";
-		link.href = `${START_PAGE_ORIGIN}/#${hash}`;
-		link.target = "_blank";
-		link.rel = "noopener noreferrer";
-		link.textContent = label;
-		list.replaceChildren(link);
+	function sidebarFrameKey() {
+		return Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
+	}
+
+	function documentThemeCSS() {
+		return THEME_CSS.replaceAll(/:host\(([^)]+)\)/g, ":root$1").replaceAll(":host", ":root");
+	}
+
+	function sidebarFrameTheme(shadow) {
+		const names = ["--accent", "--accent-rgb", "--accent-ink", "--header-bg", "--subtitle-stage"];
+		return {
+			dark: shadow.host.classList.contains(DARK_CLASS),
+			accent: names.map((name) => [name, shadow.host.style.getPropertyValue(name)]),
+		};
+	}
+
+	function paintSidebarFrameTheme(theme, darkClass) {
+		const root = document.documentElement;
+		root.classList.toggle(darkClass, theme.dark);
+		for (const [name, value] of theme.accent) root.style.setProperty(name, value);
+	}
+
+	function sidebarSavedListFrame(connectKey, readyKey, css, darkClass) {
+		if (!adoptStyle(document, css)) {
+			const style = document.createElement("style");
+			style.textContent = css;
+			document.head.append(style);
+		}
+		const list = document.getElementById("app-list-body");
+		const menu = document.getElementById("app-row-menu");
+		let port;
+		let opener;
+		let menuPoint;
+
+		window.addEventListener("message", (event) => {
+			if (port || !event.isTrusted || event.source !== parent || event.data !== connectKey || !event.ports.length) return;
+			port = event.ports[0];
+			port.onmessage = ({ data }) => {
+				if (data.theme) paintSidebarFrameTheme(data.theme, darkClass);
+				if (typeof data.html === "string") list.innerHTML = data.html;
+			};
+			port.postMessage(readyKey);
+		});
+
+		function closeMenu(focus = false) {
+			if (menu.hidden) return;
+			menu.hidden = true;
+			opener.setAttribute("aria-expanded", "false");
+			if (focus) opener.focus({ preventScroll: true });
+		}
+
+		function positionMenu() {
+			if (menu.hidden) return;
+			const rect = opener.getBoundingClientRect();
+			const left = menuPoint?.clientX ?? rect.right - menu.offsetWidth;
+			const top = menuPoint?.clientY ?? rect.bottom;
+			menu.style.left = Math.max(4, Math.min(left, innerWidth - menu.offsetWidth - 4)) + "px";
+			menu.style.top = Math.max(4, Math.min(top, innerHeight - menu.offsetHeight - 4)) + "px";
+		}
+
+		function openMenu(row, point) {
+			const button = row.querySelector(".browse-more");
+			const wasOpen = !menu.hidden && button === opener;
+			closeMenu();
+			if (wasOpen && !point) return;
+			opener = button;
+			menuPoint = point;
+			opener.setAttribute("aria-expanded", "true");
+			menu.replaceChildren(row.querySelector("template").content.cloneNode(true));
+			menu.hidden = false;
+			positionMenu();
+			menu.querySelector("[role=menuitem]")?.focus({ preventScroll: true });
+		}
+
+		document.addEventListener("click", (event) => {
+			if (!event.isTrusted) return;
+			const target = event.target.closest("button, a");
+			if (target?.matches(".browse-more")) {
+				openMenu(target.closest(".browse-row"));
+				return;
+			}
+			if (target?.dataset.action && (target.tagName !== "A" || !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey))) {
+				event.preventDefault();
+				port?.postMessage({ action: target.dataset.action, index: Number(target.dataset.index) });
+			}
+			closeMenu(menu.contains(target));
+		});
+		document.addEventListener("contextmenu", (event) => {
+			const row = event.target.closest(".browse-row");
+			if (!event.isTrusted || !row) return;
+			event.preventDefault();
+			openMenu(row, event);
+		});
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape") closeMenu(true);
+			if (menu.hidden || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+			const items = [...menu.querySelectorAll("[role=menuitem]")];
+			const index = items.indexOf(document.activeElement);
+			const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 :
+				(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+			items[next]?.focus();
+			event.preventDefault();
+		});
+		window.addEventListener("scroll", () => closeMenu(), { passive: true });
+		window.addEventListener("resize", positionMenu);
+	}
+
+	function sidebarSavedListDocument(label, connectKey, readyKey) {
+		const css = `${documentThemeCSS()}${CHROME_CSS}${STORY_TEXT_CSS}${APP_ICON_CSS}${READER_LIST_CSS}
+html {overscroll-behavior:contain;-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+body {margin:0;background:var(--bg);color:var(--text);font:13px/1.4 var(--app-ui-font);}
+.browse-main {overflow-wrap:anywhere;}
+.browse-empty,.browse-clear-read {margin:12px;}
+`;
+		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<title>${escapeHTML(label)}</title><body><main id="app-list-body" class="reader-list" aria-label="${escapeHTML(label)}"></main><div id="app-row-menu" class="dropdown" role="menu" aria-label="Link actions" hidden></div>
+<script>"use strict";
+${adoptStyle.toString()}
+${paintSidebarFrameTheme.toString()}
+(${sidebarSavedListFrame.toString()})(${JSON.stringify(connectKey)},${JSON.stringify(readyKey)},${JSON.stringify(css).replaceAll("<", "\\u003c")},${JSON.stringify(DARK_CLASS)});
+</script></body></html>`;
+	}
+
+	function sidebarSavedRowsHTML(entries, queue) {
+		if (!entries.length) return `<p class="browse-empty">${queue ? "Nothing queued yet." : "No saved pages yet."}</p>`;
+		const tags = new Set();
+		const rows = entries.map((entry, index) => {
+			const url = readerURL(entry.url)?.href || "";
+			const link = (label, attributes) => `<a class="dropdown-item" ${attributes} href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+			const open = `data-action="open" data-index="${index}"`;
+			const action = (id, label) => `<button class="dropdown-item" type="button" role="menuitem" data-action="${id}" data-index="${index}">${label}</button>`;
+			const row = readerCollectionRow({
+				...entry, key: queue ? queueKey(entry) : entry.key, url, title: entry.title || entry.url || "Untitled", site: entry.site || hostLabel(entry.url),
+			}, tags, true);
+			row.classList.add("app-row");
+			row.classList.toggle("is-unread", queue && !entry.readAt);
+			if (queue) row.classList.remove("reader-collection-row");
+			const title = row.querySelector(".browse-title-link");
+			if (title) {
+				title.dataset.action = "open";
+				title.dataset.index = index;
+				title.target = "_blank";
+				title.rel = "noopener noreferrer";
+			}
+			row.insertAdjacentHTML("beforeend", `<button class="browse-more app-head-icon" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false" aria-controls="app-row-menu">${MORE_ICON}</button>
+<template>${url ? link("Open", `role="menuitem" ${open}`) + link("Open in new tab", 'role="menuitem"') : ""}
+${action("remove", queue ? "Unqueue" : "Remove")}${entry.fresh ? action("seen", "Mark as seen") : ""}</template>`);
+			return row.outerHTML;
+		});
+		if (queue && entries.some(({ readAt }) => readAt)) rows.push('<button class="browse-nav-link browse-clear-read" type="button" data-action="clear">Clear read</button>');
+		return rows.join("");
+	}
+
+	function closeSidebarSavedList(ui) {
+		ui.sidebarSavedList?.();
+		ui.sidebarSavedList = null;
+	}
+
+	async function renderSidebarSavedList(ui, list, view, isCurrent) {
+		const queue = view === "queue";
+		const label = appViewLabel(view);
+		const entries = queue ? sortQueue(await loadQueue()) : await loadCollectionDocuments();
+		if (!isCurrent()) return;
+
+		const connectKey = sidebarFrameKey();
+		const readyKey = sidebarFrameKey();
+		const host = document.createElement("div");
+		host.className = "sidebar-saved-list";
+		host.hidden = true;
+		const root = host.attachShadow({ mode: "closed" });
+		const frame = document.createElement("iframe");
+		frame.title = label;
+		frame.name = "backchannel-saved-list";
+		frame.style.cssText = "display:block;width:100%;height:100%;border:0";
+		frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+		frame.srcdoc = sidebarSavedListDocument(label, connectKey, readyKey);
+
+		const status = document.createElement("div");
+		status.className = "browse-empty";
+		status.textContent = `Loading ${label}…`;
+		status.setAttribute("role", "status");
+		let port;
+		const themeObserver = new MutationObserver(() => port?.postMessage({ theme: sidebarFrameTheme(ui.shadow) }));
+		const timeout = window.setTimeout(() => {
+			if (!isCurrent() || !host.isConnected) return;
+			closeSidebarSavedList(ui);
+			const link = document.createElement("a");
+			link.className = "settings-button";
+			link.href = `${START_PAGE_ORIGIN}/#library/${view}`;
+			link.target = "_blank";
+			link.rel = "noopener noreferrer";
+			link.textContent = `Open ${label}`;
+			list.replaceChildren(link);
+		}, 1800);
+		ui.sidebarSavedList = () => {
+			window.clearTimeout(timeout);
+			themeObserver.disconnect();
+			port?.close();
+			frame.onload = null;
+			host.remove();
+		};
+		const active = () => isCurrent() && host.isConnected;
+		let busy = false;
+		frame.onload = () => {
+			if (!active()) return;
+			port?.close();
+			const channel = new MessageChannel();
+			const connection = port = channel.port1;
+			let ready = false;
+			connection.onmessage = async ({ data }) => {
+				if (!active() || port !== connection) return;
+				if (!ready) {
+					if (data !== readyKey) return;
+					ready = true;
+					window.clearTimeout(timeout);
+					connection.postMessage({ html: sidebarSavedRowsHTML(entries, queue), theme: sidebarFrameTheme(ui.shadow) });
+					themeObserver.observe(ui.shadow.host, { attributeFilter: ["class", "style"] });
+					status.remove();
+					host.hidden = false;
+					return;
+				}
+				const entry = Number.isInteger(data?.index) ? entries[data.index] : null;
+				if (busy || (!entry && !(queue && data?.action === "clear"))) return;
+				busy = true;
+				try {
+					if (data.action === "open") {
+						const url = readerURL(entry.url);
+						if (url) {
+							await rememberBrowseArrival(queue ? entry : documentStory(entry));
+							if (active()) location.href = url.href;
+						}
+						return;
+					}
+					if (queue && data.action === "clear") await mutateQueue(clearReadFromQueue);
+					else if (queue && data.action === "remove") await mutateQueue((items) => removeFromQueue(items, queueKey(entry)));
+					else if (!queue && data.action === "remove") await runCardAction("delete", entry);
+					else if (!queue && data.action === "seen" && entry.fresh) await runCardAction("seen", entry);
+					else return;
+					if (queue) {
+						if (active()) await renderBrowseView(ui);
+						refreshNextUp(ui.shadow);
+					}
+				} catch (error) {
+					console.error(error);
+				} finally {
+					busy = false;
+				}
+			};
+			frame.contentWindow.postMessage(connectKey, "*", [channel.port2]);
+		};
+		root.append(frame);
+		list.replaceChildren(status, host);
 	}
 
 	async function revealSidebar() {
@@ -19881,10 +20128,11 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 
 		closeComposeDock(ui.shadow);
 		ui.shadow?.getElementById("app-discussion-compose")?.replaceChildren();
+		clearSidebarDiscussionControls(ui);
 		target.innerHTML = `
 <div class="source-picker">
 <div class="source-picker-title">Pick your sources</div>
-<div class="source-picker-intro">Backchannel looks up each page you visit on the sources you pick, and builds Front Pages from them. Nothing is contacted until you choose.</div>
+<div class="source-picker-intro">Backchannel looks up each page you visit on the sources you pick, and builds Front\u00a0Pages from them. Nothing is contacted until you choose.</div>
 <div class="source-picker-list">${sourceListHTML()}</div>
 <div class="source-picker-actions">
 <button class="source-picker-save" type="button" disabled>Save</button>
@@ -19926,7 +20174,7 @@ ${appRowThumbHTML(doc, { look: doc.look, fallbackFavicon: false })}
 			}
 
 			target.innerHTML = `<div class="source-picker front-page-step">
-<div class="source-picker-title front-page-step-title">How should Front Pages be built?</div>
+<div class="source-picker-title front-page-step-title">How should Front\u00a0Pages be built?</div>
 ${frontPageChooserHTML()}
 <div class="source-picker-actions"><button class="source-picker-save front-page-step-done" type="button">Done</button></div>
 </div>`;
@@ -19949,7 +20197,7 @@ ${frontPageChooserHTML()}
 			...TOPICS.map((topic) => ({ ...topic, icon: TOPIC_ICONS[topic.id] })),
 		];
 
-		return `<div class="front-page-chooser" role="radiogroup" aria-label="Front Pages">
+		return `<div class="front-page-chooser" role="radiogroup" aria-label="Front\u00a0Pages">
 <div class="front-page-choice">
 <label class="front-page-choice-label"><input type="radio" name="${name}" value="sources"><span>Top links from your sources</span></label>
 <div class="front-page-choice-hint front-page-top-hint"></div>
@@ -20117,8 +20365,8 @@ ${frontPageChooserHTML()}
 		const card = document.createElement("div");
 
 		card.className = "front-page-card";
-		card.innerHTML = `<div class="front-page-card-head"><span class="front-page-card-title">Make Front Pages yours</span><button class="front-page-card-close" type="button" aria-label="Keep it as it is" title="Keep it as it is">${APP_CLOSE_ICON}</button></div>
-<div class="front-page-card-text">Pick interests for Front Pages or see the top links from your sources.</div>
+		card.innerHTML = `<div class="front-page-card-head"><span class="front-page-card-title">Make Front\u00a0Pages yours</span><button class="front-page-card-close" type="button" aria-label="Keep it as it is" title="Keep it as it is">${APP_CLOSE_ICON}</button></div>
+<div class="front-page-card-text">Pick interests for Front\u00a0Pages or see the top links from your sources.</div>
 ${frontPageChooserHTML()}
 <div class="front-page-card-actions"><button class="front-page-card-done" type="button">Done</button></div>`;
 
@@ -20205,6 +20453,7 @@ ${frontPageChooserHTML()}
 
 	const THEME_CSS = `
 :host {
+	--app-ui-font:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
 	--bg:#f6f6ef;
 	--article-bg:#e8e8e1;
 	--text:#000;
@@ -20328,6 +20577,71 @@ ${frontPageChooserHTML()}
 	};
 	const DISCUSSION_BIRD_BUBBLE = "UklGRlwPAABXRUJQVlA4WAoAAAAQAAAAawAAeAAAQUxQSCkHAAABoIbtfxnp+id1O9oxdgdrHNu2bdu2bdu2bdt4bS7e49XsoE3yYWZnOm32fI6ICYD/x5pPmEJAFKeSSlEUNV2bGlDAG/XGYjG/xDlBlKO5zkRHc6yzo72lScQ8kgW/T0eBzBr7nnLli79Pe+TCs3fqW3eNtXe5cDu+aF4RtPgGh1x3103nX//10nyxXCbMKuYXPHnzbe8tLQ/sEapBdAXWkE/RvZqeWX+LnS988rJzbnt6xmCBUstilYSyytJY3mSM9T+8tQwACAEIrpBkPZmKZHc45a05f/5bYg0n/QdJIKs+A1wbyW5756BVLpsFq2GEkSVbIl8iHEGu6TripTGTEOZIWjaf26c11BRV3ZK9cRElhDLHmv13ZsFALumeUSYmc3bpzTXBpV2vmSZhTi+/0C24AW/zjcncOPH8ZjIAIOQovMpS5tb5xwXBGw2oICHZKaG7mXuX3LtJKBWNSAiQQ5R9FrqIlb7cd610IgBO9Z05l7qJsaF3j+oNg4idIHQ9UGRuJ8veumclDA70bnxTnnFwovD+qrhxxh4/lRkHaals3eizC0tVkN608TzGR2qyeXv7tHhAtgEAMICY3ufynxg3qTV/n1wuHQvJdngAOm8ZZ/wkZWY919fbnvYIdvikjjvHTcqPyvFDW1riHrBRNIJX/2VSxlWz9NuWqh/bAeJmS/Im4615Z0IFW31PEsbhe2Jee9aeYfLoGj+yZ7d/KI8e6wJbxbMJ4/HfJ+i26JdYXLIG95Ds8F1EeEQo+6qlGkK1JN9gfCbl4yYRatlugE/UIhdmNU2H2j2nD/OKzdgkkor7FKGW5q8Yt4uvrp5sTwegRv+JFreINbpLR1dLWKqCsYDX+YJwi7HCkZF4UEcVWGmK+Q/+y6TcKo+cLnkEqFTCkVhwo1cZYbymxeIjXqgUtFA4EfWe/TfjNy0XP2uvgiVJChltLxc4ZpXod7kqlZK498KixS9qmndpNUDzG0XKeD5/TVTL6vMY3+fsJwtYFMUq2+Q5lz/Ln2wKqGoFPsbi3ND+3mw64pEq0Fb9nPt5vXhL3C9Alb4ZkxBOfdWTjIQRVMqJ3HMWrcLpkav6PFBVCCVbk8evsAjHlu/biquBHGmJdD80xjg+eIAXqmMBwop3s895tnw7qBUB8h7zD8dWbC+jGgAAr/y+ya/BLaFezy2EX/PXrEvcb5hfb8XrQh1vWLzKnyDWpUZuLfDqm1X99ag+uGyCS5SOHRGN66JSk+CTzh91luUUqzxtw450WBZqAhGuLDDqJMfS4UtCmVTEp9QGcHnBLHGI/daq65qkQL07rTDzlD8LT1XB1tW+o2OEO6UTs2CvdmWB8XdWuskmWOPVWgjlQ+mOREYRbZGbt51JqxDKePnfAdmUqOL6sOQLpU+bN1rB0blbtMUNsNcndRx9979csV7rDUmSTRiwb6VL+jlBKn45oElE0EBhq8ctPjDG6F/HZKMGbgQKHb2CMUZ4YP16QXtUFRsCYvp5wuw2qW3Eln9f3DWWDPuhociQd5tRtMvRdNmtu63R7IMGIx1J29y6yH3zLlh3tZ6I0qhK7D9sGqOWq+aeu/la3S1B0QkA3h0+KFMX0VknbtDZHlNFwRmgrfE7c6857dy2lE/XJRGcGrqr4BbSf9OGBkLgZC20xQPjVtkNZN4V28UROFuKpNZ4eJQQ6ryRWzdeOSE4SlD1eCKz/sk/FRkpWZZjiGkOvHPFdput0RxwkAJIEPVIMpTZ4flhalHTIRYZ/fKxkzdaf/WVO+OahB1THfsVpKxy/JsTowv6TSfQ0q/XbL7yWuuv1tca0QPgTjG963ZbbnnDT6VGFf54/7gUCmY62tKpgAfcirAopVbdYo/Dnp0zYZc1PO2pE7ZcLyCLnlAwHgn4FewaACRH4x3tbb07f8gItePfF/bIeSVR8/oNJHiDHhXcjCTAQS8GOXU/K5VIfaVHVvfrAlSVgYsIACBwMyvaQL/YrCMdwgCKXxFEPlRVTmWEsrrHTupoDXkRgIiBr5swG8lLq7V4oRJLnFlrpB5qFmZs6NVhUoUruPPbOggtD5ytA6cl+XZSGyu8vakKnBYDaMORWqwSe68dJpcRZ5BfWW2oloJlntIUVgCjCs4ipKpqbkktVmnOZiu3p7yqwCGPJ+AR4vMoIZOw/85evSfbrAKPBcOLwfMWtaxJxm/aasPO5riPSwgDAFxcoKw6eWvjnt5kUAaO7ztCJlm2Szrs0YDrh00wxgihtHxVTEHAdQ1OLLGq1otJBJyX4OSJKtYPaZgCjxqrMndDaSo4NF/xz+GyNhVcYzLG6HUKTIn30jKh09uVgDQFCE9Yw+T3jfRkWPFIXEOyjuVpZHz84qjgV32qjHgmG8lEYhZjX6/eBJLPj5DEMzWWSsUfzY/soyEAhBQk8wwMT9yz6RXHagJU5RyAJCNsKDCFIjSFaBL8jwYAVlA4IAwIAADwJQCdASpsAHkAPlEkj0UjoiGUCk1sOAUEs5+7zWk7y/o2JRKvF2Hx4JwN6I9tFzw3oe3g7eTb9N7df6l+PP7gdTb7HZx37l/lPy35RdrL/BZgF6ifVf91pl/6Z/wuQC8q9gD8o/9L2R/5j/z/4/zv/SX/R/yvwA/yf+rf7n1vPZN+0nsPfreZeW4dHVjAVpP/h0NjIr6jrzhqJL2llyL8WqVtNI6cN2n3uy04fJtdrOaNhB1AK6ATp0bKKFPjUcxbF2wqYn1gJlWvB/m+De3Bbgegc3rHDLwFLq85CHDZZ0vqflYpVqM20cEs++40COZn9h9qCDRoeiHMIAx+JcMw+7m7Zpu+jtypqOa3xi6GXcP0OqfnakUXmsRq7ORDra/QcA9AuOO9M41tHY1D6zYAlibjLzFH10AA/v4G1Pfzfj+OYIWqIjUNHjnhNoplmuYdoyWotmjN+0yXhK1HtMDq29vs810bpwaMm+XVz9MjYBJLPw+Sxj07jx2h8xyOiiVSd4aNOF18Lakqmf/IoMEIl9L/cLjIzvczzf976vlUJ56JwvGaC9dJ3pTF/NSyNBebE7l+o8JVa2lzHCOwl1NbxbkotS8Lsv5jdyfy9oK/V8hXOGpz/QvayvDUkqOKTuhi6g9TKqmLAVNqaG35WdEhhfkvTlFDA5S3J1W5lu+fwbN/nBSQ/2oeH8PObdFz5U02EQNHsOmjQFVu2WOfsVRscTaH+FY1a8VWrrWJSTruDC2OAzXrY9WWUGyyXt2eKVzTlsbNn4lE8M05IfMhP/n/HU63EWHAx643IdYEhF5nlmk0+KOaObUMUvdSKsLdCIaRPXDEauOe4NZigFd1hJ+cBbs7F2eu7jHcLB8Y7HmxHUGx8MVM34CzJtXWoXYWHag/4V0rzpN09zxkILi4Uby3hTsgPifY5uRxJAXZkLAyR+mj/CtPM1f2mLQawUcnpclPig+ejDZbZ39Ela+XypOsvJerYiVDRRNiWT+PutFsi/Wm9wfYRV2MQ7KRNrbyiGB4UAqM5obaaJArouWTwUrv803DJQG5LqSC7eI77eijqukH7ceSSYrLAw2d+wJSzEc5Ygc6B9QVtF+wHwZRuXbszuT3XZ9RHmoSyQhiXcd/lHP/r3vGGrs4z1mh1hof8tT13HN/gD/lCMidEeYD/QlzgU7CJtq8P9oI67AaV2HgpCMPPyNEjRbfzwHsy7X7kuSCOt7wIHRuTCOkFHSzq4+xDxYRTkrw+5W36yzHmxZZSTiqzgoqKsEeONQaspy7cM6s3v2bAFDnFYt/wHlEOVn12/DVECjIpiB0k3Q2THzrI6Gz4BDjlQiZU0xKl+eIv1HYSZloU6iQIpfn6lindCAVzrkWqpA7r0equWh7AHaHg0hmgvgFmZmJXADBiBc5SuEE82WwTCi5noiLV8pN0qadTyp8bNZL6qe/1lkXwZMWrHPrwL4tcSafogNMAUKf0rH7m2lw1jX/5PSoGJvbbxqt/Ju4yiX0feXRGb9E738/8PTiIKuZImsQPIz0Yqwr0nSuBkwpLD75vnhEwm6uaf90Np11Bmu8oOstgPRfr40IWCZTCJAq3N9n4Wb+NVZpbcDODFaDU/b30flkXKYx734F6VFRmRre8sC5Sxs0SPPW/sfBQlE0eyt1GRc0jCK2ULDJx78Y7krazL/OgKNWcHt/mIN4+4WQuGiprRdg6cbHGIMp1En04gl27579f/l2cst5d+OJRPij2kMHU/Pex9r/CYjFa7/HpIWMUu0/fYZ5JJzht0XOqZLiwJn6jO/LlMLzdVJavPyX4/0DksIUVm3ROX/hxP2nk3yWbuptZvX9J/NeJeK5cJx3R9M5PoZhwYTQPcCk7c1ep6M3GP1/GDM3EuI1cI2lzQ5dTDlsRd3fXYttzlVypiAJA/UCJoDdpWHavvbpUubH5Fqp2NGjVrgG/nuim2VObOmHgIQqPOOLSxiCwO7MYy+zdJNzAOOt9MfwNLzLqRr6AxWDBTQEvM/WAB0Vj/xfDxvlATjA8bgV7HF9uU6DAGodbuRrFiSvebyhzZRkFlB+/WhhGdeWvxYUT65Re3Bo6Mr8zVpWKce8FH+p8Zfq8jBsE6oWgVgq0SRJj5SCqzDN2TAXSlP6klMPMI0O2BeN7GHJ4YkORAP4p4QjDd6g3Fpgw+3q8qba8VZ9NjsE9Oy7gcT119oAjtPos8kXwjNnhvDFuOjSjC2TBPwU82b3YtW+fYhzf6oe/3UrOx1JUQyt0gOjt3FDZNyOJYHSxkxhZ9HogOPZv52yTKPofF6t98M81ixfNkztvsbghM9E/8Ajjfw18NAzAXO8+HNk5FK0yed2moUqxwgt8ZlN2UAskN2nSpAb6timlWCdulQT3ms0TlGUxuka4Sky2ZkY8nFV7e2/zx3w1Nn/CcpQ9qYCnCBVsE71Aakv2eBwSKyu6jMl2MEeI9n10bB1xTeWkRbCXGQtX5vXRj47bP2x+EVI3URdkjUwHwjTLBUkLES8Jb0pMpDXttYZkFtkxF5i7TLI5+fjWGxHtcZFdnMJhJ1cowDQjB2iavafOnUEAbBDVYwZHExsHBvWUHQ21zaLFmBjEVuyUQEZxlkIhRykP++vdNa+//QDK4QRpwlydh8+26A2J0jtDfDWyuxX8i8TEij11Kn8DvQzRxB2JktrzOj76JmKSbP+xfI1nDREK7vFCSNrdJLA+Be8x5X/rA8n3q5qYraxOPFxgG3JX7y2VgNDBevYAAAAAA==";
 
+	const DISCUSSION_CHOICE_CSS = `
+.choice-group + .choice-group {
+	margin-top:8px;
+	padding-top:8px;
+	border-top:1px solid var(--surface-divider);
+}
+
+.choice-head {
+	margin-bottom:6px;
+}
+
+.choice-head .live-pill {
+	margin-left:0;
+}
+
+.choice-sub + .choice-sub {
+	margin-top:7px;
+}
+
+.choice-sub-head {
+	margin:0 0 3px 2px;
+	color:var(--muted);
+	font-size:10px;
+	font-weight:600;
+	letter-spacing:.04em;
+	text-transform:uppercase;
+}
+
+.choice-label {
+	min-width:0;
+	overflow:hidden;
+	text-overflow:ellipsis;
+	white-space:nowrap;
+}
+
+.choice-count {
+	margin-left:auto;
+	padding-left:8px;
+	color:var(--muted);
+	font-variant-numeric:tabular-nums;
+}
+
+.live-pill {
+	margin-left:6px;
+	padding:0 4px;
+	border-radius:3px;
+	font-size:10px;
+	font-weight:600;
+	letter-spacing:.04em;
+	vertical-align:1px;
+	color:var(--header-text);
+	background:rgba(var(--accent-rgb),.95);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	.live-pill {
+		animation:live-pulse 2s ease-in-out infinite;
+	}
+}
+
+@keyframes live-pulse {
+	50% { opacity:.55; }
+}
+`;
+
 	const CHROME_CSS = `
 header {
 	background:var(--header-bg);
@@ -20352,15 +20666,45 @@ header {
 	display:flex;
 	align-items:center;
 	justify-content:center;
-	border-radius:4px;
 	padding:0;
 	touch-action:manipulation;
+}
+
+.rail-button,
+.header-actions button:where(:not(.settings-select button)) {
+	border-radius:999px;
 }
 
 @media (hover: hover) {
 	.header-actions button:where(:not(.settings-select button)):hover {
 		background:var(--hover-tint);
 	}
+}
+
+.rail-button.is-current,
+#app-rail-search,
+#panel:not(.app-docked) > header .header-actions button[aria-pressed="true"]:enabled {
+	background:var(--rail-fg, var(--header-text));
+	color:var(--rail-bg, var(--header-bg));
+}
+
+#sidebar-discussion-tools {
+	position:relative;
+	justify-content:flex-end;
+}
+
+#sidebar-discussion-tools:not(:has(.page-sort, .source-menu-anchor)),
+#sidebar-article-actions:empty,
+#panel.browsing :is(#sidebar-discussion-tools, #sidebar-article-actions) {
+	display:none;
+}
+
+:is(#panel > header, #sidebar-discussion-tools):has(#source-menu:not(.hidden), .settings-select-toggle[aria-expanded="true"]) {
+	z-index:6;
+}
+
+#sidebar-discussion-tools .page-header-disclosure:is([aria-expanded="true"], .is-filtered) {
+	background:var(--active-tint);
 }
 
 .hide-control {
@@ -21393,10 +21737,6 @@ ${Object.entries(DISCUSSION_BIRD_ART).map(([pose, [closed, open]]) => `.discussi
 	font-weight:700;
 }
 
-.no-discussion-keep {
-	margin-top:6px;
-	text-align:center;
-}
 
 .collection-tag {
 	position:relative;
@@ -21942,33 +22282,6 @@ header button svg {
 	}
 }
 
-.page-header {
-	margin-left:8px;
-	padding:0 14px 10px 0;
-	border-bottom:1px solid var(--border-soft);
-}
-
-.page-header-title {
-	font-size:13px;
-	font-weight:500;
-	line-height:1.35;
-}
-
-.page-header-meta {
-	margin-top:3px;
-	color:var(--meta);
-	font-size:11px;
-}
-
-.page-header-meta:empty {
-	display:none;
-}
-
-.page-header-quiet {
-	padding:0;
-	border-bottom:0;
-}
-
 .source-menu-anchor {
 	position:relative;
 	display:inline-flex;
@@ -22003,32 +22316,7 @@ header button svg {
 	bottom:calc(100% + var(--source-menu-gap, 3px));
 }
 
-.choice-group + .choice-group {
-	margin-top:8px;
-	padding-top:8px;
-	border-top:1px solid var(--surface-divider);
-}
-
-.choice-head {
-	margin-bottom:6px;
-}
-
-.choice-head .live-pill {
-	margin-left:0;
-}
-
-.choice-sub + .choice-sub {
-	margin-top:7px;
-}
-
-.choice-sub-head {
-	margin:0 0 3px 2px;
-	color:var(--muted);
-	font-size:10px;
-	font-weight:600;
-	letter-spacing:.04em;
-	text-transform:uppercase;
-}
+${DISCUSSION_CHOICE_CSS}
 
 .source-menu-entry {
 	padding:3px 4px;
@@ -22038,6 +22326,30 @@ header button svg {
 
 .source-menu-entry + .source-menu-entry {
 	margin-top:2px;
+}
+
+.source-menu-row {
+	display:flex;
+	align-items:center;
+	gap:8px;
+}
+
+.source-menu-row .source-menu-option {
+	flex:1;
+	min-width:0;
+}
+
+.source-menu .source-menu-count {
+	flex:none;
+	padding:1px 6px;
+	border-radius:999px;
+	background:var(--hover-tint);
+	color:var(--muted);
+	font-size:10px;
+	font-weight:600;
+	font-variant-numeric:tabular-nums;
+	line-height:1.35;
+	text-decoration:none;
 }
 
 .source-menu-option {
@@ -22121,20 +22433,6 @@ header button svg {
 	display:none !important;
 }
 
-.choice-label {
-	min-width:0;
-	overflow:hidden;
-	text-overflow:ellipsis;
-	white-space:nowrap;
-}
-
-.choice-count {
-	margin-left:auto;
-	padding-left:8px;
-	color:var(--muted);
-	font-variant-numeric:tabular-nums;
-}
-
 .discussion-thread-link {
 	color:inherit;
 	text-decoration:underline dotted;
@@ -22144,6 +22442,16 @@ header button svg {
 
 .source-menu .source-menu-hint {
 	margin:-1.5px 0 0 25px;
+}
+
+.source-menu .source-menu-title,
+.source-menu .source-menu-row-title .choice-label {
+	display:-webkit-box;
+	-webkit-box-orient:vertical;
+	-webkit-line-clamp:2;
+	overflow:hidden;
+	overflow-wrap:anywhere;
+	white-space:normal;
 }
 
 .source-menu .source-menu-hint + .source-menu-option {
@@ -22157,29 +22465,6 @@ header button svg {
 	.source-menu .source-group-disclosure:hover {
 		background:var(--hover-tint);
 	}
-}
-
-.page-header-disclosure,
-.page-header-meta .item-action-link {
-	font:inherit;
-	color:inherit;
-	background:none;
-	border:0;
-	padding:0;
-	cursor:pointer;
-	text-decoration:underline dotted;
-	text-underline-offset:2px;
-	text-decoration-color:var(--border);
-}
-
-.page-header-sep {
-	margin:0 .35em;
-	color:var(--meta);
-}
-
-.page-header-disclosure[aria-expanded="true"] {
-	text-decoration-style:solid;
-	text-decoration-color:var(--accent);
 }
 
 .page-sort {
@@ -22240,28 +22525,6 @@ header button svg {
 .comment-source::before {
 	content:"·";
 	margin-right:4px;
-}
-
-.live-pill {
-	margin-left:6px;
-	padding:0 4px;
-	border-radius:3px;
-	font-size:10px;
-	font-weight:600;
-	letter-spacing:.04em;
-	vertical-align:1px;
-	color:var(--header-text);
-	background:rgba(var(--accent-rgb),.95);
-}
-
-@media (prefers-reduced-motion: no-preference) {
-	.live-pill {
-		animation:live-pulse 2s ease-in-out infinite;
-	}
-}
-
-@keyframes live-pulse {
-	50% { opacity:.55; }
 }
 
 .live-bookend {
@@ -24122,6 +24385,44 @@ button.shortcut-key {
 }
 `;
 
+	const STORY_TEXT_CSS = `
+.story-title {
+	font-size:13px;
+	line-height:1.25;
+}
+
+.story-title a {
+	color:var(--text);
+	text-decoration:underline dotted;
+	text-underline-offset:2px;
+	text-decoration-color:var(--border);
+	word-break:break-word;
+}
+
+.story-meta {
+	color:var(--meta);
+	font-size:10px;
+	line-height:1.4;
+	padding-top:2px;
+}
+
+.story-meta a {
+	color:var(--meta);
+	text-decoration:underline dotted;
+	text-underline-offset:2px;
+	text-decoration-color:var(--border);
+}
+
+@media (hover: hover) {
+	.story-meta a:hover,
+	.story-title a:hover,
+	.discussion-thread-link:hover,
+	.browse-nav-link:hover {
+		text-decoration:underline;
+	}
+}
+`;
+
 	function headerHTML({ subtitle = false, minimize = false, browse = false, hide = true, settings = true } = {}) {
 		return `
 <header>
@@ -24140,12 +24441,13 @@ ${subtitle ? `<span id="header-subtitle" class="header-subtitle" role="status" a
 </span>
 
 <div class="header-actions">
+${browse ? '<span id="sidebar-article-actions" class="app-article-actions"></span>' : ""}
 <button id="comment-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="compose-dock" aria-label="Add a comment" title="Add a comment" hidden>
 <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" focusable="false">
 <path fill="currentColor" fill-rule="evenodd" d="M3.7 2.5h8.6A1.5 1.5 0 0 1 13.8 4v5.5A1.5 1.5 0 0 1 12.3 11H7.6l-2.5 2.4V11H3.7A1.5 1.5 0 0 1 2.2 9.5V4A1.5 1.5 0 0 1 3.7 2.5ZM5.3 5.8a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Z"/>
 </svg>
 </button>
-${browse ? `<button id="browse-home-mark-read" type="button" aria-label="Mark all as read" title="Mark all as read" hidden>${APP_MARK_READ_ICON}</button><button id="browse-home-sync" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>` : ""}
+${browse ? `${frontPageUnreadFilterHTML("browse-home-unread-filter", "browse-list")}<button id="browse-home-mark-read" type="button" aria-label="Mark all as read" title="Mark all as read" hidden>${APP_MARK_READ_ICON}</button><button id="browse-home-sync" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>` : ""}
 ${hide ? `<span class="hide-control">
 <button id="hide-site" class="has-scope" aria-haspopup="true" aria-expanded="false" aria-label="Disable Backchannel here" title="Disable Backchannel here">
 <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
@@ -24157,7 +24459,7 @@ ${hide ? `<span class="hide-control">
 </span>` : ""}
 ${
 	settings
-		? `<button id="settings-toggle" aria-label="Open Backchannel settings" title="Backchannel settings" aria-expanded="false" aria-controls="app-settings-modal" aria-haspopup="dialog">
+		? `<button id="settings-toggle" aria-label="Open Backchannel\u00a0settings" title="Backchannel\u00a0settings" aria-expanded="false" aria-controls="app-settings-modal" aria-haspopup="dialog">
 <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
 <path fill="currentColor" fill-rule="evenodd" d="M6.43 1.18A7 7 0 0 1 9.57 1.18L9.55 3.09A5.15 5.15 0 0 1 10.38 3.43L11.71 2.06A7 7 0 0 1 13.94 4.29L12.57 5.62A5.15 5.15 0 0 1 12.91 6.45L14.82 6.43A7 7 0 0 1 14.82 9.57L12.91 9.55A5.15 5.15 0 0 1 12.57 10.38L13.94 11.71A7 7 0 0 1 11.71 13.94L10.38 12.57A5.15 5.15 0 0 1 9.55 12.91L9.57 14.82A7 7 0 0 1 6.43 14.82L6.45 12.91A5.15 5.15 0 0 1 5.62 12.57L4.29 13.94A7 7 0 0 1 2.06 11.71L3.43 10.38A5.15 5.15 0 0 1 3.09 9.55L1.18 9.57A7 7 0 0 1 1.18 6.43L3.09 6.45A5.15 5.15 0 0 1 3.43 5.62L2.06 4.29A7 7 0 0 1 4.29 2.06L5.62 3.43A5.15 5.15 0 0 1 6.45 3.09ZM8 5.5A2.5 2.5 0 0 0 8 10.5A2.5 2.5 0 0 0 8 5.5Z"/>
 </svg>
@@ -24343,24 +24645,24 @@ ${
 	function settingsPrivacyHTML() {
 		return `<div id="settings-privacy" class="settings-group settings-privacy" data-app-section="general">
 <div class="sources-subhead">Privacy</div>
-<div class="settings-privacy-body"><p class="privacy-meta">Triglavis LLC &middot; backchnnl.app &middot; Last updated 24 November 2026</p>
+<div class="settings-privacy-body"><p class="privacy-meta">Triglavis\u00a0LLC &middot; backchnnl.app &middot; Last updated 24 November 2026</p>
 
         <h3>What this site collects</h3>
         <p>The promotional page uses no cookies, analytics, tracking pixels or third-party scripts. <strong>Cloudflare</strong> hosts Backchannel, handles network requests, and records operational logs.</p>
 
         <h3>What the script does</h3>
-        <p>Account sync and diagnostic sharing are optional.</p>
+        <p>Account\u00a0sync and diagnostic sharing are optional.</p>
         <ul>
           <li>Your settings, queue, Collection, votes, notes, hidden sites and the comments you have seen are saved in your userscript manager on this device.</li>
-          <li>If you set up Account sync, Backchannel uploads an encrypted copy of your settings, reading queue, saved items and notes to Cloudflare. The service stores your passkey's public credential, session records, and browser and platform labels for linked devices. Backchannel stores your verified recovery email, uses it to label new passkeys, and sends verification and recovery codes through Cloudflare. Your recovery key stays on your devices.</li>
+          <li>If you set up Account\u00a0sync, Backchannel uploads an encrypted copy of your settings, reading queue, saved items and notes to Cloudflare. The service stores your passkey's public credential, session records, and browser and platform labels for linked devices. Backchannel stores your verified recovery email, uses it to label new passkeys, and sends verification and recovery codes through Cloudflare. Your recovery key stays on your devices.</li>
           <li>To find discussions, it asks each source you have turned on about the page you are on. Most are told its address; Lobsters and Mastodon's search are told only its domain. A link you open in the reader from Mastodon's front page is looked up on mastodon.social by its address. A source you have turned off is asked nothing.</li>
-          <li>Backchannel checks saved Collection links for new discussion through Hacker News, Bluesky's link index and the Reddit archive, when those sources are on. Background checks omit fragments, tracking parameters and save dates. Imported bookmarks, previously unwatched links and links with other query parameters are looked up when you open them. Remove a page from Collection to stop checking it.</li>
-          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics Worker uses public publisher material for the brief. If a brief is empty, Reader may request previews directly from the linked publishers. Imported bookmarks marked for preview on open use saved metadata until you open the bookmark. Topics based only on your own links are assembled on your device. Reader can look up a topic subject on Wikipedia and image credits on Wikimedia Commons. Reader loads photos from the hosts named by cited publishers and from Wikimedia without a referrer. Those hosts can see the request and any cookies sent by your browser.</li>
-          <li>When you submit a topic report, Reader gets a five-minute reporting credential from Backchannel Accounts. Older Reader and Account versions use your session for this request. Backchannel stores the link without its query or fragment, the displayed topic, your suggestion, and a hashed account identifier for internal review. Reports expire after 90 days and are queued for removal when you delete your account.</li>
-          <li><strong>Reddit</strong>, <strong>Wikipedia</strong> and <strong>Hacker News</strong> can tell who you are. Signed in to one, its requests can arrive as your account. Signed out, Reddit and Wikipedia still send a device identifier.</li>
+          <li>Backchannel checks saved Collection links for new discussion through Hacker\u00a0News, Bluesky's link index and the Reddit archive, when those sources are on. Background checks omit fragments, tracking parameters and save dates. Imported bookmarks, previously unwatched links and links with other query parameters are looked up when you open them. Remove a page from Collection to stop checking it.</li>
+          <li>Reader downloads a public topic index and matches links on your device. Opening a published topic sends its public topic ID to Backchannel for a shared brief. The Topics\u00a0Worker uses public publisher material for the brief. If a brief is empty, Reader may request previews directly from the linked publishers. Imported bookmarks marked for preview on open use saved metadata until you open the bookmark. Topics based only on your own links are assembled on your device. Reader can look up a topic subject on Wikipedia and image credits on Wikimedia\u00a0Commons. Reader loads photos from the hosts named by cited publishers and from Wikimedia without a referrer. Those hosts can see the request and any cookies sent by your browser.</li>
+          <li>When you submit a topic report, Reader gets a five-minute reporting credential from Backchannel\u00a0Accounts. Older Reader and Account versions use your session for this request. Backchannel stores the link without its query or fragment, the displayed topic, your suggestion, and a hashed account identifier for internal review. Reports expire after 90 days and are queued for removal when you delete your account.</li>
+          <li><strong>Reddit</strong>, <strong>Wikipedia</strong> and <strong>Hacker\u00a0News</strong> can tell who you are. Signed in to one, its requests can arrive as your account. Signed out, Reddit and Wikipedia still send a device identifier.</li>
           <li>Voting and replying happen in a window on that source's own site, using the session you already have there.</li>
           <li>An article opened in the reader loads from the site that published it, with no referrer. If the page does not respond inside that frame, the script fetches it once, without cookies, to see whether it can be shown there and, if not, to show its text.</li>
-          <li>Enhanced PDF support uses pdf.js, downloaded from <strong>cdn.jsdelivr.net</strong>. That request carries nothing about you.</li>
+          <li>Enhanced\u00a0PDF support uses pdf.js, downloaded from <strong>cdn.jsdelivr.net</strong>. That request carries nothing about you.</li>
         </ul>
         <p>Every host the script can contact, and exactly what each is told, is listed in <a href="https://github.com/twalichiewicz/Backchannel/blob/main/SECURITY.md">SECURITY.md</a>.</p>
 
@@ -24368,7 +24670,7 @@ ${
         <p>If you choose to share diagnostics, Reader sends reliability reports to help us find slow or failed refreshes, discussion loads, and Account syncs. Each report contains the Backchannel version, operation, outcome, approximate duration, and the source name when relevant. Reports exclude account and device identifiers, email addresses, article URLs, searches, notes, and comment content. Cloudflare handles these requests and records operational logs. It retains the diagnostic reports for three months.</p>
 
         <h3>Your choices</h3>
-        <p>Diagnostic sharing starts off. Your choice is included in encrypted Account sync and takes effect on each device when it syncs. In Reader, you can change your choice in Settings → Account → Manage account → Privacy. Reports are sent only while signed in with sharing enabled.</p>
+        <p>Diagnostic sharing starts off. Your choice is included in encrypted Account\u00a0sync and takes effect on each device when it syncs. You can change your choice in Settings → Account → Manage account → Privacy. Reports are sent only while signed in with sharing enabled.</p>
         <p>Signing out or deleting an account leaves your reading data in this browser profile. If you sign in to a different account in the same profile, Backchannel asks before syncing that data. Use separate browser profiles to keep reading data separate.</p>
         <p>Turn any source off in Settings, or hide Backchannel on any site. Removing the script or clearing your userscript manager's data removes the local copy. Delete account in Settings → Account removes the active account and synced data. Cloudflare database backups may retain earlier copies for up to 30 days.</p>
 
@@ -24377,7 +24679,44 @@ ${
 </div>`;
 	}
 
-	function settingsPanelHTML(reader = false) {
+	function disabledSitesSettingsHTML() {
+		return `<div id="settings-blocked-section">
+<div class="sources-subhead">Disabled sites</div>
+<div class="sources-subhint">Sites and pages where you've turned Backchannel off.</div>
+<div class="manage-table">
+<div class="manage-table-head" aria-hidden="true"><span>Site</span><span>Covers</span></div>
+<div id="settings-blocked-list" class="manage-table-body" role="listbox" aria-label="Disabled sites" tabindex="0"></div>
+<div class="manage-table-tools"><button type="button" class="manage-table-add" aria-label="Disable Backchannel on a site or page" title="Disable Backchannel on a site or page">+</button><button type="button" class="manage-table-remove" aria-label="Turn Backchannel back on for the chosen site" title="Turn Backchannel back on for the chosen site" disabled>&minus;</button></div>
+</div>
+</div>`;
+	}
+
+	function filterSettingsHTML() {
+		return `<div data-app-section="filters" id="settings-topic-filters">
+<div id="settings-topic-hint" class="settings-section-hint">Choose which topics and links to hide from Front\u00a0Pages.</div>
+<h3 class="settings-subheading">Hidden topics</h3>
+<div id="settings-topic-field">
+<div id="settings-topic-list" role="group" aria-label="Hidden topics" hidden></div>
+<div class="settings-topic-search-row">
+${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10.2 10.2 3.3 3.3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>')}
+<input id="settings-topic-search" type="search" placeholder="Search topics…" aria-label="Search topics" aria-describedby="settings-topic-hint" aria-controls="settings-topic-results" autocomplete="off" autocorrect="off" spellcheck="false">
+</div>
+</div>
+<div id="settings-topic-results" role="group" aria-label="Matching topics" hidden></div>
+<div id="settings-topic-status" role="status" hidden></div>
+<div id="settings-hidden-section">
+<div class="sources-subhead">Hidden links</div>
+<div class="sources-subhint">Links you've hidden from Front\u00a0Pages.</div>
+<div class="manage-table">
+<div class="manage-table-head" aria-hidden="true"><span>Link</span><span>Site</span></div>
+<div id="settings-hidden-list" class="manage-table-body" role="listbox" aria-label="Hidden links" tabindex="0"></div>
+<div class="manage-table-tools"><button type="button" class="manage-table-add" aria-label="Hide a link" title="Hide a link">+</button><button type="button" class="manage-table-remove" aria-label="Show the chosen link again" title="Show the chosen link again" disabled>&minus;</button></div>
+</div>
+</div>
+</div>`;
+	}
+
+	function settingsPanelHTML(privateContent) {
 		return `
 <div id="settings-panel" class="settings-panel">
 <div id="settings-pdf-notice" class="settings-notice" hidden>Backchannel not supported in Firefox's PDF viewer</div>
@@ -24385,7 +24724,7 @@ ${
 <div class="settings-group" data-app-section="sidebar">
 <div class="settings-app-only">
 <label class="settings-option settings-sidebar-head"><span class="settings-sidebar-title">Sidebar</span><input id="setting-sidebar-enabled" class="settings-switch" role="switch" data-setting="sidebarEnabled" type="checkbox" aria-describedby="settings-sidebar-hint"></label>
-<div id="settings-sidebar-hint" class="settings-sidebar-hint">Sidebar allows you to access Backchannel features like discussions and Front Pages directly onto the sites you visit.</div>
+<div id="settings-sidebar-hint" class="settings-sidebar-hint">Sidebar allows you to access Backchannel features like discussions and Front\u00a0Pages directly onto the sites you visit.</div>
 </div>
 <label class="settings-option">
 <input id="setting-auto-open-sidebar" data-setting="autoOpenSidebar" type="checkbox">
@@ -24411,15 +24750,7 @@ ${
 <input id="setting-keep-sidebar-size" data-setting="keepSidebarSize" type="checkbox">
 <span>Keep the Sidebar the same size when a page is zoomed</span>
 </label>
-${reader ? `<div id="settings-blocked-section">
-<div class="sources-subhead">Disabled sites</div>
-<div class="sources-subhint">Sites and pages where you've turned Backchannel off.</div>
-<div class="manage-table">
-<div class="manage-table-head" aria-hidden="true"><span>Site</span><span>Covers</span></div>
-<div id="settings-blocked-list" class="manage-table-body" role="listbox" aria-label="Disabled sites" tabindex="0"></div>
-<div class="manage-table-tools"><button type="button" class="manage-table-add" aria-label="Disable Backchannel on a site or page" title="Disable Backchannel on a site or page">+</button><button type="button" class="manage-table-remove" aria-label="Turn Backchannel back on for the chosen site" title="Turn Backchannel back on for the chosen site" disabled>&minus;</button></div>
-</div>
-</div>` : `<a class="settings-button" href="${START_PAGE_ORIGIN}/#sidebar-settings" target="_blank" rel="noopener noreferrer">Manage disabled sites in Reader</a>`}
+${privateContent ? disabledSitesSettingsHTML() : sidebarPrivateSettingsHTML("sidebar")}
 </div>
 
 <div class="settings-group" data-app-section="general">
@@ -24437,7 +24768,7 @@ Highlights the passages commenters quote, so you can jump between the article an
 </label>
 <label class="settings-option sub-option">
 <input id="setting-pdf-reader" data-setting="pdfReader" type="checkbox">
-<span>Enhanced PDF support</span>
+<span>Enhanced\u00a0PDF support</span>
 </label>
 <div class="settings-option-hint">
 The default PDF reader will be replaced with
@@ -24483,7 +24814,7 @@ All stored locally.
 <div class="appearance-row-control toggle-colors" role="group" aria-labelledby="appearance-color-label">
 <label class="toggle-swatch toggle-swatch-any" title="Any color"><i></i><input id="button-color-input" type="color" aria-label="Any color" value="#7c3aed"><span class="toggle-swatch-name" aria-hidden="true">Any color</span></label>
 <button type="button" class="toggle-swatch toggle-swatch-green" data-accent="" aria-label="Backchannel green" title="Backchannel green"><i></i><span class="toggle-swatch-name" aria-hidden="true">Backchannel green</span></button>
-<button type="button" class="toggle-swatch" data-accent="#ff6600" aria-label="Hacker News orange" title="Hacker News orange"><i style="background:#ff6600"></i><span class="toggle-swatch-name" aria-hidden="true">Hacker News orange</span></button>
+<button type="button" class="toggle-swatch" data-accent="#ff6600" aria-label="Hacker\u00a0News orange" title="Hacker\u00a0News orange"><i style="background:#ff6600"></i><span class="toggle-swatch-name" aria-hidden="true">Hacker\u00a0News orange</span></button>
 <button type="button" class="toggle-swatch" data-accent="#1d1d1f" aria-label="Graphite" title="Graphite"><i style="background:#1d1d1f"></i><span class="toggle-swatch-name" aria-hidden="true">Graphite</span></button>
 </div>
 </div>
@@ -24510,20 +24841,20 @@ ${settingsUpdatesHTML()}
 <div class="settings-group" data-app-section="general">
 <div class="appearance-row settings-action-row settings-cache">
 <div class="appearance-row-text"><div class="appearance-row-label">Cached data</div>
-<div class="appearance-row-hint">Clear temporary data used to find discussions and load Front Pages. Backchannel fetches fresh results when needed, without affecting your Notes, Collection, or settings.</div></div>
+<div class="appearance-row-hint">Clear temporary data used to find discussions and load Front\u00a0Pages. Backchannel fetches fresh results when needed, without affecting your Notes, Collection, or settings.</div></div>
 <button class="settings-button" id="settings-cache-clear" type="button">Clear cache</button>
 </div>
 </div>
 
 ${settingsPrivacyHTML()}
 
-${collectionSettingsHTML(reader)}
+${privateContent ? collectionSettingsHTML() : sidebarPrivateSettingsHTML("collection")}
 
 <div data-app-section="sources">
-<div class="settings-section-hint">Where Backchannel looks for discussions and links for Front Pages. <a href="${escapeHTML(REPO_URL)}#what-exactly-is-the-script-doing-with-my-information" target="_blank" rel="noopener noreferrer">How each source works</a></div>
+<div class="settings-section-hint">Where Backchannel looks for discussions and links for Front\u00a0Pages. <a href="${escapeHTML(REPO_URL)}#what-exactly-is-the-script-doing-with-my-information" target="_blank" rel="noopener noreferrer">How each source works</a></div>
 <div class="sources-grid">${sourceListHTML({ idPrefix: "setting-source-", cells: true, help: true })}</div>
-<div class="sources-subhead">Front Pages</div>
-<div class="sources-subhint">Choose which feed opens in Unread and All articles. Links come from your enabled sources.</div>
+<div class="sources-subhead">Front\u00a0Pages</div>
+<div class="sources-subhint">Choose what opens in All\u00a0Front\u00a0Pages. Links come from your enabled sources.</div>
 ${frontPageChooserHTML()}
 <div class="appearance-row settings-sync-schedule">
 <div class="appearance-row-text"><div id="setting-source-refresh-label" class="appearance-row-label">Sync schedule</div><div id="setting-source-refresh-hint" class="appearance-row-hint">Determine how often sources should automatically sync.</div></div>
@@ -24531,28 +24862,7 @@ ${settingsSelectHTML("setting-source-refresh", "sourceRefreshMinutes", "setting-
 </div>
 </div>
 
-${reader ? `<div data-app-section="filters" id="settings-topic-filters">
-<div id="settings-topic-hint" class="settings-section-hint">Choose which topics and links to hide from Front Pages.</div>
-<h3 class="settings-subheading">Hidden topics</h3>
-<div id="settings-topic-field">
-<div id="settings-topic-list" role="group" aria-label="Hidden topics" hidden></div>
-<div class="settings-topic-search-row">
-${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10.2 10.2 3.3 3.3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>')}
-<input id="settings-topic-search" type="search" placeholder="Search topics…" aria-label="Search topics" aria-describedby="settings-topic-hint" aria-controls="settings-topic-results" autocomplete="off" autocorrect="off" spellcheck="false">
-</div>
-</div>
-<div id="settings-topic-results" role="group" aria-label="Matching topics" hidden></div>
-<div id="settings-topic-status" role="status" hidden></div>
-<div id="settings-hidden-section">
-<div class="sources-subhead">Hidden links</div>
-<div class="sources-subhint">Links you've hidden from Front Pages.</div>
-<div class="manage-table">
-<div class="manage-table-head" aria-hidden="true"><span>Link</span><span>Site</span></div>
-<div id="settings-hidden-list" class="manage-table-body" role="listbox" aria-label="Hidden links" tabindex="0"></div>
-<div class="manage-table-tools"><button type="button" class="manage-table-add" aria-label="Hide a link" title="Hide a link">+</button><button type="button" class="manage-table-remove" aria-label="Show the chosen link again" title="Show the chosen link again" disabled>&minus;</button></div>
-</div>
-</div>
-</div>` : `<div data-app-section="filters"><a class="settings-button" href="${START_PAGE_ORIGIN}/#filters" target="_blank" rel="noopener noreferrer">Manage filters in Reader</a></div>`}
+${privateContent ? filterSettingsHTML() : sidebarPrivateSettingsHTML("filters")}
 
 <div data-app-section="shortcuts">
 <label class="settings-option settings-sidebar-head"><span class="settings-sidebar-title">Shortcuts</span><input id="setting-shortcuts-enabled" class="settings-switch" role="switch" type="checkbox" aria-label="Keyboard shortcuts" aria-describedby="settings-shortcuts-hint" checked></label>
@@ -24567,15 +24877,48 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 `;
 	}
 
-	function wireSettingsTopicFilters(shadow) {
+	const settingsBroadTopics = TOPICS.map(({ label }) => label).sort((a, b) => a.localeCompare(b));
+
+	function settingsTopicFilterOptions() {
+		return {
+			broadTopics: settingsBroadTopics,
+			addIcon: APP_ICON('<path d="M8 3.5v9m-4.5-4.5h9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'),
+			closeIcon: APP_CLOSE_ICON,
+		};
+	}
+
+	const topicSettingsActions = {
+		async hiddenTopics() {
+			return (await loadSettings()).hiddenTopics;
+		},
+		async topicOptions() {
+			const groups = await loadReaderFrontPageTopicGroups(await loadSettings());
+			const subjects = groups.filter(readerTopicHasSubject);
+			return {
+				aliases: subjects.map(({ label, aliases }) => [label, aliases]),
+				labels: normalizeTopicLabels([...settingsBroadTopics, ...subjects.map(({ label }) => label)]).sort((a, b) => a.localeCompare(b)),
+			};
+		},
+		async setTopic(label, hide) {
+			if (typeof label !== "string" || !normalizeTopicLabels([label]).length) return (await loadSettings()).hiddenTopics;
+			const saved = await saveSettings((settings) => {
+				const hiddenTopics = settings.hiddenTopics.filter((topic) => topicFilterKey(topic) !== topicFilterKey(label));
+				if (hide) hiddenTopics.push(label);
+				return { hiddenTopics };
+			});
+			if (appState && appViewIsFrontPage(appState.view)) endAppSelection();
+			refreshFrontPageConsumers().catch(console.error);
+			return saved.hiddenTopics;
+		},
+	};
+
+	function wireSettingsTopicFilters(shadow, actions, { broadTopics, addIcon, closeIcon }) {
 		const panel = shadow.getElementById("settings-topic-filters");
 		if (!panel) return { sync() {}, async refresh() {} };
 		const search = shadow.getElementById("settings-topic-search");
 		const tags = shadow.getElementById("settings-topic-list");
 		const results = shadow.getElementById("settings-topic-results");
 		const status = shadow.getElementById("settings-topic-status");
-		const addIcon = APP_ICON('<path d="M8 3.5v9m-4.5-4.5h9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>');
-		const broadTopics = TOPICS.map(({ label }) => label).sort((a, b) => a.localeCompare(b));
 		let available = broadTopics;
 		let aliases = new Map();
 		let hidden = [];
@@ -24598,7 +24941,7 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 				chip.append(text);
 			} else {
 				chip.append(text);
-				chip.insertAdjacentHTML("beforeend", APP_CLOSE_ICON);
+				chip.insertAdjacentHTML("beforeend", closeIcon);
 			}
 			chip.disabled = updating;
 			chip.onclick = () => update(label, hide);
@@ -24623,13 +24966,15 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 			if (focused) (chips.find((chip) => chip.dataset.topic === focused) || search).focus({ preventScroll: true });
 		};
 
-		const sync = (settings) => {
-			if (!accountValuesEqual(hidden, settings.hiddenTopics)) {
-				hidden = settings.hiddenTopics;
+		const sync = (topics) => {
+			const changed = hidden.length !== topics.length || hidden.some((label, index) => label !== topics[index]);
+			if (changed) {
+				hidden = topics;
 				tags.replaceChildren(...hidden.map((label) => topicChip(label, false)));
 				tags.hidden = !hidden.length;
 			}
 			paintMatches();
+			return changed;
 		};
 
 		const update = async (label, hide) => {
@@ -24640,21 +24985,17 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 			const query = search.value;
 			for (const chip of [...tags.children, ...results.children]) chip.disabled = true;
 			try {
-				const settings = await loadSettings();
-				const topics = settings.hiddenTopics.filter((topic) => topicFilterKey(topic) !== topicFilterKey(label));
-				if (hide) topics.push(label);
-				const saved = await saveSettings({ hiddenTopics: topics });
+				const topics = await actions.setTopic(label, hide);
 				if (hide && search.value === query) search.value = "";
-				sync(saved);
-				if (appState && appViewIsFrontPage(appState.view)) endAppSelection();
-				refreshFrontPageConsumers().catch(console.error);
+				sync(topics);
 			} catch (error) {
 				console.error(error);
-				showToast("Could not update hidden topics");
+				status.hidden = false;
+				status.textContent = "Could not update hidden topics";
 			} finally {
 				updating = false;
 				for (const chip of [...tags.children, ...results.children]) chip.disabled = false;
-				if (!panel.hidden && !shadow.getElementById("app-settings-modal").hidden &&
+				if (!panel.hidden && !shadow.getElementById("app-settings-modal")?.hidden &&
 					(!shadow.activeElement || hide && shadow.activeElement === focus)) search.focus({ preventScroll: true });
 			}
 		};
@@ -24691,18 +25032,13 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 				loading = true;
 				paintMatches();
 				try {
-					const settings = await loadSettings();
+					const topics = await actions.hiddenTopics();
 					if (revision !== request) return;
-					if (!updating && edits === startedWith) {
-						const changed = !accountValuesEqual(hidden, settings.hiddenTopics);
-						sync(settings);
-						if (changed) refreshFrontPageConsumers().catch(console.error);
-					}
-					const groups = await loadReaderFrontPageTopicGroups(settings);
+					if (!updating && edits === startedWith && sync(topics)) actions.refreshFrontPages?.();
+					const options = await actions.topicOptions();
 					if (revision !== request) return;
-					const subjects = groups.filter(readerTopicHasSubject);
-					aliases = new Map(subjects.map((group) => [group.label, group.aliases]));
-					available = normalizeTopicLabels([...broadTopics, ...subjects.map(({ label }) => label)]).sort((a, b) => a.localeCompare(b));
+					aliases = new Map(options.aliases);
+					available = options.labels;
 				} finally {
 					if (revision === request) {
 						loading = false;
@@ -24713,13 +25049,483 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 		};
 	}
 
+	function wireSettingsManageTable(body, { load, add, remove, empty, placeholder }) {
+		const table = body?.closest(".manage-table");
+
+		if (!table) {
+			return async () => {};
+		}
+
+		const addButton = table.querySelector(".manage-table-add");
+		const removeButton = table.querySelector(".manage-table-remove");
+		let chosen = null;
+
+		const rows = () => [...body.querySelectorAll(".manage-row")];
+
+		const sync = () => {
+			for (const row of rows()) {
+				row.setAttribute("aria-selected", String(row.dataset.key === chosen));
+			}
+
+			if (!chosen && body.getRootNode().activeElement === removeButton) {
+				body.focus({ preventScroll: true });
+			}
+
+			removeButton.disabled = !chosen;
+		};
+
+		const render = async () => {
+			const items = await load();
+
+			if (!items.some((item) => item.key === chosen)) {
+				chosen = null;
+			}
+
+			body.replaceChildren();
+
+			if (!items.length) {
+				const note = document.createElement("div");
+
+				note.className = "manage-empty";
+				note.textContent = empty;
+				body.appendChild(note);
+			}
+
+			for (const item of items) {
+				const row = document.createElement("div");
+
+				row.className = "manage-row";
+				row.setAttribute("role", "option");
+				row.dataset.key = item.key;
+				row.title = item.title || "";
+
+				for (const text of item.cells) {
+					const cell = document.createElement("span");
+
+					cell.textContent = text;
+					row.appendChild(cell);
+				}
+
+				row.onclick = () => {
+					chosen = item.key;
+					sync();
+					body.focus({ preventScroll: true });
+				};
+
+				body.appendChild(row);
+			}
+
+			sync();
+		};
+
+		const removeChosen = async () => {
+			if (!chosen || body.querySelector(".manage-add-row")) {
+				return;
+			}
+
+			const list = rows();
+			const index = list.findIndex((row) => row.dataset.key === chosen);
+			const next = list[index + 1] || list[index - 1];
+
+			await remove(chosen);
+			chosen = next?.dataset.key || null;
+			await render();
+		};
+
+		removeButton.onclick = () => {
+			removeChosen().catch(console.error);
+		};
+
+		body.addEventListener("keydown", (event) => {
+			if (event.target !== body) {
+				return;
+			}
+
+			if (event.key === "Delete" || event.key === "Backspace") {
+				event.preventDefault();
+				removeChosen().catch(console.error);
+			} else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+				const list = rows();
+
+				if (!list.length) {
+					return;
+				}
+
+				event.preventDefault();
+
+				const index = list.findIndex((row) => row.dataset.key === chosen);
+				const next = list[Math.min(Math.max(index + (event.key === "ArrowDown" ? 1 : -1), 0), list.length - 1)] || list[0];
+
+				chosen = next.dataset.key;
+				sync();
+				next.scrollIntoView({ block: "nearest" });
+			}
+		});
+
+		addButton.onclick = () => {
+			const existing = body.querySelector(".manage-add-row input");
+
+			if (existing) {
+				existing.focus();
+				return;
+			}
+
+			const row = document.createElement("div");
+			const input = document.createElement("input");
+			let done = false;
+
+			row.className = "manage-add-row";
+			input.type = "text";
+			input.placeholder = placeholder;
+			input.setAttribute("aria-label", placeholder);
+			input.spellcheck = false;
+			row.appendChild(input);
+			body.querySelector(".manage-empty")?.remove();
+			body.appendChild(row);
+			row.scrollIntoView({ block: "nearest" });
+			input.focus();
+
+			const finish = async (commit) => {
+				if (done) {
+					return;
+				}
+
+				done = true;
+
+				const value = input.value.trim();
+
+				if (commit && value) {
+					const key = await add(value);
+
+					if (key) {
+						chosen = key;
+					}
+				}
+
+				await render();
+			};
+
+			input.addEventListener("keydown", (event) => {
+				if (event.key === "Enter") {
+					event.preventDefault();
+					finish(true).catch(console.error);
+					body.focus({ preventScroll: true });
+				} else if (event.key === "Escape") {
+					event.preventDefault();
+					event.stopPropagation();
+					finish(false).catch(console.error);
+					body.focus({ preventScroll: true });
+				}
+			});
+			input.addEventListener("blur", () => {
+				finish(Boolean(input.value.trim())).catch(console.error);
+			});
+		};
+
+		return render;
+	}
+
+	function settingsTypedAddress(value) {
+		try {
+			return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`);
+		} catch {
+			return null;
+		}
+	}
+
+	const hiddenLinkSettings = {
+		empty: "Nothing hidden yet.",
+		placeholder: "Paste a link to hide",
+		load: async () =>
+			(await loadHiddenStories()).map((entry) => ({
+				key: entry.key,
+				title: entry.url || "",
+				cells: [entry.title || entry.url || entry.key, entry.site || hostLabel(entry.url)],
+			})),
+		add: async (value) => {
+			const address = settingsTypedAddress(value);
+
+			if (!address) {
+				return null;
+			}
+
+			const story = { url: address.href, title: "", site: hostLabel(address.href), source: "" };
+
+			await mutateHiddenStories((current) => addHiddenStory(current, story));
+			refreshFrontPageConsumers().catch(console.error);
+			return hiddenStoryKey(story);
+		},
+		remove: async (key) => {
+			await mutateHiddenStories((current) => removeHiddenStory(current, key));
+			refreshFrontPageConsumers().catch(console.error);
+		},
+	};
+
+	const disabledSiteSettings = {
+		empty: "No sites disabled yet.",
+		placeholder: "A site, like example.com, or a page's address",
+		load: async () =>
+			[...(await loadBlockedSites())]
+				.map((entry) => {
+					const page = entry.startsWith(BLOCKED_PAGE_PREFIX);
+
+					return { key: entry, title: "", cells: [page ? entry.slice(BLOCKED_PAGE_PREFIX.length) : entry, page ? "This page" : "Whole site"] };
+				})
+				.sort((a, b) => a.cells[0].localeCompare(b.cells[0])),
+		add: async (value) => {
+			const address = settingsTypedAddress(value);
+
+			if (!address) {
+				return null;
+			}
+
+			const entry = address.pathname === "/" && !address.search ? address.hostname : blockedPageEntry(address.href);
+			const sites = await loadBlockedSites();
+
+			if (entry) {
+				sites.add(entry);
+				await saveBlockedSites(sites);
+			}
+
+			return entry;
+		},
+		remove: async (key) => {
+			const sites = await loadBlockedSites();
+
+			sites.delete(key);
+			await saveBlockedSites(sites);
+		},
+	};
+
+	function settingsWindowURL(section) {
+		return `${START_PAGE_ORIGIN}/#settings/${section}`;
+	}
+
+	function sidebarPrivateSettingsHTML(section) {
+		const group = section === "sidebar" ? ' id="settings-blocked-section"' : ` data-app-section="${section}"`;
+		return `<div${group} data-sidebar-settings="${section}"></div>`;
+	}
+
+	function sidebarSettingsClient(connectKey, readyKey, options) {
+		window.addEventListener("message", function connect(event) {
+			if (!event.isTrusted || event.source !== parent || event.data !== connectKey || !event.ports.length) return;
+			window.removeEventListener("message", connect);
+			const port = event.ports[0];
+			const pending = new Map();
+			let nextId = 0;
+			const call = (action) => (...args) => new Promise((resolve, reject) => {
+				const id = ++nextId;
+				pending.set(id, { resolve, reject });
+				port.postMessage({ id, action, args });
+			});
+			const tabStops = () => [...document.querySelectorAll("button, input, [tabindex]")].filter((element) =>
+				!element.disabled && element.tabIndex >= 0 && element.getClientRects().length);
+
+			port.onmessage = ({ data }) => {
+				if (typeof data.focusLast === "boolean") {
+					const stops = tabStops();
+					(data.focusLast ? stops.at(-1) : stops[0])?.focus();
+					return;
+				}
+				if (data.theme) {
+					paintSidebarFrameTheme(data.theme, options.darkClass);
+					return;
+				}
+				const reply = pending.get(data.id);
+				if (!reply) return;
+				pending.delete(data.id);
+				if (data.error) reply.reject(new Error(data.error));
+				else reply.resolve(data.result);
+			};
+			port.postMessage(readyKey);
+
+			const dialog = document.getElementById("bookmark-import");
+			const resize = () => port.postMessage({
+				height: Math.ceil(document.body.getBoundingClientRect().height),
+				modal: Boolean(dialog?.open),
+			});
+			new ResizeObserver(resize).observe(document.body);
+			if (dialog) new MutationObserver(resize).observe(dialog, { attributeFilter: ["open"] });
+			resize();
+			document.addEventListener("keydown", (key) => {
+				if (!key.isTrusted || key.defaultPrevented || dialog?.open) return;
+				if (key.key === "Escape") {
+					key.preventDefault();
+					port.postMessage({ close: true });
+				} else if (key.key === "Tab") {
+					const stops = tabStops();
+					if (document.activeElement === (key.shiftKey ? stops[0] : stops.at(-1))) {
+						key.preventDefault();
+						port.postMessage({ tabBack: key.shiftKey });
+					}
+				}
+			});
+
+			if (options.section === "collection") {
+				wireBookmarkImport(document, { previewImport: call("previewImport"), importBookmarks: call("importBookmarks") });
+				wireCollectionDownloads(document, {
+					notesCount: call("notesCount"),
+					bookmarkExportFile: call("bookmarkExportFile"),
+					notesExportFile: call("notesExportFile"),
+				})().catch(console.error);
+				return;
+			}
+
+			const filters = options.section === "filters";
+			const list = document.getElementById(filters ? "settings-hidden-list" : "settings-blocked-list");
+			wireSettingsManageTable(list, {
+				...options.list,
+				load: call("load"), add: call("add"), remove: call("remove"),
+			})().catch(console.error);
+			if (filters) {
+				wireSettingsTopicFilters(document, {
+					hiddenTopics: call("hiddenTopics"), topicOptions: call("topicOptions"), setTopic: call("setTopic"),
+				}, options.topics).refresh().catch(console.error);
+			}
+		});
+	}
+
+	function sidebarPrivateSettingsDocument(section, title, connectKey, readyKey) {
+		const collection = section === "collection";
+		const filters = section === "filters";
+		const markup = collection ? collectionSettingsHTML() + bookmarkImportHTML() : filters ? filterSettingsHTML() : disabledSitesSettingsHTML();
+		const components = collection ? [pluralize, downloadFile, openBookmarkImport, wireBookmarkImport, wireCollectionDownloads]
+			: filters ? [topicFilterKey, topicDisplayName, wireSettingsTopicFilters, wireSettingsManageTable] : [wireSettingsManageTable];
+		const { empty, placeholder } = filters ? hiddenLinkSettings : disabledSiteSettings;
+		const options = { section, darkClass: DARK_CLASS, list: { empty, placeholder }, topics: filters ? settingsTopicFilterOptions() : null };
+		const theme = documentThemeCSS();
+		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>${title}</title><style>${theme}${CHROME_CSS}${BOOKMARK_DIALOG_CSS}
+body { margin:0;color:var(--surface-text);font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+[hidden] { display:none !important; }
+main { display:flow-root; }
+.settings-group + .settings-group { margin-top:12px; }
+</style><body><main>${markup}</main>
+<script>"use strict";
+${paintSidebarFrameTheme.toString()}
+${components.map((component) => component.toString()).join("\n")}
+(${sidebarSettingsClient.toString()})(${JSON.stringify(connectKey)},${JSON.stringify(readyKey)},${JSON.stringify(options)});
+</script></body></html>`;
+	}
+
+	function wireSidebarPrivateSettings(shadow) {
+		let dispose = null;
+		let focus = null;
+		const close = () => {
+			dispose?.();
+			dispose = null;
+			focus = null;
+		};
+		return {
+			close,
+			focus(back) { focus?.(back); },
+			show(section, moveTab) {
+				close();
+				const slot = shadow.querySelector(`[data-sidebar-settings="${section}"]`);
+				if (!slot) return;
+
+				const title = { collection: "Collection", filters: "Filters", sidebar: "Disabled sites" }[section];
+				const connectKey = sidebarFrameKey();
+				const readyKey = sidebarFrameKey();
+				const host = document.createElement("div");
+				const root = host.attachShadow({ mode: "closed" });
+				const frame = document.createElement("iframe");
+				frame.title = title;
+				frame.name = "backchannel-sidebar-settings";
+				frame.style.cssText = "display:block;width:100%;height:0;border:0";
+				frame.setAttribute("sandbox", section === "collection" ? "allow-scripts allow-downloads" : "allow-scripts");
+				frame.srcdoc = sidebarPrivateSettingsDocument(section, title, connectKey, readyKey);
+				const loading = document.createElement("div");
+				loading.className = "settings-section-hint";
+				loading.setAttribute("role", "status");
+				loading.textContent = `Loading ${title.toLowerCase()}…`;
+				const timeout = window.setTimeout(() => {
+					close();
+					const fallback = document.createElement("a");
+					fallback.className = "settings-button";
+					fallback.href = settingsWindowURL(section);
+					fallback.target = "_blank";
+					fallback.rel = "noopener noreferrer";
+					fallback.textContent = section === "sidebar" ? "Manage disabled sites" : `Open ${title} settings`;
+					slot.append(fallback);
+				}, 2200);
+
+				let active = true;
+				const actions = section === "collection"
+					? { ...collectionImportActions(shadow, () => active && host.isConnected), notesCount: collectionNotesCount, bookmarkExportFile, notesExportFile }
+					: section === "filters" ? { ...hiddenLinkSettings, ...topicSettingsActions } : disabledSiteSettings;
+				const channel = new MessageChannel();
+				const port = channel.port1;
+				let ready = false;
+				const updateTheme = () => port.postMessage({ theme: sidebarFrameTheme(shadow) });
+				const observer = new MutationObserver(updateTheme);
+				channel.port1.onmessage = async ({ data }) => {
+					if (!active || !host.isConnected) return;
+					if (!ready) {
+						if (data !== readyKey) return;
+						ready = true;
+						window.clearTimeout(timeout);
+						loading.remove();
+						host.dataset.settingsFrame = "";
+						focus = (back) => {
+							frame.focus();
+							port.postMessage({ focusLast: back });
+						};
+						observer.observe(shadow.host, { attributeFilter: ["class", "style"] });
+						updateTheme();
+						return;
+					}
+					if (typeof data?.tabBack === "boolean") {
+						moveTab(host, data.tabBack);
+						return;
+					}
+					if (Number.isFinite(data?.height)) {
+						const minimum = data.modal ? Math.min(360, Math.max(260, innerHeight - 310)) : 1;
+						frame.style.height = Math.max(minimum, data.height) + "px";
+						if (data.modal) host.scrollIntoView({ block: "nearest" });
+						return;
+					}
+					if (data?.close) {
+						closeAppSettings();
+						return;
+					}
+					if (!Number.isInteger(data?.id) || !Array.isArray(data.args) || !Object.hasOwn(actions, data.action) || typeof actions[data.action] !== "function") return;
+					const { id, action, args } = data;
+					try {
+						const result = await actions[action](...args);
+						if (active) port.postMessage({ id, result });
+					} catch (error) {
+						if (active) port.postMessage({ id, error: error.message || "Settings action failed" });
+					}
+				};
+				frame.addEventListener("load", () => {
+					if (active) frame.contentWindow?.postMessage(connectKey, "*", [channel.port2]);
+				}, { once: true });
+				dispose = () => {
+					active = false;
+					window.clearTimeout(timeout);
+					observer.disconnect();
+					port.close();
+					slot.replaceChildren();
+				};
+				root.append(frame);
+				slot.replaceChildren(loading, host);
+			},
+		};
+	}
+
 	function wireSettingsPanel(shadow, { onAnnotationChange } = {}) {
 		const settingsPanel = shadow.querySelector("#settings-panel");
 		const settingsToggle = shadow.querySelector("#settings-toggle");
 		const shortcutsPane = wireShortcutsPane(shadow);
-		const topicFilters = wireSettingsTopicFilters(shadow);
+		const topicFilters = wireSettingsTopicFilters(shadow, {
+			...topicSettingsActions,
+			refreshFrontPages: () => refreshFrontPageConsumers().catch(console.error),
+		}, settingsTopicFilterOptions());
+		const privateSettings = wireSidebarPrivateSettings(shadow);
 
-		watchUpdateGear(settingsToggle);
+		if (settingsToggle) watchUpdateGear(settingsToggle);
 
 		const settingsInputs = {
 			sidebarEnabled: shadow.querySelector("#setting-sidebar-enabled"),
@@ -24889,7 +25695,7 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 
 			applyButtonDesigner(settings);
 			syncSettingsFrontPage?.(settings);
-			topicFilters.sync(settings);
+			topicFilters.sync(settings.hiddenTopics);
 			syncSourceSchedule(normalizeSourceRefreshMinutes(settings.sourceRefreshMinutes));
 
 			const sourceState = normalizeSourceSettings(
@@ -25001,26 +25807,9 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 
 		shadow.addEventListener("click", (event) => closeMenusOutside(shadow, event));
 
-		const notesExport = shadow.querySelector("#settings-notes-export");
-		const notesCount = shadow.querySelector("#settings-notes-count");
-		const bookmarksExport = shadow.querySelector("#settings-bookmarks-export");
-
-		if (bookmarksExport) bookmarksExport.onclick = (event) => {
-			if (event.isTrusted && appState) exportBookmarks().catch(console.error);
-		};
-
-		const refreshNotesCount = async () => {
-			if (!notesCount) {
-				return;
-			}
-
-			const total = notedDocuments(await load(NOTES_INDEX_KEY, [])).reduce(
-				(sum, entry) => sum + (entry.count || 0),
-				0,
-			);
-
-			notesCount.textContent = pluralize(total, "note");
-		};
+		const refreshNotesCount = shadow.getElementById("settings-notes-export")
+			? wireCollectionDownloads(shadow, { notesCount: collectionNotesCount, bookmarkExportFile, notesExportFile })
+			: null;
 
 		wireSettingsUpdates(shadow, settingsPanel);
 
@@ -25047,34 +25836,6 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 				cacheClear.setAttribute("aria-disabled", "true");
 				await clearCache();
 				cacheClear.textContent = "Cache cleared";
-			};
-		}
-
-		if (notesExport) {
-			notesExport.onclick = (event) => {
-				if (!event.isTrusted || !appState) return;
-				event.preventDefault();
-				event.stopPropagation();
-
-				const restore = notesExport.textContent;
-
-				notesExport
-					.animate?.(
-						[{ opacity: 1 }, { opacity: 0.35 }, { opacity: 1 }],
-						{ duration: 420 },
-					);
-
-				exportNotes()
-					.then((payload) => {
-						notesExport.textContent = payload.noteCount
-							? "Exported"
-							: "No notes yet";
-
-						window.setTimeout(() => {
-							notesExport.textContent = restore;
-						}, 1800);
-					})
-					.catch(console.error);
 			};
 		}
 
@@ -25488,261 +26249,17 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 				.catch(console.error);
 		}
 
-		const manageTable = (body, { load, add, remove, empty, placeholder }) => {
-			const table = body?.closest(".manage-table");
-
-			if (!table) {
-				return async () => {};
-			}
-
-			const addButton = table.querySelector(".manage-table-add");
-			const removeButton = table.querySelector(".manage-table-remove");
-			let chosen = null;
-
-			const rows = () => [...body.querySelectorAll(".manage-row")];
-
-			const sync = () => {
-				for (const row of rows()) {
-					row.setAttribute("aria-selected", String(row.dataset.key === chosen));
-				}
-
-				if (!chosen && body.getRootNode().activeElement === removeButton) {
-					body.focus({ preventScroll: true });
-				}
-
-				removeButton.disabled = !chosen;
-			};
-
-			const render = async () => {
-				const items = await load();
-
-				if (!items.some((item) => item.key === chosen)) {
-					chosen = null;
-				}
-
-				body.replaceChildren();
-
-				if (!items.length) {
-					const note = document.createElement("div");
-
-					note.className = "manage-empty";
-					note.textContent = empty;
-					body.appendChild(note);
-				}
-
-				for (const item of items) {
-					const row = document.createElement("div");
-
-					row.className = "manage-row";
-					row.setAttribute("role", "option");
-					row.dataset.key = item.key;
-					row.title = item.title || "";
-
-					for (const text of item.cells) {
-						const cell = document.createElement("span");
-
-						cell.textContent = text;
-						row.appendChild(cell);
-					}
-
-					row.onclick = () => {
-						chosen = item.key;
-						sync();
-						body.focus({ preventScroll: true });
-					};
-
-					body.appendChild(row);
-				}
-
-				sync();
-			};
-
-			const removeChosen = async () => {
-				if (!chosen || body.querySelector(".manage-add-row")) {
-					return;
-				}
-
-				const list = rows();
-				const index = list.findIndex((row) => row.dataset.key === chosen);
-				const next = list[index + 1] || list[index - 1];
-
-				await remove(chosen);
-				chosen = next?.dataset.key || null;
-				await render();
-			};
-
-			removeButton.onclick = () => {
-				removeChosen().catch(console.error);
-			};
-
-			body.addEventListener("keydown", (event) => {
-				if (event.target !== body) {
-					return;
-				}
-
-				if (event.key === "Delete" || event.key === "Backspace") {
-					event.preventDefault();
-					removeChosen().catch(console.error);
-				} else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-					const list = rows();
-
-					if (!list.length) {
-						return;
-					}
-
-					event.preventDefault();
-
-					const index = list.findIndex((row) => row.dataset.key === chosen);
-					const next = list[Math.min(Math.max(index + (event.key === "ArrowDown" ? 1 : -1), 0), list.length - 1)] || list[0];
-
-					chosen = next.dataset.key;
-					sync();
-					next.scrollIntoView({ block: "nearest" });
-				}
-			});
-
-			addButton.onclick = () => {
-				const existing = body.querySelector(".manage-add-row input");
-
-				if (existing) {
-					existing.focus();
-					return;
-				}
-
-				const row = document.createElement("div");
-				const input = document.createElement("input");
-				let done = false;
-
-				row.className = "manage-add-row";
-				input.type = "text";
-				input.placeholder = placeholder;
-				input.setAttribute("aria-label", placeholder);
-				input.spellcheck = false;
-				row.appendChild(input);
-				body.querySelector(".manage-empty")?.remove();
-				body.appendChild(row);
-				row.scrollIntoView({ block: "nearest" });
-				input.focus();
-
-				const finish = async (commit) => {
-					if (done) {
-						return;
-					}
-
-					done = true;
-
-					const value = input.value.trim();
-
-					if (commit && value) {
-						const key = await add(value);
-
-						if (key) {
-							chosen = key;
-						}
-					}
-
-					await render();
-				};
-
-				input.addEventListener("keydown", (event) => {
-					if (event.key === "Enter") {
-						event.preventDefault();
-						finish(true).catch(console.error);
-						body.focus({ preventScroll: true });
-					} else if (event.key === "Escape") {
-						event.preventDefault();
-						event.stopPropagation();
-						finish(false).catch(console.error);
-						body.focus({ preventScroll: true });
-					}
-				});
-				input.addEventListener("blur", () => {
-					finish(Boolean(input.value.trim())).catch(console.error);
-				});
-			};
-
-			return render;
-		};
-
-		const typedAddress = (value) => {
-			try {
-				return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`);
-			} catch {
-				return null;
-			}
-		};
-
-		const renderHiddenList = manageTable(shadow.querySelector("#settings-hidden-list"), {
-			empty: "Nothing hidden yet.",
-			placeholder: "Paste a link to hide",
-			load: async () =>
-				(await loadHiddenStories()).map((entry) => ({
-					key: entry.key,
-					title: entry.url || "",
-					cells: [entry.title || entry.url || entry.key, entry.site || hostLabel(entry.url)],
-				})),
-			add: async (value) => {
-				const address = typedAddress(value);
-
-				if (!address) {
-					return null;
-				}
-
-				const story = { url: address.href, title: "", site: hostLabel(address.href), source: "" };
-
-				await mutateHiddenStories((current) => addHiddenStory(current, story));
-				refreshFrontPageConsumers().catch(console.error);
-				return hiddenStoryKey(story);
-			},
-			remove: async (key) => {
-				await mutateHiddenStories((current) => removeHiddenStory(current, key));
-				refreshFrontPageConsumers().catch(console.error);
-			},
-		});
-
-		const renderBlockedList = manageTable(shadow.querySelector("#settings-blocked-list"), {
-			empty: "No sites disabled yet.",
-			placeholder: "A site, like example.com, or a page's address",
-			load: async () =>
-				[...(await loadBlockedSites())]
-					.map((entry) => {
-						const page = entry.startsWith(BLOCKED_PAGE_PREFIX);
-
-						return { key: entry, title: "", cells: [page ? entry.slice(BLOCKED_PAGE_PREFIX.length) : entry, page ? "This page" : "Whole site"] };
-					})
-					.sort((a, b) => a.cells[0].localeCompare(b.cells[0])),
-			add: async (value) => {
-				const address = typedAddress(value);
-
-				if (!address) {
-					return null;
-				}
-
-				const entry = address.pathname === "/" && !address.search ? address.hostname : blockedPageEntry(address.href);
-				const sites = await loadBlockedSites();
-
-				if (entry) {
-					sites.add(entry);
-					await saveBlockedSites(sites);
-				}
-
-				return entry;
-			},
-			remove: async (key) => {
-				const sites = await loadBlockedSites();
-
-				sites.delete(key);
-				await saveBlockedSites(sites);
-			},
-		});
+		const renderHiddenList = wireSettingsManageTable(shadow.getElementById("settings-hidden-list"), hiddenLinkSettings);
+		const renderBlockedList = wireSettingsManageTable(shadow.getElementById("settings-blocked-list"), disabledSiteSettings);
 
 		return {
 			ready,
 			open() {
 				setHideMenuOpen(false);
-				refreshNotesCount().catch(console.error);
+				refreshNotesCount?.().catch(console.error);
 			},
-			show(section) {
+			show(section, moveTab) {
+				privateSettings.show(section, moveTab);
 				if (section === "shortcuts") shortcutsPane.refresh().catch(console.error);
 				else shortcutsPane.close();
 				if (section === "sidebar") renderBlockedList().catch(console.error);
@@ -25751,13 +26268,380 @@ ${APP_ICON('<circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stro
 					topicFilters.refresh().catch(console.error);
 				}
 			},
-			close: shortcutsPane.close,
+			focusPrivateFrame: privateSettings.focus,
+			close() {
+				privateSettings.close();
+				shortcutsPane.close();
+			},
 		};
 	}
 
 	// -------------------------
 	// Sidebar
 	// -------------------------
+
+	const COMPOSER_CSS = `
+.comment-composer {
+	margin-top:10px;
+	max-width:720px;
+}
+
+.compose-box {
+	position:relative;
+	margin:15px 0 15px 8px;
+}
+
+.compose-field {
+	border:1px solid var(--field-border);
+	border-radius:6px;
+	background:var(--field-bg);
+}
+
+.compose-field:focus-within {
+	border-color:var(--accent);
+	box-shadow:0 0 0 2px rgba(var(--accent-rgb),.16);
+}
+
+.compose-field > .composer-text {
+	display:block;
+	width:100%;
+	min-height:0;
+	box-sizing:border-box;
+	padding:7px 9px 2px;
+	border:0;
+	border-radius:6px 6px 0 0;
+	background:none;
+	resize:vertical;
+}
+
+.compose-field > .composer-text:focus {
+	outline:none;
+	box-shadow:none;
+}
+
+.compose-field > .composer-text[role="textbox"] {
+	--composer-line-height:var(--composer-text-height, 17px);
+	--composer-inset:var(--composer-text-inset, 3px);
+	position:relative;
+	min-height:calc(var(--composer-line-height) + 2 * var(--composer-inset));
+	max-height:calc(6 * var(--composer-line-height) + 2 * var(--composer-inset));
+	padding:var(--composer-inset) var(--composer-text-indent, 7px);
+	line-height:var(--composer-line-height);
+	overflow:auto;
+	overflow-wrap:anywhere;
+	resize:none;
+}
+
+.composer-text[role="textbox"]::before {
+	position:absolute;
+	max-width:calc(100% - 2 * var(--composer-text-indent, 7px));
+	color:var(--composer-placeholder-color, var(--meta));
+	font-size:var(--composer-placeholder-size, inherit);
+	white-space:nowrap;
+	overflow:hidden;
+	text-overflow:ellipsis;
+	pointer-events:none;
+	user-select:none;
+}
+
+.composer-text[role="textbox"][data-empty]::before {
+	content:attr(data-placeholder);
+}
+
+.composer-text blockquote {
+	margin:0;
+	padding-inline-start:6px;
+	border-inline-start:2px solid var(--field-border);
+	color:var(--meta);
+}
+
+.composer-text pre {
+	margin:0;
+	background:var(--code-bg);
+	font-family:Menlo, Consolas, monospace;
+	white-space:inherit;
+}
+
+.compose-field > .composer-actions {
+	display:flex;
+	align-items:center;
+	gap:8px;
+	padding:2px 7px 7px 9px;
+}
+
+.compose-send-row {
+	position:relative;
+	display:inline-flex;
+	gap:6px;
+	margin-left:auto;
+}
+
+.compose-send, .compose-tool {
+	display:inline-flex;
+	align-items:center;
+	justify-content:center;
+	height:22px;
+	padding:0 10px;
+	border:0;
+	border-radius:999px;
+	font:inherit;
+	font-size:11px;
+	line-height:1;
+	cursor:pointer;
+	transition:opacity .15s ease, transform .15s ease;
+}
+
+.compose-send[hidden], .compose-tool[hidden], .composer-formatting[hidden] {
+	display:none;
+}
+
+.compose-send:disabled, .compose-tool:disabled {
+	opacity:.45;
+	cursor:default;
+}
+
+.compose-send:disabled.is-sending {
+	opacity:1;
+}
+
+.compose-send-label {
+	display:inline-block;
+	--send-stage:var(--send-note-stage);
+	--send-peak:var(--send-note-peak);
+	transition:opacity .16s ease;
+}
+
+.is-fading > .compose-send-label {
+	opacity:0;
+}
+
+.is-working > .compose-send-label {
+	background-image:linear-gradient(
+		90deg,
+		var(--send-stage) 0%,
+		var(--send-stage) 40%,
+		var(--send-peak) 50%,
+		var(--send-stage) 60%,
+		var(--send-stage) 100%
+	);
+	background-size:220% 100%;
+	-webkit-background-clip:text;
+	background-clip:text;
+	-webkit-text-fill-color:transparent;
+	color:transparent;
+	animation:hnewhere-subtitle-shimmer 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.is-working > .compose-send-label {
+		animation:none;
+	}
+}
+
+.compose-send-comment > .compose-send-label {
+	--send-stage:var(--send-ink-stage);
+	--send-peak:var(--send-ink-peak);
+}
+
+.compose-send-note, .compose-tool {
+	color:var(--surface-text);
+	background:var(--hover-tint);
+}
+
+.compose-send-comment {
+	color:var(--accent-ink);
+	background:var(--accent);
+}
+
+.compose-send.is-open, .compose-tool:is([aria-expanded="true"], [aria-pressed="true"]) {
+	background-image:linear-gradient(var(--active-tint), var(--active-tint));
+}
+
+@media (hover: hover) {
+	:is(.compose-send, .compose-tool):not(:disabled):hover {
+		transform:translateY(-1px);
+	}
+}
+
+:is(.compose-send, .compose-tool):focus-visible {
+	outline:2px solid var(--link);
+	outline-offset:2px;
+}
+
+.composer-formatting {
+	display:flex;
+	gap:3px;
+	padding:2px 3px;
+}
+
+.compose-tool {
+	width:23px;
+	padding:0;
+}
+
+.compose-tool svg {
+	width:13px;
+	height:13px;
+}
+
+.compose-targets {
+	position:absolute;
+	right:0;
+	top:calc(100% + 3px);
+	max-height:180px;
+	overflow-y:auto;
+	z-index:2;
+	display:flex;
+	flex-direction:column;
+	min-width:132px;
+	max-width:270px;
+	padding:4px;
+	border:1px solid var(--surface-border);
+	border-radius:6px;
+	background:var(--surface);
+	box-shadow:0 4px 14px rgba(0,0,0,.18);
+}
+
+.compose-targets.hidden {
+	display:none;
+}
+
+.compose-target {
+	display:flex;
+	align-items:center;
+	gap:8px;
+	width:100%;
+	padding:4px 6px;
+	border:0;
+	border-radius:4px;
+	background:none;
+	color:var(--surface-text);
+	font:inherit;
+	font-size:12px;
+	text-align:left;
+	cursor:pointer;
+}
+
+.compose-target + .compose-target {
+	margin-top:2px;
+}
+
+@media (hover: hover) {
+	.compose-target:hover {
+		background:var(--hover-tint);
+	}
+}
+
+.composer-text {
+	display:block;
+	width:100%;
+	box-sizing:border-box;
+	min-height:72px;
+	max-width:100%;
+	resize:both;
+	padding:6px 7px;
+	border:1px solid var(--field-border);
+	border-radius:4px;
+	background:var(--field-bg);
+	color:var(--field-text);
+	font:13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	white-space:pre-wrap;
+	tab-size:4;
+	cursor:text;
+}
+
+.composer-text:focus {
+	outline:2px solid rgba(var(--accent-rgb),.4);
+	outline-offset:-1px;
+}
+
+.composer-text:disabled, .composer-text[aria-disabled="true"] {
+	background:var(--field-disabled-bg);
+	color:var(--muted);
+}
+
+.composer-actions {
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:8px;
+	margin-top:6px;
+}
+
+.composer-submit {
+	cursor:pointer;
+}
+
+.composer-help-toggle {
+	background:none;
+	border:0;
+	padding:0;
+	color:var(--meta);
+	font-family:Verdana, Geneva, sans-serif;
+	font-size:11px;
+	cursor:pointer;
+	text-decoration:none;
+	text-underline-offset:2px;
+}
+
+.composer-help-toggle.is-open {
+	text-decoration:underline;
+}
+
+@media (hover: hover) {
+	.composer-help-toggle:hover {
+		text-decoration:underline;
+	}
+}
+
+.composer-help {
+	margin-top:6px;
+	padding:7px 8px;
+	border:1px solid var(--help-border);
+	border-radius:4px;
+	background:var(--help-bg);
+	color:var(--help-text);
+	font-size:11px;
+	line-height:1.5;
+}
+
+.composer-help p {
+	margin:0;
+}
+
+.composer-help p + p {
+	margin-top:5px;
+}
+
+.composer-help code {
+	background:var(--code-bg);
+	border-radius:2px;
+	padding:0 3px;
+	font-family:Menlo, Consolas, monospace;
+	font-size:10px;
+}
+
+.composer-status {
+	flex:1 1 auto;
+	min-width:0;
+	font-size:11px;
+	line-height:1.4;
+	color:var(--status-text);
+	transition:opacity .14s ease;
+}
+
+.composer-status.is-fading {
+	opacity:0;
+}
+
+.composer-status.error {
+	color:var(--error);
+}
+
+.composer-status a {
+	color:var(--link);
+}
+`;
 
 	async function createSidebar({ pageMode = false, appMode = false } = {}) {
 		if (sidebar) {
@@ -25968,15 +26852,6 @@ ${CHROME_CSS}
 	border-bottom-width:0;
 }
 
-.page-header {
-	transition:border-bottom-color .2s ease, padding-bottom .2s ease;
-}
-
-.discussion-filtered .page-header {
-	border-bottom-color:transparent;
-	padding-bottom:12px;
-}
-
 #comments {
 	--comments-gutter:12px;
 			flex:1 1 auto;
@@ -26021,39 +26896,12 @@ ${CHROME_CSS}
 	align-items:center;
 	gap:6px;
 	min-height:24px;
-	color:var(--muted);
-	font-family:var(--app-ui-font, inherit);
-	font-size:12px;
-	line-height:1.4;
 }
 
 .app-discussion-byline {
 	flex:1 1 auto;
 	min-width:0;
 	overflow-wrap:anywhere;
-}
-
-.app-discussion-byline :is(strong, a) {
-	color:var(--text);
-	font-weight:600;
-}
-
-.app-discussion-byline a {
-	text-decoration:underline;
-	text-decoration-color:var(--border);
-	text-underline-offset:2px;
-}
-
-.app-discussion-byline a span {
-	color:var(--muted);
-	font-weight:400;
-}
-
-@media (hover: hover) {
-	.app-discussion-byline a:hover {
-		color:var(--text);
-		text-decoration-color:currentColor;
-	}
 }
 
 .app-discussion-focus-banner .filter-banner-quote {
@@ -26859,41 +27707,7 @@ blockquote.comment-quote-redundant {
 	cursor:pointer;
 }
 
-.story-title {
-	font-size:13px;
-	line-height:1.25;
-}
-
-.story-title a {
-	color:var(--text);
-	text-decoration:underline dotted;
-	text-underline-offset:2px;
-	text-decoration-color:var(--border);
-	word-break:break-word;
-}
-
-.story-meta {
-	color:var(--meta);
-	font-size:10px;
-	line-height:1.4;
-	padding-top:2px;
-}
-
-.story-meta a {
-	color:var(--meta);
-	text-decoration:underline dotted;
-	text-underline-offset:2px;
-	text-decoration-color:var(--border);
-}
-
-@media (hover: hover) {
-	.story-meta a:hover,
-	.story-title a:hover,
-	.discussion-thread-link:hover,
-	.browse-nav-link:hover {
-		text-decoration:underline;
-	}
-}
+${STORY_TEXT_CSS}
 
 .story-text {
 	margin:10px 0;
@@ -26909,15 +27723,7 @@ blockquote.comment-quote-redundant {
 	color:var(--link);
 }
 
-.comment-composer {
-	margin-top:10px;
-	max-width:720px;
-}
-
-.compose-box {
-	position:relative;
-	margin:15px 0 15px 8px;
-}
+${COMPOSER_CSS}
 
 .compose-dock-close {
 	display:none;
@@ -26950,7 +27756,7 @@ blockquote.comment-quote-redundant {
 
 .sidebar-compose-bar {
 	flex:none;
-	padding:5px 10px max(5px, env(safe-area-inset-bottom, 0px));
+	padding:3px 8px max(3px, calc(env(safe-area-inset-bottom, 0px) - 2px));
 	border-top:1px solid var(--border-soft);
 	background:var(--bg);
 }
@@ -26959,213 +27765,12 @@ blockquote.comment-quote-redundant {
 	display:none;
 }
 
-.sidebar-compose-bar iframe {
-	display:block;
-	width:100%;
-	border:0;
-}
-
 .sidebar-compose-bar [hidden] {
 	display:none;
 }
 
-.sidebar-compose-launcher {
-	display:block;
-	width:100%;
-	text-align:start;
-	padding:6px 9px;
-	border:1px solid var(--field-border);
-	border-radius:999px;
-	background:var(--field-bg);
-	color:var(--meta);
-	font:inherit;
-	cursor:text;
-}
-
 #comment-toggle.is-open {
 	background:var(--active-tint);
-}
-
-.compose-field {
-	border:1px solid var(--field-border);
-	border-radius:6px;
-	background:var(--field-bg);
-}
-
-.compose-field:focus-within {
-	border-color:var(--accent);
-	box-shadow:0 0 0 2px rgba(var(--accent-rgb),.16);
-}
-
-.compose-field > .composer-text {
-	display:block;
-	width:100%;
-	min-height:0;
-	box-sizing:border-box;
-	padding:7px 9px 2px;
-	border:0;
-	border-radius:6px 6px 0 0;
-	background:none;
-	resize:vertical;
-}
-
-.compose-field > .composer-text:focus {
-	outline:none;
-	box-shadow:none;
-}
-
-.compose-field > .composer-actions {
-	display:flex;
-	align-items:center;
-	gap:8px;
-	padding:2px 7px 7px 9px;
-}
-
-.compose-send-row {
-	position:relative;
-	display:inline-flex;
-	gap:6px;
-	margin-left:auto;
-}
-
-.compose-send {
-	display:inline-flex;
-	align-items:center;
-	justify-content:center;
-	height:22px;
-	padding:0 10px;
-	border:0;
-	border-radius:999px;
-	font:inherit;
-	font-size:11px;
-	line-height:1;
-	cursor:pointer;
-	transition:opacity .15s ease, transform .15s ease;
-}
-
-.compose-send[hidden] {
-	display:none;
-}
-
-.compose-send:disabled {
-	opacity:.45;
-	cursor:default;
-}
-
-.compose-send:disabled.is-sending {
-	opacity:1;
-}
-
-.compose-send-label {
-	display:inline-block;
-	--send-stage:var(--send-note-stage);
-	--send-peak:var(--send-note-peak);
-	transition:opacity .16s ease;
-}
-
-.is-fading > .compose-send-label {
-	opacity:0;
-}
-
-.is-working > .compose-send-label {
-	background-image:linear-gradient(
-		90deg,
-		var(--send-stage) 0%,
-		var(--send-stage) 40%,
-		var(--send-peak) 50%,
-		var(--send-stage) 60%,
-		var(--send-stage) 100%
-	);
-	background-size:220% 100%;
-	-webkit-background-clip:text;
-	background-clip:text;
-	-webkit-text-fill-color:transparent;
-	color:transparent;
-	animation:hnewhere-subtitle-shimmer 1.6s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-	.is-working > .compose-send-label {
-		animation:none;
-	}
-}
-
-.compose-send-comment > .compose-send-label {
-	--send-stage:var(--send-ink-stage);
-	--send-peak:var(--send-ink-peak);
-}
-
-.compose-send-note {
-	color:var(--surface-text);
-	background:var(--hover-tint);
-}
-
-.compose-send-comment {
-	color:var(--accent-ink);
-	background:var(--accent);
-}
-
-.compose-send.is-open {
-	background-image:linear-gradient(var(--active-tint), var(--active-tint));
-}
-
-@media (hover: hover) {
-	.compose-send:not(:disabled):hover {
-		transform:translateY(-1px);
-	}
-}
-
-.compose-send:focus-visible {
-	outline:2px solid var(--link);
-	outline-offset:2px;
-}
-
-.compose-targets {
-	position:absolute;
-	right:0;
-	top:calc(100% + 3px);
-	max-height:180px;
-	overflow-y:auto;
-	z-index:2;
-	display:flex;
-	flex-direction:column;
-	min-width:132px;
-	max-width:270px;
-	padding:4px;
-	border:1px solid var(--surface-border);
-	border-radius:6px;
-	background:var(--surface);
-	box-shadow:0 4px 14px rgba(0,0,0,.18);
-}
-
-.compose-targets.hidden {
-	display:none;
-}
-
-.compose-target {
-	display:flex;
-	align-items:center;
-	gap:8px;
-	width:100%;
-	padding:4px 6px;
-	border:0;
-	border-radius:4px;
-	background:none;
-	color:var(--surface-text);
-	font:inherit;
-	font-size:12px;
-	text-align:left;
-	cursor:pointer;
-}
-
-.compose-target + .compose-target {
-	margin-top:2px;
-}
-
-@media (hover: hover) {
-	.compose-target:hover {
-		background:var(--hover-tint);
-	}
 }
 
 .reply-composer {
@@ -27183,116 +27788,6 @@ blockquote.comment-quote-redundant {
 
 .reply-link.is-open {
 	text-decoration:underline;
-}
-
-.composer-text {
-	display:block;
-	width:100%;
-	box-sizing:border-box;
-	min-height:72px;
-	max-width:100%;
-	resize:both;
-	padding:6px 7px;
-	border:1px solid var(--field-border);
-	border-radius:4px;
-	background:var(--field-bg);
-	color:var(--field-text);
-	font:13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-	white-space:pre-wrap;
-	tab-size:4;
-	cursor:text;
-}
-
-.composer-text:focus {
-	outline:2px solid rgba(var(--accent-rgb),.4);
-	outline-offset:-1px;
-}
-
-.composer-text:disabled {
-	background:var(--field-disabled-bg);
-	color:var(--muted);
-}
-
-.composer-actions {
-	display:flex;
-	align-items:center;
-	justify-content:space-between;
-	gap:8px;
-	margin-top:6px;
-}
-
-.composer-submit {
-	cursor:pointer;
-}
-
-.composer-help-toggle {
-	background:none;
-	border:0;
-	padding:0;
-	color:var(--meta);
-	font-family:Verdana, Geneva, sans-serif;
-	font-size:11px;
-	cursor:pointer;
-	text-decoration:none;
-	text-underline-offset:2px;
-}
-
-.composer-help-toggle.is-open {
-	text-decoration:underline;
-}
-
-@media (hover: hover) {
-	.composer-help-toggle:hover {
-		text-decoration:underline;
-	}
-}
-
-.composer-help {
-	margin-top:6px;
-	padding:7px 8px;
-	border:1px solid var(--help-border);
-	border-radius:4px;
-	background:var(--help-bg);
-	color:var(--help-text);
-	font-size:11px;
-	line-height:1.5;
-}
-
-.composer-help p {
-	margin:0;
-}
-
-.composer-help p + p {
-	margin-top:5px;
-}
-
-.composer-help code {
-	background:var(--code-bg);
-	border-radius:2px;
-	padding:0 3px;
-	font-family:Menlo, Consolas, monospace;
-	font-size:10px;
-}
-
-.composer-status {
-	flex:1 1 auto;
-	min-width:0;
-	font-size:11px;
-	line-height:1.4;
-	color:var(--status-text);
-	transition:opacity .14s ease;
-}
-
-.composer-status.is-fading {
-	opacity:0;
-}
-
-.composer-status.error {
-	color:var(--error);
-}
-
-.composer-status a {
-	color:var(--link);
 }
 
 .toast-layer {
@@ -27314,6 +27809,7 @@ ${appMode ? appDiscussionHeaderHTML(`
 <button id="app-discussion-sync-empty" class="app-head-icon" type="button" aria-label="Sync" title="Sync" hidden><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>
 <button id="app-bar-compose" class="app-head-icon" type="button" aria-label="Comment and note composer" aria-expanded="false" title="Comment and note composer" hidden>${APP_ICON('<path fill="currentColor" d="M3 2h6v1.5H3.5v9h9V7H14v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM12.3 1.7l2 2-6.7 6.7-2.5.5.5-2.5z"/>')}</button>
 `) : headerHTML({ subtitle: true, minimize: !docked, browse: true })}
+${appMode ? "" : '<div id="sidebar-discussion-tools" class="app-discussion-header app-discussion-actions header-actions"><span id="sidebar-discussion-sort" class="app-discussion-sort"></span><span id="sidebar-discussion-meta" class="app-discussion-meta"></span></div>'}
 ${appMode ? "" : `<div class="toast-viewport">${TOAST_HTML}</div>`}
 <div class="toast-layer">${appMode ? "" : `<div id="compose-dock" class="compose-dock" hidden><button id="compose-dock-close" class="compose-dock-close" type="button" aria-label="Close the composer" title="Close">&times;</button><div id="compose-dock-slot" class="compose-dock-slot"></div></div>`}</div>
 <div id="comments">
@@ -27324,12 +27820,12 @@ ${appMode ? "" : `<div class="toast-viewport">${TOAST_HTML}</div>`}
 <div id="comments-content">Loading...</div>
 <div id="browse-view" class="browse-view${appMode ? "" : " browse-home"}">
 ${appMode ? `<div class="browse-tabs" role="tablist">
-<button id="browse-tab-front" class="browse-tab is-current" type="button" role="tab">front pages</button>
+<button id="browse-tab-front" class="browse-tab is-current" type="button" role="tab">front\u00a0pages</button>
 <button id="browse-tab-queue" class="browse-tab is-collapsed" type="button" role="tab" aria-hidden="true" tabindex="-1">queue</button>
 <button id="browse-tab-collection" class="browse-tab is-collapsed" type="button" role="tab" aria-hidden="true" tabindex="-1">collection</button>
 </div>` : sidebarHomeChromeHTML()}
 <div id="browse-blend-note" class="browse-blend-note" hidden></div>
-<div id="browse-list"${appMode ? "" : ' class="reader-list" role="tabpanel" aria-labelledby="browse-tab-front"'}></div>
+<div id="browse-list"${appMode ? "" : ' class="reader-list" role="tabpanel" aria-labelledby="browse-tab-all"'}></div>
 </div>
 ${appMode ? "" : '<div id="next-up" class="next-up hidden"></div>'}
 </div>
@@ -27522,6 +28018,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 		host._cleanup = () => {
 			destroyed = true;
+			closeSettings();
 			flushDrafts();
 			window.removeEventListener("pagehide", flushDrafts);
 			closeBrowseRowMenus(shadow);
@@ -27535,6 +28032,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 			if (sidebar === host) {
 				clearArticleAnnotations();
+				sidebarUI?.sidebarComposer?.dispose();
 				sidebarUI = null;
 			}
 		};
@@ -27577,7 +28075,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			headerSubtitle: shadow.querySelector("#header-subtitle"),
 			filterBanner,
 			filterBannerQuote,
-			browseHome: appMode ? null : { view: "unread", frontView: "unread", sequence: 0, rows: [], seen: {} },
+			browseHome: appMode ? null : { view: "all", frontView: "all", unreadViews: new Set(["all"]), sequence: 0, rows: [], seen: {} },
 		};
 
 		const browseToggle = shadow.querySelector("#browse-toggle");
@@ -27625,6 +28123,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		}
 
 		if (ui.browseHome) {
+			mountSidebarPageSave(shadow);
 			wireBrowseHome(ui);
 		}
 
@@ -27641,6 +28140,20 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		});
 
 		return ui;
+	}
+
+	function mountSidebarPageSave(shadow) {
+		const slot = shadow.getElementById("sidebar-article-actions");
+		const { link, title, site } = openPageContext();
+		if (!slot || !link) return;
+		slot.innerHTML = saveButtonHTML({ key: normalizeURL(link), url: link, title, site });
+		const button = slot.firstElementChild;
+		if (!button) return;
+		button.id = "sidebar-save-page";
+		button.classList.add("app-head-icon");
+		setActionLabel(button, "save");
+		registerSidebarSaveControls(slot);
+		refreshSaveControls(shadow).catch(console.error);
 	}
 
 	// -------------------------
@@ -27979,18 +28492,116 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		button?.setAttribute("aria-expanded", "false");
 	}
 
+	function composeFieldText(field) {
+		return field.localName === "textarea" ? field.value : field.innerText.replaceAll("\u00a0", " ");
+	}
+
+	function setComposeFieldState(field, state, value) {
+		if (field.localName === "textarea") {
+			field[state] = value;
+			return;
+		}
+		field.setAttribute("aria-" + state.toLowerCase(), String(value));
+		const editable = String(!field.matches('[aria-disabled="true"], [aria-readonly="true"]'));
+		if (field.contentEditable !== editable) field.contentEditable = editable;
+	}
+
+	function setComposeFieldDraft(field, draft) {
+		const text = typeof draft === "string" ? draft : draft?.text || "";
+		if (field.localName === "textarea") {
+			field.value = text;
+		} else if (typeof draft?.rich === "string") {
+			field.innerHTML = cleanComposeMarkup(draft.rich);
+		} else {
+			field.textContent = text;
+		}
+	}
+
+	const COMPOSE_RICH_TAGS = "i, em, b, strong, u, s, strike, del, pre, blockquote";
+
+	function composeMarkup(root) {
+		const encode = (node) => {
+			if (node.nodeType === Node.TEXT_NODE) return escapeHTML(node.data);
+			if (node.nodeType !== Node.ELEMENT_NODE) return "";
+			const tag = node.localName === "strike" ? "s" : node.localName;
+			if (tag === "br") return "<br>";
+			const contents = Array.from(node.childNodes, encode).join("");
+			return node.matches(COMPOSE_RICH_TAGS + ", div, p") ? "<" + tag + ">" + contents + "</" + tag + ">" : contents;
+		};
+		return Array.from(root.childNodes, encode).join("");
+	}
+
+	function cleanComposeMarkup(html) {
+		const template = document.createElement("template");
+		template.innerHTML = html;
+		return composeMarkup(template.content);
+	}
+
+	function composeDraft(field) {
+		const text = composeFieldText(field);
+		return text.trim() && field.querySelector(COMPOSE_RICH_TAGS) ? { text, rich: composeMarkup(field) } : text;
+	}
+
+	function noteFromComposeDraft(draft) {
+		const note = noteFromText(typeof draft === "string" ? draft : draft.text);
+		if (!note.exact && typeof draft.rich === "string") note.rich = cleanComposeMarkup(draft.rich);
+		return note;
+	}
+
+	function commentSupportsComposeFormat(source, format) {
+		if (format === "underline") return false;
+		return format === "bold" || format === "strikeThrough" ? source === "reddit" : true;
+	}
+
+	function composePostText(field, source) {
+		if (!field.querySelector(COMPOSE_RICH_TAGS)) return composeFieldText(field);
+		const mark = (value, delimiter) => value.replace(/\S(?:[^\n]*\S)?/g, (text) => delimiter + text + delimiter);
+		const children = (node) => {
+			let text = "";
+			let previousWasBlock = false;
+			for (const child of node.childNodes) {
+				const block = /^(div|p|pre|blockquote)$/.test(child.localName);
+				if ((block || previousWasBlock) && text && !text.endsWith("\n")) text += "\n";
+				text += format(child);
+				previousWasBlock = block;
+			}
+			return text;
+		};
+		const format = (node) => {
+			if (node.nodeType === Node.TEXT_NODE) return node.data.replaceAll("\u00a0", " ");
+			const value = children(node);
+			switch (node.localName) {
+				case "br": return "\n";
+				case "i": case "em":
+					return mark(value, "*");
+				case "b": case "strong":
+					return commentSupportsComposeFormat(source, "bold") ? mark(value, "**") : value;
+				case "s": case "strike": case "del":
+					return commentSupportsComposeFormat(source, "strikeThrough") ? mark(value, "~~") : value;
+				case "blockquote":
+					return "\n\n" + value.trimEnd().split("\n").map((line) => "> " + line).join("\n") + "\n\n";
+				case "pre":
+					return "\n\n" + node.innerText.trimEnd().replaceAll("\u00a0", " ").split("\n").map((line) => "    " + line).join("\n") + "\n\n";
+				default: return value;
+			}
+		};
+		return children(field).replace(/^\n+|\n+$/g, "");
+	}
+
 	function syncComposeSendable(box) {
 		const field = box.querySelector(".composer-text");
-		const written = Boolean(field.value.trim());
-		box.classList.toggle("has-composer-text", written);
+		const written = Boolean(composeFieldText(field).trim());
+		const unavailable = field.matches(':disabled, [aria-disabled="true"], [aria-readonly="true"]');
+		field.toggleAttribute("data-empty", !written);
 
 		for (const button of box.querySelectorAll(".compose-send")) {
-			if (box.dataset.loading || field.disabled) {
+			if (box.dataset.loading || unavailable) {
 				button.disabled = true;
 			} else if (!button.dataset.sending) {
 				button.disabled = !written;
 			}
 		}
+		for (const button of box.querySelectorAll(".compose-tool")) button.disabled = unavailable;
 	}
 
 	function setComposeLoading(box, loading) {
@@ -28003,6 +28614,14 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 	}
 
 	function syncComposeBox() {
+		if (!appState) {
+			const composer = sidebarUI?.sidebarComposer;
+			if (composer) {
+				composer.targets = replyTargets();
+				composer.update();
+			}
+			return;
+		}
 		const box =
 			sidebarUI?.shadow?.querySelector("#app-discussion-compose .compose-box") ||
 			sidebarUI?.body?.querySelector(".compose-box") ||
@@ -28013,24 +28632,22 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			return;
 		}
 
-		const count = replyTargets().length;
+		const targets = replyTargets();
 		const canNote = Boolean(box.querySelector(".compose-send-note"));
 		const control = sidebarUI.shadow.querySelector("#comment-toggle");
 		if (control) {
-			const label = composeDockLabel(count > 0);
+			const label = composeDockLabel(targets.length > 0);
 			control.title = label;
 			control.setAttribute("aria-label", label);
 		}
-		setComposeOptions(box, count, canNote, !count && !canNote && Boolean(box.closest("#app-discussion-compose")));
+		setComposeOptions(box, targets, canNote, !targets.length && !canNote && Boolean(box.closest("#app-discussion-compose")));
 	}
 
-	function setComposeOptions(box, count, canNote, unavailable = false) {
+	function setComposeOptions(box, targets, canNote, unavailable = false) {
+		const count = targets.length;
 		const button = box.querySelector(".compose-send-comment");
-		const word = count > 1 ? "comment\u2026" : "comment";
 		if (button) {
 			button.hidden = !count;
-			composeSendRest.set(button, word);
-			if (!button.dataset.sending && !button.classList.contains("is-sending")) composeSendLabel(button).textContent = word;
 			if (button.classList.contains("is-open") && count < 2) closeComposeTargets(box);
 			if (count > 1) button.setAttribute("aria-expanded", String(button.classList.contains("is-open")));
 			else button.removeAttribute("aria-expanded");
@@ -28038,182 +28655,529 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		const field = box.querySelector(".composer-text");
 		const placeholder = unavailable ? "Select a discussion to comment" : composePlaceholder(count > 0, canNote);
 
-		field.readOnly = unavailable;
-		field.placeholder = placeholder;
+		setComposeFieldState(field, "readOnly", unavailable);
+		field.dataset.placeholder = placeholder;
 		field.setAttribute("aria-label", placeholder);
+		field.setAttribute("aria-placeholder", placeholder);
+		for (const control of box.querySelectorAll(".composer-formatting [data-format]")) {
+			const label = control.getAttribute("aria-label");
+			const supported = targets.filter(({ source }) => commentSupportsComposeFormat(source, control.dataset.format)).length;
+			control.hidden = !canNote && supported === 0;
+			const destinations = canNote ? (supported ? "notes and Reddit comments" : "notes only") : "Reddit comments only";
+			control.title = supported < count && !control.hidden ? label + " (" + destinations + ")" : label;
+		}
+		syncComposeSendable(box);
 	}
 
-	function sidebarComposerFrame(readerOrigin, syncSendable) {
-		if (!document.querySelector("style")?.sheet?.cssRules.length) return;
-		const box = document.querySelector(".compose-box");
-		const field = document.querySelector(".composer-text");
-		const status = document.querySelector(".composer-status");
-		const comment = document.querySelector(".compose-send-comment");
-		const note = document.querySelector(".compose-send-note");
-		const help = document.querySelector(".composer-help");
-		const formatting = document.querySelector(".composer-help-toggle");
-		const setHelpOpen = (open) => {
-			help.hidden = !open;
-			formatting.setAttribute("aria-expanded", String(open));
+	function wireSidebarComposerClient(root, send) {
+		const box = root.querySelector(".compose-box");
+		const field = box.querySelector(".composer-text");
+		const status = box.querySelector(".composer-status");
+		const comment = box.querySelector(".compose-send-comment");
+		const note = box.querySelector(".compose-send-note");
+		let targets = [];
+		let choices = "";
+		let popup = null;
+		let confirmQuote = false;
+		const say = (message, error = false) => {
+			status.textContent = message;
+			status.classList.toggle("hidden", !message);
+			status.classList.toggle("error", error);
 		};
-		let draft = null;
-		const send = (mode) => (event) => {
-			if (!event.isTrusted || draft && !draft.popup.closed) return;
-			if (draft) clearTimeout(draft.timer);
-			const popup = window.open("about:blank", "_blank");
-			if (!popup) {
-				status.hidden = false;
-				status.textContent = "Allow pop-ups to continue in Reader.";
-				return;
-			}
-			const request = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
-			const timer = setTimeout(() => {
-				if (!draft?.opened) popup.close();
-				draft = null;
-			}, 30000);
-			draft = { request, popup, mode, text: field.value, timer };
-			status.hidden = true;
-			parent.postMessage({ type: "backchannel-sidebar-prepare", request }, "*");
-		};
-		comment.onclick = send("comment");
-		note.onclick = send("note");
-		formatting.onclick = () => setHelpOpen(help.hidden);
-		field.maxLength = 20000;
-		field.oninput = () => {
-			syncSendable(box);
-			if (!field.value.trim()) setHelpOpen(false);
-			field.style.height = "";
-			field.style.height = Math.min(100, field.scrollHeight) + "px";
-		};
-		window.addEventListener("message", (event) => {
-			if (!event.isTrusted) return;
-			const data = event.data;
-			if (event.source === parent && data?.type === "backchannel-sidebar-options") {
-				comment.hidden = !data.canComment;
-				formatting.hidden = !data.canComment;
-				if (!data.canComment) setHelpOpen(false);
-				note.hidden = !data.canNote;
-				field.placeholder = data.placeholder;
-				field.setAttribute("aria-label", data.placeholder);
-				document.documentElement.classList.toggle("dark", Boolean(data.dark));
-				return;
-			}
-			if (!draft) return;
-			if (event.source === parent && data?.type === "backchannel-sidebar-prepared" &&
-				data.request === draft.request && /^[a-f0-9]{32}$/.test(data.nonce)) {
-				draft.nonce = data.nonce;
-				draft.popup.location.replace(readerOrigin + "/#reader-article=" + data.nonce);
-				draft.opened = true;
-			} else if (event.source === draft.popup && event.origin === readerOrigin && data?.type === "backchannel-sidebar-reader" &&
-				draft.nonce && data.nonce === draft.nonce) {
-				const { popup, nonce, mode, text, timer } = draft;
-				popup.postMessage({ type: "backchannel-sidebar-draft", nonce, mode, text }, readerOrigin);
-				clearTimeout(timer);
-				draft = null;
-			}
+		const choose = wireComposeControls(box, () => {
+			confirmQuote = false;
+			say("");
 		});
-		status.classList.remove("hidden");
-		help.classList.remove("hidden");
-		status.hidden = help.hidden = true;
-		syncSendable(box);
-		new ResizeObserver(() => requestAnimationFrame(() => {
-			parent.postMessage({ type: "backchannel-sidebar-size", height: document.body.offsetHeight }, "*");
-		})).observe(document.body);
-		parent.postMessage({ type: "backchannel-sidebar-ready" }, "*");
+		const closePopup = () => {
+			popup?.close();
+			popup = null;
+		};
+		const submit = (target) => {
+			if (!field.isContentEditable || !composeFieldText(field).trim()) return;
+			if (target) {
+				popup = window.open("about:blank", "_blank", "width=760,height=680,resizable=yes,scrollbars=yes");
+				if (!popup) {
+					say("Allow pop-ups to post to the discussion.", true);
+					return;
+				}
+			}
+			const draft = target ? { text: composePostText(field, target.source) } : composeDraft(field);
+			setComposeFieldState(field, "disabled", true);
+			syncComposeSendable(box);
+			say(target ? "Posting comment…" : "Saving note…");
+			send({ mode: target ? "comment" : "note", key: target?.key,
+				...(typeof draft === "string" ? { text: draft } : draft), confirmQuote });
+		};
+		note.onclick = (event) => { if (event.isTrusted) submit(null); };
+		comment.onclick = (event) => {
+			if (!event.isTrusted || !field.isContentEditable) return;
+			choose(event, () => targets, (target, trigger) => {
+				if (trigger.isTrusted) submit(target);
+			}, "Choose a discussion", () => choices);
+		};
+		window.addEventListener("pagehide", closePopup);
+		syncComposeSendable(box);
+		return (data) => {
+			if (data.options) {
+				const { canNote, theme, darkClass, phone, viewportScale } = data.options;
+				if (choices !== data.options.choices) closeComposeTargets(box);
+				choices = data.options.choices;
+				targets = data.options.targets;
+				note.hidden = !canNote;
+				setComposeOptions(box, targets, canNote, !canNote && !targets.length);
+				paintSidebarFrameTheme(theme, darkClass);
+				root.body.style.setProperty("--composer-viewport-scale", String(viewportScale));
+				root.body.classList.toggle("is-phone", phone);
+				root.body.classList.add("is-ready");
+				return;
+			}
+			if (data.openURL && popup && !popup.closed) popup.location.replace(data.openURL);
+			if (data.closePopup) closePopup();
+			if (data.message) say(data.message, data.error);
+			if (!data.done) return;
+			setComposeFieldState(field, "disabled", false);
+			confirmQuote = Boolean(data.confirmQuote);
+			if (data.saved) setComposeFieldDraft(field, "");
+			syncComposeSendable(box);
+		};
 	}
 
-	function sidebarComposerDocument() {
-		return `<!doctype html><meta charset="utf-8"><style>
-		:root {color-scheme:light;--field:#fff;--line:#d6d6d6;--ink:#171717;--muted:#595959;--surface:#eee;--accent:#237140;}
-		:root.dark {color-scheme:dark;--field:#242624;--line:#484c48;--ink:#eee;--muted:#bfc2bf;--surface:#414541;--accent:#398658;}
-		html {overflow:hidden;}
-		body {margin:0;color:var(--ink);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
-		[hidden], .hidden {display:none!important;}
-		.compose-field {box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:4px;padding:4px 5px 4px 8px;border:1px solid var(--line);border-radius:16px;background:var(--field);}
-		.compose-field:focus-within {border-color:var(--accent);}
-		.composer-text {box-sizing:border-box;width:100%;min-height:24px;margin:0;padding:3px 0;border:0;outline:0;background:none;color:inherit;font:inherit;resize:none;}
-		.composer-text::placeholder {color:var(--muted);}
-		.composer-actions,.compose-send-row {display:flex;align-items:center;gap:4px;}
-		.compose-box:not(.has-composer-text) .composer-actions {display:none;}
-		.composer-actions button {padding:2px 7px;border:0;border-radius:999px;background:var(--surface);color:var(--ink);font:inherit;font-size:11px;line-height:1.7;cursor:pointer;}
-		.composer-actions .compose-send-comment {background:var(--accent);color:#fff;}
-		.composer-actions .composer-help-toggle {padding:0 2px;background:none;color:var(--muted);font-size:10px;}
-		.composer-status,.composer-help {font-size:11px;}
-		.composer-help {max-height:100px;overflow:auto;}
-		.composer-help p {margin:3px 0;}
-		@media (max-width:310px) {
-			.compose-field {grid-template-columns:minmax(0,1fr);}
-			.composer-actions {justify-content:end;}
+
+	const PHONE_COMPOSER_FIELD_CSS = `
+		--composer-field-padding:4px 5px;
+		--composer-text-inset:5px;
+		--composer-text-indent:9px;
+		--composer-text-size:calc(16px / var(--composer-viewport-scale, 1));
+		--composer-text-height:calc(19px / var(--composer-viewport-scale, 1));
+		--composer-placeholder-size:calc(13px / var(--composer-viewport-scale, 1));
+	`;
+
+	const COMPACT_COMPOSER_CSS = `
+.app-compose-bar .compose-box {
+	margin:0 auto;
+}
+
+.app-compose-bar .compose-field {
+	--composer-text-gap:8px;
+	display:grid;
+	grid-template-columns:minmax(0, 1fr);
+	border-radius:15px;
+	padding:var(--composer-field-padding, 2px 3px);
+}
+
+.app-compose-bar .compose-field:has(> .composer-formatting[hidden]) {
+	padding-block-start:var(--composer-text-gap);
+}
+
+.app-compose-bar .composer-formatting {
+	padding-block-end:var(--composer-text-gap);
+}
+
+.app-compose-bar .composer-text {
+	min-width:0;
+	margin-block-end:var(--composer-text-gap);
+	border-radius:12px;
+	font-size:var(--composer-text-size, 12px);
+}
+
+.app-compose-bar .compose-field > .composer-actions {
+	gap:3px;
+	margin-top:0;
+	padding:0 3px 3px;
+}
+
+.app-compose-bar .compose-send-row {
+	position:static;
+	align-items:center;
+	gap:3px;
+}
+
+.app-compose-bar .compose-send, .app-compose-bar .compose-tool {
+	height:23px;
+	font-size:10px;
+}
+
+.app-compose-bar .compose-send {
+	padding:0 7px;
+}
+
+.app-compose-bar .composer-status {
+	margin:2px 8px 4px;
+}
+
+.app-compose-bar .compose-targets {
+	top:auto;
+	right:6px;
+	bottom:calc(100% + 6px);
+}
+`;
+
+	const SIDEBAR_COMPOSER_CSS = `
+		${documentThemeCSS()}
+		${DISCUSSION_CHOICE_CSS}
+		${COMPOSER_CSS}
+		${COMPACT_COMPOSER_CSS}
+		html {overflow-x:hidden;}
+		.sidebar-composer {margin:0;padding:2px;color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+		.sidebar-composer:not(.is-ready) {visibility:hidden;}
+		.sidebar-composer.is-phone {${PHONE_COMPOSER_FIELD_CSS}}
+		.sidebar-composer.is-phone .compose-field:not(:focus-within, :has(> .composer-text:not([data-empty]), > .composer-formatting:not([hidden]))) {
+			--composer-actions-display:none;
+			--composer-text-gap:0;
+			padding:var(--composer-field-padding);
 		}
-		</style><body>${composeBoxHTML({ canComment: true, canNote: true, placeholder: "" })}
-		<script>(${sidebarComposerFrame.toString()})(${JSON.stringify(START_PAGE_ORIGIN)}, ${syncComposeSendable.toString()})</script></body>`;
+		.sidebar-composer .compose-field > .composer-actions {display:var(--composer-actions-display, flex);}
+		.sidebar-composer [hidden], .sidebar-composer .hidden {display:none!important;}
+		.sidebar-composer .compose-targets {box-sizing:border-box;max-width:min(270px, calc(100vw - 12px));}
+		html:has(.sidebar-composer.is-window) {background:var(--bg);}
+		.sidebar-composer.is-window {max-width:560px;margin-inline:auto;padding:16px;}
+		.sidebar-composer.is-window .compose-targets {top:calc(100% + 6px);bottom:auto;}
+	`;
+
+	function sidebarComposerFrame(connectKey, readyKey, parentOrigin = null) {
+		if (!document.adoptedStyleSheets?.length && !document.querySelector("style")?.sheet?.cssRules.length) return;
+		let port;
+		window.addEventListener("message", (event) => {
+			if (port || !event.isTrusted || event.source !== parent || event.data !== connectKey || !event.ports.length ||
+				(parentOrigin && event.origin !== parentOrigin)) return;
+			port = event.ports[0];
+			port.onmessage = ({ data }) => receive(data);
+			const receive = wireSidebarComposerClient(document, (data) => port.postMessage(data));
+			const box = document.querySelector(".compose-box");
+			const menu = box.querySelector(".compose-targets");
+			const size = new ResizeObserver(() => requestAnimationFrame(() => {
+				const above = menu.offsetHeight ? box.getBoundingClientRect().top - menu.getBoundingClientRect().top + 8 : 0;
+				document.body.style.paddingTop = Math.max(2, Math.ceil(above)) + "px";
+				port.postMessage({ height: document.body.offsetHeight });
+			}));
+			size.observe(document.body);
+			size.observe(menu);
+			port.postMessage(readyKey);
+		});
 	}
 
-	let sidebarComposerListening = false;
+	function sidebarComposerDocument(connectKey, readyKey) {
+		const controls = [escapeHTML, closeComposeTargets, composeFieldText, setComposeFieldState, setComposeFieldDraft,
+			composeMarkup, cleanComposeMarkup, composeDraft, commentSupportsComposeFormat, composePostText, syncComposeSendable, setComposeOptions,
+			composePlaceholder, wireComposerFormatting, wireComposeControls, wireSidebarComposerClient, paintSidebarFrameTheme, sidebarComposerFrame];
+		return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<style>${SIDEBAR_COMPOSER_CSS}</style><body class="sidebar-composer app-compose-bar">
+${composeBoxHTML({ canComment: true, canNote: true, placeholder: "" })}
+<script>
+let composeTargetsMenu = null;
+const COMPOSE_RICH_TAGS = ${JSON.stringify(COMPOSE_RICH_TAGS)};
+${controls.map((control) => control.toString()).join("\n")}
+sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)});
+</script></body></html>`;
+	}
 
-	function receiveSidebarComposerMessage(event) {
-		const composer = sidebarUI?.sidebarComposer;
-		if (!event.isTrusted || event.origin !== "null" || !composer?.frame.isConnected || event.source !== composer.frame.contentWindow) return;
-		const data = event.data;
-		if (data?.type === "backchannel-sidebar-ready") {
-			composer.frame.hidden = false;
-			composer.fallback.hidden = true;
-			event.source.postMessage(composer.options, "*");
-		} else if (data?.type === "backchannel-sidebar-size" && Number.isFinite(data.height)) {
-			const height = String(Math.min(240, Math.max(34, Math.ceil(data.height))));
-			if (composer.frame.height !== height) composer.frame.height = height;
-		} else if (data?.type === "backchannel-sidebar-prepare" && /^[a-f0-9]{32}$/.test(data.request) && sameURL(pageHref(), composer.article.url)) {
-			if (Date.now() - (composer.preparedAt || 0) < 500) return;
-			composer.preparedAt = Date.now();
-			const nonce = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
-			Promise.all([stageBridgePayload(nonce, { ...composer.article, composeFrame: true }), indexBridgePayload(nonce)])
-				.then(() => event.source.postMessage({ type: "backchannel-sidebar-prepared", request: data.request, nonce }, "*"))
-				.catch(console.error);
+	function sidebarComposerOptions({ targets, canNote }, theme, phone, viewportScale) {
+		return {
+			targets: targets.map(({ key, source }) => ({ key, source })),
+			choices: targets.length > 1 ? composeCommentChoices(targets) : "",
+			canNote,
+			theme,
+			darkClass: DARK_CLASS,
+			phone,
+			viewportScale,
+		};
+	}
+
+	async function submitSidebarComposition(data, { targets, canNote, ui, context = null }, reply) {
+		const finish = (message, saved = false, confirmQuote = false) =>
+			reply({ message, saved, error: !saved, confirmQuote, done: true, closePopup: true });
+		if (typeof data?.text !== "string" || data.text.length > 20000 || !data.text.trim()) {
+			finish("Write something first.");
+			return;
+		}
+		try {
+			if (data.mode === "note" && canNote) {
+				const note = noteFromComposeDraft(data);
+				if (!note.text && !note.exact) {
+					finish("Write something first.");
+					return;
+				}
+				if (note.exact && !data.confirmQuote && (context || !anchorNoteQuote(note.exact))) {
+					finish("Press note again to keep the quotation without a highlight.", false, true);
+					return;
+				}
+				await writeNote(note, context);
+				finish("Note saved.", true);
+				return;
+			}
+			const target = data.mode === "comment" && targets.find((story) => story.key === data.key);
+			if (!target) {
+				finish("Choose an available discussion to comment.");
+				return;
+			}
+			const discussions = renderedDiscussions;
+			const popup = {
+				set location(openURL) { reply({ openURL }); },
+				close() { reply({ closePopup: true }); },
+			};
+			const label = getSource(target.source)?.label || "the source";
+			const result = await submitCommentThroughBridge(target.source, target.id, data.text, null,
+				() => reply({ message: `Waiting for sign-in on ${label}…` }), popup);
+			await rememberAuthFromResult(target.source, result).catch(console.error);
+			if (result?.ok) {
+				finish("Comment posted.", true);
+				if (ui) window.setTimeout(() => reloadDiscussion(ui, discussions), 1400);
+			} else {
+				finish(commentFailureMessage(result, label));
+			}
+		} catch (error) {
+			finish(data.mode === "note" ? "Couldn’t save your note. Try again." : "Couldn’t post your comment. Try again.");
+			console.error(error);
 		}
 	}
 
-	function mountSidebarComposer(ui, canComment, canNote) {
+	function mountSidebarComposerPage(standalone = false) {
+		document.documentElement.lang = "en";
+		document.body.className = "sidebar-composer app-compose-bar";
+		document.body.classList.toggle("is-window", standalone);
+		document.body.innerHTML = composeBoxHTML({ canComment: true, canNote: true, placeholder: "" });
+		if (!adoptStyle(document, SIDEBAR_COMPOSER_CSS)) {
+			const style = document.createElement("style");
+			style.textContent = SIDEBAR_COMPOSER_CSS;
+			document.head.append(style);
+		}
+	}
+
+	async function runSidebarComposerFrame() {
+		const nonce = /^#([a-f0-9]{32})$/.exec(location.hash)?.[1];
+		if (!nonce) return;
+		const staged = await readBridgePayload(nonce);
+		if (staged?.kind !== "sidebar-composer-frame" || staged.origin === location.origin) return;
+		await clearBridgePayload(nonce);
+		if (Date.now() - staged.ts > 60000) return;
+
+		await documentReady();
+		mountSidebarComposerPage();
+		sidebarComposerFrame(staged.connectKey, staged.readyKey, staged.origin);
+		window.parent.postMessage("backchannel-sidebar-composer-connect", staged.origin);
+	}
+
+	async function runSidebarComposerWindow() {
+		const nonce = /^#compose=([a-f0-9]{32})$/.exec(location.hash)?.[1];
+		if (nonce) history.replaceState(history.state, "", location.pathname + location.search);
+		const staged = nonce ? await readBridgePayload(nonce) : null;
+		await documentReady();
+		if (staged?.kind !== "sidebar-composer-window") {
+			document.body.textContent = "Open the composer from the Sidebar.";
+			return;
+		}
+		await clearBridgePayload(nonce);
+		if (Date.now() - staged.ts > 60000) {
+			document.body.textContent = "The composer link expired. Open it again from the Sidebar.";
+			return;
+		}
+
+		mountSidebarComposerPage(true);
+		const phone = matchMedia("(max-width: 700px), (pointer: coarse)");
+		const receive = wireSidebarComposerClient(document, (data) => submitSidebarComposition(data, staged, receive));
+		const update = () => receive({ options: sidebarComposerOptions(staged, staged.theme, phone.matches, window.visualViewport?.scale || 1) });
+		update();
+		phone.addEventListener("change", update);
+		window.visualViewport?.addEventListener("resize", update);
+	}
+
+	function mountSidebarComposer(ui, targets, canNote) {
 		const bar = ui.shadow.getElementById("sidebar-discussion-compose");
 		if (!bar) return;
 		const article = sidebarArticlePayload();
-		bar.hidden = !article || !(canComment || canNote);
+		bar.hidden = !article || !(targets.length || canNote);
 		if (bar.hidden) return;
-		const placeholder = composePlaceholder(canComment, canNote);
-		const options = { type: "backchannel-sidebar-options", canComment, canNote, placeholder, dark: detectDarkMode() };
-		let composer = ui.sidebarComposer;
-		if (!composer || !sameURL(composer.article.url, article.url)) {
-			const fallback = document.createElement("button");
-			fallback.type = "button";
-			fallback.className = "sidebar-compose-launcher";
-			fallback.title = "Open the composer in Reader";
-			fallback.onclick = (event) => { if (event.isTrusted) openSidebarArticleInReader({ compose: true }); };
-			const frame = document.createElement("iframe");
-			frame.title = "Comment and note composer";
-			frame.height = "34";
-			frame.hidden = true;
-			frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
-			frame.srcdoc = sidebarComposerDocument();
-			composer = ui.sidebarComposer = { frame, fallback, article, options };
-			if (!sidebarComposerListening) {
-				sidebarComposerListening = true;
-				window.addEventListener("message", receiveSidebarComposerMessage);
-			}
-			bar.replaceChildren(fallback, frame);
+		const previous = ui.sidebarComposer;
+		if (previous && sameURL(previous.article.url, article.url)) {
+			previous.targets = targets;
+			previous.canNote = canNote;
+			previous.update();
+			return;
 		}
-		composer.fallback.textContent = placeholder;
-		composer.options = options;
-		composer.frame.contentWindow?.postMessage(options, "*");
+		previous?.dispose();
+
+		const host = document.createElement("div");
+		host.hidden = true;
+		const root = host.attachShadow({ mode: "closed" });
+		const status = document.createElement("div");
+		status.className = "settings-option-hint";
+		status.textContent = "Loading composer…";
+		status.setAttribute("role", "status");
+		const connectKey = sidebarFrameKey();
+		const readyKey = sidebarFrameKey();
+		const origin = new URL(SIDEBAR_COMPOSER_URL).origin;
+		const phone = matchMedia("(max-width: 700px), (pointer: coarse)");
+		const visual = window.visualViewport;
+		let viewportScale = visual?.scale || 1;
+		let nonce = "";
+		let activePort = null;
+		let stopFrame = null;
+		let disposed = false;
+		const active = () => !disposed && ui.sidebarComposer === composer && bar.isConnected && sameURL(pageHref(), composer.article.url);
+		const composer = ui.sidebarComposer = {
+			article, targets, canNote,
+			update() {
+				viewportScale = visual?.scale || 1;
+				activePort?.postMessage({ options: sidebarComposerOptions(composer, sidebarFrameTheme(ui.shadow), phone.matches, viewportScale) });
+			},
+			dispose() {
+				disposed = true;
+				themeObserver.disconnect();
+				phone.removeEventListener("change", composer.update);
+				visual?.removeEventListener("resize", updateScale);
+				stopFrame?.();
+				if (nonce) clearBridgePayload(nonce).catch(console.error);
+			},
+		};
+		const themeObserver = new MutationObserver(composer.update);
+		themeObserver.observe(ui.shadow.host, { attributeFilter: ["class", "style"] });
+		const updateScale = () => {
+			if (phone.matches && (visual.scale || 1) !== viewportScale) composer.update();
+		};
+		phone.addEventListener("change", composer.update);
+		visual?.addEventListener("resize", updateScale);
+		const unavailable = () => {
+			status.textContent = "The inline composer couldn’t load on this page.";
+			const open = document.createElement("button");
+			open.type = "button";
+			open.className = "settings-button";
+			open.textContent = "Open composer in Backchannel";
+			open.onclick = async (event) => {
+				if (!event.isTrusted || !active()) return;
+				const popup = window.open("about:blank", "_blank", "width=640,height=420,resizable=yes,scrollbars=yes");
+				if (!popup) {
+					status.textContent = "Allow pop-ups to open the Backchannel composer.";
+					return;
+				}
+				popup.opener = null;
+				const key = sidebarFrameKey();
+				const { link, title, site } = openPageContext();
+				const targets = composer.targets.map(({ key, id, source, label, baseLabel, commentCount }) => ({ key, id, source, label, baseLabel, commentCount }));
+				try {
+					await stageBridgePayload(key, {
+						kind: "sidebar-composer-window", context: { link, title, site },
+						targets, canNote: composer.canNote, theme: sidebarFrameTheme(ui.shadow),
+					});
+					if (popup.closed) {
+						await clearBridgePayload(key);
+						return;
+					}
+					const destination = popup.document.createElement("a");
+					destination.href = SIDEBAR_COMPOSER_URL + "#compose=" + key;
+					destination.rel = "noreferrer";
+					popup.document.body.append(destination);
+					destination.click();
+				} catch (error) {
+					popup.close();
+					await clearBridgePayload(key).catch(console.error);
+					status.textContent = "Couldn’t open the Backchannel composer. Try again.";
+					console.error(error);
+				}
+			};
+			status.after(open);
+		};
+
+		const mountFrame = (hosted = false) => {
+			const frame = document.createElement("iframe");
+			frame.style.cssText = "display:block;width:100%;max-width:100%;box-sizing:border-box;border:0";
+			frame.name = SIDEBAR_COMPOSER_FRAME;
+			frame.title = "Comment and note composer";
+			frame.height = "62";
+			frame.referrerPolicy = "no-referrer";
+			frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox" + (hosted ? " allow-same-origin" : ""));
+			if (hosted) frame.src = SIDEBAR_COMPOSER_URL + "#" + nonce;
+			else frame.srcdoc = sidebarComposerDocument(connectKey, readyKey);
+
+			const events = new AbortController();
+			const channel = new MessageChannel();
+			const port = channel.port1;
+			let connected = false;
+			let sending = false;
+			const connect = () => {
+				if (!active() || connected || !frame.contentWindow) return;
+				connected = true;
+				frame.contentWindow.postMessage(connectKey, hosted ? origin : "*", [channel.port2]);
+			};
+			if (hosted) {
+				window.addEventListener("message", (event) => {
+					if (event.isTrusted && event.origin === origin && event.source === frame.contentWindow &&
+						event.data === "backchannel-sidebar-composer-connect") connect();
+				}, { signal: events.signal });
+			} else {
+				frame.addEventListener("load", connect, { signal: events.signal, once: true });
+			}
+
+			const timeout = window.setTimeout(() => {
+				stopFrame();
+				if (!active()) return;
+				if (hosted || location.origin === origin) {
+					unavailable();
+					return;
+				}
+				nonce = sidebarFrameKey();
+				stageBridgePayload(nonce, { kind: "sidebar-composer-frame", origin: location.origin, connectKey, readyKey })
+					.then(() => {
+						if (active()) mountFrame(true);
+						else clearBridgePayload(nonce).catch(console.error);
+					})
+					.catch((error) => {
+						if (active()) unavailable();
+						console.error(error);
+					});
+			}, hosted ? 4000 : 1000);
+			stopFrame = () => {
+				window.clearTimeout(timeout);
+				events.abort();
+				activePort = null;
+				port.close();
+				frame.remove();
+				if (hosted) clearBridgePayload(nonce).catch(console.error);
+			};
+			port.onmessage = async ({ data }) => {
+				if (!active() || events.signal.aborted) return;
+				if (activePort !== port) {
+					if (data !== readyKey) return;
+					activePort = port;
+					window.clearTimeout(timeout);
+					host.hidden = false;
+					status.remove();
+					composer.update();
+					return;
+				}
+				if (Number.isFinite(data?.height)) {
+					const panel = bar.closest("#panel");
+					const room = panel.clientHeight - panel.querySelector(":scope > header").offsetHeight - 16;
+					frame.height = String(Math.max(34, Math.min(room, Math.ceil(data.height))));
+					return;
+				}
+				if (sending) return;
+				if (bar.hidden || bar.closest("#panel").classList.contains("browsing")) {
+					port.postMessage({ message: "Return to Discussion to send.", error: true, done: true, closePopup: true });
+					return;
+				}
+				sending = true;
+				try {
+					await submitSidebarComposition(data, { ...composer, ui }, (result) => port.postMessage(result));
+				} finally {
+					sending = false;
+				}
+			};
+			root.replaceChildren(frame);
+		};
+		bar.replaceChildren(status, host);
+		mountFrame();
 	}
 
 	function mountComposeBox(ui, stories, settings, before, kept = null, { anticipateReplies = false } = {}) {
 		const canNote = Boolean(settings.notepad);
+		if (!appState) {
+			mountSidebarComposer(ui, replyTargets(stories), canNote);
+			return null;
+		}
 		const canComment = stories.some(
 			(story) => getSource(story.source)?.capabilities.reply,
 		) || (anticipateReplies && canNote && enabledSources(settings).some((source) => source.capabilities.reply));
-		if (!appState) {
-			mountSidebarComposer(ui, canComment, canNote);
-			return null;
-		}
 		const bar = ui.shadow.getElementById("app-discussion-compose");
 		if (kept) {
 			if (!bar) ui.body.insertBefore(kept._hnewhereDock.home(), before);
@@ -28252,73 +29216,130 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		return box;
 	}
 
+	function wireComposerHelp(box) {
+		const toggle = box.querySelector(".composer-help-toggle");
+		if (!toggle) return;
+		const help = box.querySelector(".composer-help");
+		const openHelp = (open) => {
+			help.classList.toggle("hidden", !open);
+			toggle.classList.toggle("is-open", open);
+			toggle.setAttribute("aria-expanded", String(open));
+		};
+		toggle.onclick = () => openHelp(help.classList.contains("hidden"));
+		return openHelp;
+	}
+
+	function wireComposerFormatting(box, field) {
+		const toggle = box.querySelector(".composer-format-toggle");
+		const toolbar = box.querySelector(".composer-formatting");
+		const doc = field.ownerDocument;
+		const isBlockFormat = (format) => format === "blockquote" || format === "pre";
+		const active = (format) => isBlockFormat(format)
+			? String(doc.queryCommandValue("formatBlock")).toLowerCase() === format
+			: doc.queryCommandState(format);
+		const sync = () => {
+			if (toolbar.hidden) return;
+			for (const button of toolbar.querySelectorAll("[data-format]")) {
+				button.setAttribute("aria-pressed", String(active(button.dataset.format)));
+			}
+		};
+		const preserveSelection = (event) => {
+			if (field.matches(":focus")) event.preventDefault();
+		};
+		toggle.addEventListener("mousedown", preserveSelection);
+		toolbar.addEventListener("mousedown", preserveSelection);
+		toggle.onclick = () => {
+			toolbar.hidden = !toolbar.hidden;
+			toggle.setAttribute("aria-expanded", String(!toolbar.hidden));
+			sync();
+		};
+		toolbar.onclick = (event) => {
+			const format = event.target.closest("button")?.dataset.format;
+			if (!format || !field.isContentEditable) return;
+			field.focus({ preventScroll: true });
+			if (isBlockFormat(format)) doc.execCommand("formatBlock", false, active(format) ? "div" : format);
+			else doc.execCommand(format);
+			sync();
+		};
+		for (const type of ["focus", "keyup", "pointerup", "input"]) field.addEventListener(type, sync);
+		field.addEventListener("paste", (event) => {
+			event.preventDefault();
+			const text = event.clipboardData?.getData("text/plain");
+			if (text) doc.execCommand("insertText", false, text.slice(0, 20000));
+		});
+		field.addEventListener("drop", (event) => {
+			if (event.dataTransfer?.files.length || event.dataTransfer?.types.includes("text/html")) event.preventDefault();
+		});
+	}
+
+	function wireComposeControls(box, onInput) {
+		const field = box.querySelector(".composer-text");
+		wireComposerFormatting(box, field);
+		field.addEventListener("input", () => {
+			closeComposeTargets(box);
+			syncComposeSendable(box);
+			onInput?.();
+		});
+		const menu = box.querySelector(".compose-targets");
+		const closeMenu = () => closeComposeTargets(box);
+		box.addEventListener("keydown", (event) => {
+			if (event.key !== "Escape" || menu.classList.contains("hidden")) return;
+			event.preventDefault();
+			event.stopPropagation();
+			const opener = box.querySelector(".compose-send.is-open");
+			closeMenu();
+			opener?.focus();
+		});
+		box.addEventListener("focusout", (event) => {
+			if (event.relatedTarget && !box.contains(event.relatedTarget)) closeMenu();
+		});
+		const choose = (event, targets, act, label, render) => {
+			const button = event.currentTarget;
+			const wasOpen = button.classList.contains("is-open");
+			closeMenu();
+			if (wasOpen) return;
+			const options = targets();
+			const select = (target, trigger) => {
+				closeMenu();
+				box._hnewhereDock?.undock();
+				act(target, trigger);
+			};
+			if (!options.length) return;
+			if (options.length === 1) { select(options[0], event); return; }
+
+			menu.innerHTML = render(options);
+			menu.onclick = (click) => {
+				const key = click.target.closest(".compose-target")?.dataset.discussionKey;
+				const target = targets().find((item) => item.key === key);
+				if (target) select(target, click);
+			};
+			composeTargetsMenu = menu;
+			menu.setAttribute("aria-label", label);
+			menu.classList.remove("hidden");
+			button.classList.add("is-open");
+			button.setAttribute("aria-expanded", "true");
+			if (event.detail === 0) menu.querySelector("button")?.focus();
+		};
+		return choose;
+	}
+
+	function composeTargetHTML(target, about) {
+		return `<button type="button" class="compose-target" data-discussion-key="${escapeHTML(target.key)}">${discussionChoiceHTML("", about)}</button>`;
+	}
+
+	function composeCommentChoices(targets) {
+		return discussionChoiceGroupsHTML(targets, composeTargetHTML);
+	}
+
 	function wireComposeBox(box, { compact, storyID, source, draftKey, commentTargets, noteTargets }) {
 		const commentButton = box.querySelector(".compose-send-comment");
 		const noteButton = box.querySelector(".compose-send-note");
-		const textarea = box.querySelector(".composer-text");
+		const field = box.querySelector(".composer-text");
 		const status = box.querySelector(".composer-status");
 
-		const grow = () => {
-			if (textarea.style.height) {
-				return;
-			}
-
-			const style = getComputedStyle(textarea);
-			const line = parseFloat(style.lineHeight) || 18;
-			const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
-
-			textarea.rows = 1;
-
-			const used = Math.max(
-				1,
-				Math.round((textarea.scrollHeight - padding) / line),
-			);
-
-			textarea.rows = compact ? Math.min(5, used) : Math.min(COMPOSE_MAX_ROWS, Math.max(textarea.dataset.opened ? 2 : 1, used + 1));
-		};
-
-		textarea.addEventListener("focus", () => {
-			if (appState) {
-				return;
-			}
-
-			textarea.dataset.opened = "1";
-			grow();
-		});
-		const refreshField = () => {
-			closeComposeTargets(box);
-			syncComposeSendable(box);
-			grow();
-		};
-		textarea.addEventListener("input", refreshField);
-		textarea.addEventListener("sidebar-draft", refreshField);
-		textarea.addEventListener("blur", () => {
-			if (appState) {
-				return;
-			}
-
-			delete textarea.dataset.opened;
-
-			if (!textarea.style.height && !textarea.value.trim()) {
-				textarea.rows = 1;
-			}
-		});
-		const menu = box.querySelector(".compose-targets");
+		const choose = wireComposeControls(box);
 		const held = commentButton || draftKey
-			? wireComposer(box, {
-					source, storyID, draftKey,
-					onPosted: grow,
-					onRestored: () => {
-						syncComposeSendable(box);
-						grow();
-						new ResizeObserver((_, watch) => {
-							if (textarea.getClientRects().length) {
-								watch.disconnect();
-								requestAnimationFrame(grow);
-							}
-						}).observe(textarea);
-					},
-				})
+			? wireComposer(box, { source, storyID, draftKey, onRestored: () => syncComposeSendable(box) })
 			: null;
 
 		const say = (message, error = false) => {
@@ -28332,62 +29353,21 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			status.textContent = message || "";
 		};
 
-		const closeMenu = () => closeComposeTargets(box);
-		box.addEventListener("keydown", (event) => {
-			if (event.key !== "Escape" || menu.classList.contains("hidden")) return;
-			event.preventDefault();
-			event.stopPropagation();
-			const opener = box.querySelector(".compose-send.is-open");
-			closeMenu();
-			opener?.focus();
-		});
-		box.addEventListener("focusout", (event) => {
-			if (event.relatedTarget && !box.contains(event.relatedTarget)) closeMenu();
-		});
-		const choose = (event, targets, act, label) => {
-			const button = event.currentTarget;
-			const wasOpen = button.classList.contains("is-open");
-			closeMenu();
-			if (wasOpen) return;
-			const options = targets();
-			const select = (target) => {
-				closeMenu();
-				box._hnewhereDock?.undock();
-				act(target);
-			};
-			if (!options.length) return;
-			if (options.length === 1) { select(options[0]); return; }
-
-			const row = (target, about) => `<button type="button" class="compose-target" data-discussion-key="${escapeHTML(target.key)}">${discussionChoiceHTML("", about)}</button>`;
-			menu.innerHTML = button === commentButton ? discussionChoiceGroupsHTML(options, row) :
-				options.map((target) => row(target, { label: target.label })).join("");
-			menu.onclick = (click) => {
-				const key = click.target.closest(".compose-target")?.dataset.discussionKey;
-				const target = targets().find((item) => item.key === key);
-				if (target) select(target);
-			};
-			composeTargetsMenu = menu;
-			menu.setAttribute("aria-label", label);
-			menu.classList.remove("hidden");
-			button.classList.add("is-open");
-			button.setAttribute("aria-expanded", "true");
-			if (event.detail === 0) menu.querySelector("button")?.focus();
-		};
 		if (commentButton) {
 			commentButton.onclick = (event) => choose(event, commentTargets, (story) => {
 				const sending = held.send({ source: story.source, storyID: story.id, refresh: story.refresh });
 				syncComposeSendable(box);
 				sending.finally(() => syncComposeSendable(box));
-			}, "Choose a discussion");
+			}, "Choose a discussion", composeCommentChoices);
 		}
 
 		if (noteButton) {
 			let warnedFor = null;
 			noteButton.onclick = (event) => {
-				const parsed = noteFromText(textarea.value);
+				const parsed = noteFromComposeDraft(composeDraft(field));
 				if (!parsed.text && !parsed.exact) {
 					say("Write something first.", true);
-					textarea.focus();
+					field.focus();
 					return;
 				}
 
@@ -28400,13 +29380,13 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 				const keep = (target) => {
 					say("");
-					textarea.disabled = true;
+					setComposeFieldState(field, "disabled", true);
 					startComposeSend(noteButton, "saving…", "saved");
 					syncComposeSendable(box);
 					writeNote(parsed, target?.context)
 						.then(async () => {
-							textarea.value = "";
-							textarea.dispatchEvent(new Event("input"));
+							setComposeFieldDraft(field, "");
+							field.dispatchEvent(new Event("input"));
 							await flushComposerDrafts(box);
 							settleComposeSend(noteButton, "saved");
 						})
@@ -28415,11 +29395,12 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 							say("Couldn’t save your note. Try again.", true);
 							console.error(error);
 						})
-						.finally(() => { textarea.disabled = false; syncComposeSendable(box); });
+						.finally(() => { setComposeFieldState(field, "disabled", false); syncComposeSendable(box); });
 				};
-				if (noteTargets) choose(event, noteTargets, keep, "Choose a source article");
+				if (noteTargets) choose(event, noteTargets, keep, "Choose a source article",
+					(options) => options.map((target) => composeTargetHTML(target, { label: target.label })).join(""));
 				else {
-					closeMenu();
+					closeComposeTargets(box);
 					box._hnewhereDock?.undock();
 					keep();
 				}
@@ -28427,37 +29408,41 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		}
 
 		if (!compact && noteButton) holdComposeSendWidth(noteButton, ["saving…", "saved"]);
-		if (!compact && commentButton) holdComposeSendWidth(commentButton, ["comment\u2026", "posting…", "posted"]);
+		if (!compact && commentButton) holdComposeSendWidth(commentButton, ["posting…", "posted"]);
 		syncComposeSendable(box);
 	}
 
-	const COMPOSE_MAX_ROWS = 12;
+	const COMPOSE_FORMATS = [
+		["bold", "Bold", "M4.5 13V3h4a2.5 2.5 0 0 1 0 5h-4m4 0H9a2.5 2.5 0 0 1 0 5H4.5"],
+		["italic", "Italic", "M7 3h6M3 13h6m1-10L6 13"],
+		["underline", "Underline", "M4 3v4a4 4 0 0 0 8 0V3M3.5 14h9"],
+		["strikeThrough", "Strikethrough", "M12 4.8C11.2 3.6 9.7 3 8 3 6 3 4.5 3.9 4.5 5.4c0 1.1.8 1.8 2.2 2.2m2.8.8c1.5.4 2.4 1.1 2.4 2.3 0 1.4-1.4 2.3-3.7 2.3-1.8 0-3.4-.7-4.3-1.8M2 8h12"],
+		["blockquote", "Quote", "M6 4.2C4 5.3 3 7 3 9.4V12h4V8H3.4m9.6-3.8C11 5.3 10 7 10 9.4V12h4V8h-3.6"],
+		["pre", "Code block", "M5 4.5 1.8 8 5 11.5m6-7L14.2 8 11 11.5m-1.2-8-3.6 9"],
+	];
 
 	function composeBoxHTML({ canComment, canNote, placeholder }) {
 		return `
 	<div class="comment-composer compose-box">
 	<div class="compose-field">
-	<textarea class="composer-text" rows="1" placeholder="${escapeHTML(placeholder)}" aria-label="${escapeHTML(placeholder)}"></textarea>
+	<div class="composer-formatting" role="group" aria-label="Text formatting" hidden>
+	${COMPOSE_FORMATS.map(([format, label, path]) => `<button type="button" class="compose-tool" data-format="${format}" aria-label="${label}" aria-pressed="false" title="${label}">${APP_ICON(
+		`<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>`,
+	)}</button>`).join("")}
+	</div>
+	<div class="composer-text" contenteditable="true" role="textbox" aria-multiline="true" data-empty
+		data-placeholder="${escapeHTML(placeholder)}" aria-placeholder="${escapeHTML(placeholder)}" aria-label="${escapeHTML(placeholder)}"></div>
 	<div class="composer-actions">
-	${canComment ? `<button type="button" class="composer-help-toggle" aria-expanded="false">formatting</button>` : ""}
-	<div class="composer-status hidden" role="status"></div>
-	<span class="compose-send-row">${
-		canNote
-			? `<button type="button" class="compose-send compose-send-note" aria-label="Keep a note" title="Keep this as a note"><span class="compose-send-label">note</span></button>`
-			: ""
-	}${
-		canComment
-			? `<button type="submit" class="composer-submit compose-send compose-send-comment" aria-label="Add a comment" title="Add this as a comment">${appState ? APP_ICON('<path d="M8 12V4m-3 3 3-3 3 3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>') : ""}<span class="compose-send-label">comment</span></button>`
-			: ""
+	<button type="button" class="compose-tool composer-format-toggle" aria-label="Formatting" aria-expanded="false" title="Formatting">${APP_ICON(APP_CONTROL_PATHS.style)}</button>
+	<span class="compose-send-row">${canNote
+		? '<button type="button" class="compose-send compose-send-note" aria-label="Keep a note" title="Keep this as a note"><span class="compose-send-label">Note</span></button>'
+		: ""
+	}${canComment
+		? '<button type="submit" class="composer-submit compose-send compose-send-comment" aria-label="Add a comment" title="Add this as a comment"><span class="compose-send-label">Comment</span></button>'
+		: ""
 	}<div class="compose-targets hidden" role="group"></div></span>
 	</div>
-	</div>
-	<div class="composer-help hidden">
-	<p>Blank lines separate paragraphs.</p>
-	<p>Text surrounded by asterisks is italicized. To get a literal asterisk, use <code>\\*</code> or <code>**</code>.</p>
-	<p>Text after a blank line that is indented by two or more spaces is formatted as code.</p>
-	<p>Urls become links, except in the text field of a submission.</p>
-	<p>If your url gets linked incorrectly, put it in <code>&lt;angle brackets&gt;</code> and it should work.</p>
+	<div class="composer-status hidden" role="status"></div>
 	</div>
 	</div>
 `;
@@ -28607,8 +29592,6 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 		const textarea = composer.querySelector(".composer-text");
 		const submitButton = composer.querySelector(".composer-submit");
-		const helpToggle = composer.querySelector(".composer-help-toggle");
-		const help = composer.querySelector(".composer-help");
 		const status = composer.querySelector(".composer-status");
 
 		let swapTimer = 0;
@@ -28646,17 +29629,12 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			}, 140);
 		};
 
-		if (helpToggle) helpToggle.onclick = () => {
-			const hidden = help.classList.toggle("hidden");
-
-			helpToggle.classList.toggle("is-open", !hidden);
-			helpToggle.setAttribute("aria-expanded", hidden ? "false" : "true");
-		};
+		wireComposerHelp(composer);
 
 		load(draftKey, "")
 			.then((draft) => {
-				if (draft && !textarea.value) {
-					textarea.value = draft;
+				if (draft && !composeFieldText(textarea)) {
+					setComposeFieldDraft(textarea, draft);
 					onRestored?.();
 				}
 			})
@@ -28669,7 +29647,8 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			clearTimeout(saveTimer);
 			window.removeEventListener("beforeunload", savePendingDraft);
 			unsaved = false;
-			return textarea.value ? save(draftKey, textarea.value) : forget(draftKey);
+			const draft = composeDraft(textarea);
+			return draft ? save(draftKey, draft) : forget(draftKey);
 		};
 		const savePendingDraft = () => textarea._hnewhereFlushDraft().catch(console.error);
 		textarea.addEventListener("blur", savePendingDraft);
@@ -28682,7 +29661,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 		const setBusy = (busy) => {
 			submitButton.disabled = busy;
-			textarea.disabled = busy;
+			setComposeFieldState(textarea, "disabled", busy);
 
 			if (busy) {
 				startComposeSend(submitButton, "posting…", "posted");
@@ -28694,7 +29673,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		const send = (aim = {}) => {
 			const toSource = aim.source || source;
 			const toStory = aim.storyID ?? storyID;
-			const text = textarea.value;
+			const text = composePostText(textarea, toSource);
 			const label = getSource(toSource)?.label || "the source";
 			const shownUI = sidebarUI;
 			const shownDiscussions = renderedDiscussions;
@@ -28723,7 +29702,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 						return;
 					}
 
-					textarea.value = "";
+					setComposeFieldDraft(textarea, "");
 					unsaved = true;
 					await textarea._hnewhereFlushDraft();
 
@@ -28752,6 +29731,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		text,
 		parentId = null,
 		onInterim,
+		openedPopup,
 	) {
 		const bridge = getWriteBridge(sourceID);
 		const action = bridge?.actions?.reply;
@@ -28764,6 +29744,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		const session = openCommentBridgePopup(nonce, {
 			origin: bridge.origin,
 			onInterim,
+			openedPopup,
 		});
 
 		if (session.blocked) {
@@ -28795,7 +29776,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 	}
 
 	// #region hnewhere-test-export
-	function commentFailureMessage(result, sourceLabel = "Hacker News") {
+	function commentFailureMessage(result, sourceLabel = "Hacker\u00a0News") {
 		switch (result?.reason) {
 			case "popup-blocked":
 				return "Your browser blocked the popup. Allow popups for this site and try again.";
@@ -29983,6 +30964,25 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		};
 	}
 
+	function mountSubmissionDetails(ui, stories, before) {
+		if (!appState) {
+			ui.body.insertBefore(ui.filterBanner, before);
+			return;
+		}
+		const details = document.createElement("div");
+		details.className = "submission-details";
+		ui.body.insertBefore(details, before);
+		const multiple = stories.length > 1;
+		const page = discussionsPageTitle(stories);
+		for (const story of stories) {
+			const block = renderStory(story, details, { title: storyTitle(story, page, multiple) });
+			if (!block) continue;
+			block.classList.add("submission-detail");
+			block.dataset.discussionKey = story.key;
+			block.hidden = multiple;
+		}
+	}
+
 	function prepareDiscussionStream(stories, ui, settings) {
 		const menuState = captureDiscussionMenu(ui);
 		const waiting = discussionLoading();
@@ -29990,32 +30990,21 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		renderedFor = openPageKey();
 		renderedDiscussions = stories;
 		renderedComments = [];
-		const header = renderPageHeader(stories, ui.body, {
-			page: discussionsPageTitle(stories),
+		renderDiscussionControls(ui, stories, {
 			sort: settings?.commentSort,
 			newCommentsFirst: settings?.newCommentsFirst,
 			onSortChange: () => renderDiscussionSnapshot(stories, ui),
 		});
-		ui.body.insertBefore(header, waiting);
 		restoreDiscussionMenu(ui, menuState);
-		const details = document.createElement("div");
-		details.className = "submission-details";
-		ui.body.insertBefore(details, waiting);
-		if (!appState) details.after(ui.filterBanner);
-		for (const story of stories) {
-			const block = renderStory(story, details, { compose: false, title: storyTitle(story, discussionsPageTitle(stories), stories.length > 1), showTitle: true });
-			if (block) { block.classList.add("submission-detail"); block.dataset.discussionKey = story.key; block.hidden = stories.length > 1; }
-		}
-		const sort = ui.body.querySelector(".page-sort");
-		if (sort) ui.body.insertBefore(sort, waiting);
-		const composer = mountComposeBox(ui, stories, settings || DEFAULT_SETTINGS, sort || waiting);
+		mountSubmissionDetails(ui, stories, waiting);
+		const composer = mountComposeBox(ui, stories, settings || DEFAULT_SETTINGS, waiting);
 		if (composer) {
 			composer._hnewhereProvisional = true;
 			composer._hnewhereProvisionalSource = stories[0]?.source;
 			composer._hnewhereProvisionalURL = pageAddress();
 		}
 		setComposeLoading(composer, true);
-		for (const control of (sort || ui.shadow?.querySelector("#app-discussion-sort"))?.querySelectorAll("select, button") || []) control.disabled = true;
+		setDiscussionSortDisabled(ui, true);
 	}
 
 	async function renderDiscussions(stories, ui, options = {}) {
@@ -30066,37 +31055,21 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 
 		const settings = await loadSettings();
 		if (generation !== sidebarGeneration || run !== discussionRenderRun) return;
-		const page = discussionsPageTitle(stories);
 		const headerOptions = {
-			page,
 			sort: settings.commentSort,
 			newCommentsFirst: settings.newCommentsFirst,
 			onSortChange: () => renderDiscussionSnapshot(stories, ui),
 		};
 		const initialMenu = appState ? captureDiscussionMenu(ui) : sidebarMenu;
-		let headerElement = renderPageHeader(stories, ui.body, headerOptions);
-		ui.body.insertBefore(headerElement, waiting);
+		renderDiscussionControls(ui, stories, headerOptions);
 		restoreDiscussionMenu(ui, initialMenu);
 
 		sidebarSourceKeys.clear();
 		for (const story of stories) sidebarSourceKeys.add(story.source);
-		const details = document.createElement("div");
-		details.className = "submission-details";
-		ui.body.insertBefore(details, waiting);
-		if (!appState) details.after(ui.filterBanner);
-		for (const story of stories) {
-			const block = renderStory(story, details, { compose: false, title: storyTitle(story, page, stories.length > 1), showTitle: true });
-			if (block) {
-				block.classList.add("submission-detail");
-				block.dataset.discussionKey = story.key;
-				block.hidden = stories.length > 1;
-			}
-		}
-		let sortRow = ui.body.querySelector(".page-sort");
-		if (sortRow) ui.body.insertBefore(sortRow, waiting);
-		const composer = mountComposeBox(ui, stories, settings, sortRow || waiting, kept);
+		mountSubmissionDetails(ui, stories, waiting);
+		const composer = mountComposeBox(ui, stories, settings, waiting, kept);
 		setComposeLoading(composer, true);
-		for (const control of (sortRow || ui.shadow?.querySelector("#app-discussion-sort"))?.querySelectorAll("select, button") || []) control.disabled = true;
+		setDiscussionSortDisabled(ui, true);
 		const progress = readers ? null : startDiscussionProgress(ui);
 
 		const pending = new Set(stories.map((story) => story.key));
@@ -30155,14 +31128,9 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			: threads[index].empty && Number(story.commentCount) > 0 ? [[story.key, discussionStatus("unavailable", threads[index])]]
 			: threads[index].incomplete && !threads[index].empty ? [[story.key, discussionStatus("incomplete", threads[index])]] : []));
 		const loadingMenu = captureDiscussionMenu(ui);
-		headerElement.remove();
-		sortRow?.remove();
-		headerElement = renderPageHeader(stories, ui.body, { ...headerOptions, loadStatus });
-		ui.body.insertBefore(headerElement, details);
+		renderDiscussionControls(ui, stories, { ...headerOptions, loadStatus });
 		restoreDiscussionMenu(ui, loadingMenu);
-		sortRow = ui.body.querySelector(".page-sort");
-		if (sortRow) ui.body.insertBefore(sortRow, waiting);
-		for (const control of (sortRow || ui.shadow?.querySelector("#app-discussion-sort"))?.querySelectorAll("select, button") || []) control.disabled = true;
+		setDiscussionSortDisabled(ui, true);
 
 		const comments = document.createElement("div");
 
@@ -30191,8 +31159,6 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 				window.setTimeout(() => { waiting.remove(); comments.classList.remove("discussion-entering"); }, 450);
 			});
 		};
-		paintAppPinnedDiscussion();
-
 		const collapsedKeys = await loadCollapsed();
 		const seenTimes = new Map(
 			await Promise.all(
@@ -30349,7 +31315,7 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			}
 			if (generation === sidebarGeneration && run === discussionRenderRun) {
 				setComposeLoading(composer, false);
-				for (const control of (sortRow || ui.shadow?.querySelector("#app-discussion-sort"))?.querySelectorAll("select, button") || []) control.disabled = false;
+				setDiscussionSortDisabled(ui, false);
 				clearSidebarStage(ui);
 				if (paint && persisted) return { ...paint, comments: renderedComments.length, annotations: appState ? null : discussionAnnotationState(settings) };
 			}
@@ -30410,14 +31376,6 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 			}
 		}
 
-		const total = corrected && body.querySelector(".page-header-total");
-
-		if (total) {
-			total.textContent = pluralize(
-				stories.reduce((sum, story) => sum + (story.commentCount || 0), 0),
-				"comment",
-			);
-		}
 		return corrected;
 	}
 
@@ -30633,16 +31591,12 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		return { element: sortRow, paint };
 	}
 
-	function mountSortRow(container, sort, options) {
-		const control = commentSortControl("comment-sort", options.onSortChange);
-		control.paint(sort, options.newCommentsFirst);
-		const slot = appState?.ui.shadow.querySelector("#app-discussion-sort");
+	function clearSidebarDiscussionControls(ui) {
+		for (const slot of ui.shadow.querySelectorAll("#sidebar-discussion-tools > span")) slot.replaceChildren();
+	}
 
-		if (slot) {
-			slot.replaceChildren(control.element);
-		} else {
-			container.appendChild(control.element);
-		}
+	function setDiscussionSortDisabled(ui, disabled) {
+		for (const control of ui.shadow.querySelectorAll(":is(#app-discussion-sort, #sidebar-discussion-sort) :is(select, button)")) control.disabled = disabled;
 	}
 
 	function discussionChoices(stories) {
@@ -30652,62 +31606,29 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		});
 	}
 
-	function renderPageHeader(stories, container, options = {}) {
+	function renderDiscussionControls(ui, stories, { sort = "best", loadStatus = new Map(), newCommentsFirst, onSortChange } = {}) {
+		const control = commentSortControl("comment-sort", onSortChange);
+		control.paint(sort, newCommentsFirst);
+		ui.shadow.querySelector("#app-discussion-sort, #sidebar-discussion-sort")?.replaceChildren(control.element);
+
 		stories = discussionChoices(stories);
-		const view = appState?.open || container;
+		const total = stories.reduce((sum, story) => sum + story.commentCount, 0);
+		const view = appState?.open || ui.body;
 		const sourceState = view.sourceMenuState ||= { expanded: new Map() };
-		const sort = options.sort || "best";
-		const loadStatus = options.loadStatus || new Map();
-		const page = options.page ?? discussionsPageTitle(stories);
-		const total = stories.reduce(
-			(sum, story) => sum + (story.commentCount || 0),
-			0,
-		);
-
-		const wrapper = document.createElement("div");
-
-		const single = stories.length < 2;
-		const hasMenu = stories.length > 1 || loadStatus.size > 0 || Boolean(appState && stories.length);
-		const pageURL = pageAddress();
-		const pageSave = single
-			? ""
-			: saveButtonHTML({
-					key: normalizeURL(pageURL) || "",
-					url: pageURL,
-					title: page || pageDocumentTitle(),
-					site: hostLabel(pageURL),
-					kind: "discussion",
-				});
-
-		wrapper.className = single ? "page-header page-header-quiet" : "page-header";
-		wrapper.innerHTML = `
-<div class="page-header-title">${single ? "" : escapeHTML(page)}</div>
-<div class="page-header-meta">${
-	hasMenu
-	? `<span class="page-header-total">${escapeHTML(pluralize(total, "comment"))}</span> across <span class="source-menu-anchor"><button type="button" class="page-header-disclosure" aria-expanded="false" aria-controls="source-menu">${stories.length} ${stories.length === 1 ? "discussion" : "discussions"}</button>${sourceMenuHTML(stories, sourceState)}</span>${pageSave ? '<span class="page-header-sep">|</span>' : ""}`
-		: ""
-}${stories.length > 1 && pageSave ? pageSave : ""}</div>
-`;
-
-		registerSidebarSaveControls(wrapper);
-		let disclosure = wrapper.querySelector(".page-header-disclosure");
-
-		if (!disclosure) {
-			paintAppDiscussionMeta(null, stories, total);
-			container.appendChild(wrapper);
-			mountSortRow(container, sort, options);
-
-			return wrapper;
+		if (!stories.length && !loadStatus.size) {
+			paintDiscussionMeta(ui, null, stories, total);
+			return;
 		}
 
-		const menu = wrapper.querySelector(".source-menu");
-		const generatedAnchor = disclosure.parentElement;
-		const menuAnchor = appState && sourceState.anchor?.isConnected ? sourceState.anchor : generatedAnchor;
+		const generatedAnchor = document.createElement("span");
+		generatedAnchor.className = "source-menu-anchor";
+		generatedAnchor.innerHTML = `<button type="button" class="page-header-disclosure app-head-icon" aria-label="Sources" aria-expanded="false" aria-controls="source-menu">${APP_DISCUSSIONS_ICON}</button>${sourceMenuHTML(stories, sourceState, { showTitles: true })}`;
+		const menu = generatedAnchor.querySelector(".source-menu");
+		const menuAnchor = sourceState.anchor?.isConnected ? sourceState.anchor : generatedAnchor;
 		if (menuAnchor !== generatedAnchor) {
-			disclosure = menuAnchor.querySelector(".page-header-disclosure");
 			menuAnchor.querySelector(".source-menu").replaceWith(menu);
-			generatedAnchor.remove();
 		}
+		const disclosure = menuAnchor.querySelector(".page-header-disclosure");
 
 		const setMenuOpen = (open) => {
 			if (!open) {
@@ -30752,26 +31673,29 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 			}
 		};
 
-		if (appState) sourceState.anchor = menuAnchor;
-		paintAppDiscussionMeta(menuAnchor, stories, total);
-		container.appendChild(wrapper);
+		sourceState.anchor = menuAnchor;
+		paintDiscussionMeta(ui, menuAnchor, stories, total);
+	}
 
-		mountSortRow(container, sort, options);
-
-		return wrapper;
+	function discussionSourceSummary(stories, total) {
+		const comments = pluralize(total, "comment");
+		return stories.length > 1 ? `${comments} across ${pluralize(stories.length, "discussion")}` : comments;
 	}
 
 	function appDiscussionSourcesHead(menu, onSync) {
 		const title = document.createElement("div");
 		title.className = "app-sources-head";
-		title.innerHTML = `<span class="app-sources-title">Sources</span><button type="button" id="${menu.id}-sync" class="app-head-icon app-sources-sync" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>`;
-		title.querySelector("button").onclick = onSync;
+		title.innerHTML = '<span class="app-sources-title">Sources</span>';
+		if (onSync) {
+			title.insertAdjacentHTML("beforeend", `<button type="button" id="${menu.id}-sync" class="app-head-icon app-sources-sync" aria-label="Sync" title="Sync"><span class="app-sync-glyph">${APP_SYNC_ICON}</span></button>`);
+			title.querySelector("button").onclick = onSync;
+		}
 		return title;
 	}
 
-	function paintAppDiscussionMeta(anchor, stories, total) {
-		const shadow = appState?.ui.shadow;
-		const slot = shadow?.querySelector("#app-discussion-meta");
+	function paintDiscussionMeta(ui, anchor, stories, total) {
+		const { shadow } = ui;
+		const slot = shadow.querySelector("#app-discussion-meta, #sidebar-discussion-meta");
 
 		if (appState) {
 			appState.openTotal = total;
@@ -30782,10 +31706,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 			return;
 		}
 
-		const summary =
-			stories.length > 1
-				? `${pluralize(total, "comment")} across ${pluralize(stories.length, "discussion")}`
-				: pluralize(total, "comment");
+		const summary = discussionSourceSummary(stories, total);
 		slot.classList.toggle("app-discussion-lone", !anchor);
 
 		if (!anchor) {
@@ -30798,13 +31719,10 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		const everything = menu.querySelector("[data-select-all]");
 		const hint = document.createElement("div");
 
-		if (!disclosure.classList.contains("app-head-icon")) {
-			disclosure.innerHTML = APP_DISCUSSIONS_ICON;
-			disclosure.classList.add("app-head-icon");
-		}
-		disclosure.setAttribute("aria-label", summary);
+		disclosure.setAttribute("aria-label", appState ? summary : "Sources");
 		disclosure.title = summary;
-		menu.prepend(appDiscussionSourcesHead(menu, () => shadow.querySelector("#app-list-sync")?.click()));
+		disclosure.classList.toggle("is-filtered", activeCommentFilter?.type === "discussion");
+		menu.prepend(appDiscussionSourcesHead(menu, () => shadow.querySelector(appState ? "#app-list-sync" : "#browse-home-sync")?.click()));
 		hint.className = "settings-option-hint app-discussion-summary";
 		hint.textContent = summary;
 
@@ -30843,10 +31761,10 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 	}
 
 	function paintAppDiscussionSync() {
-		const shadow = appState?.ui.shadow;
+		const shadow = (appState?.ui || sidebarUI)?.shadow;
 		if (!shadow) return;
 		const busy = [...syncOperations.values()].some((operation) => operation.kind === "sync" || operation.target === openPageKey());
-		for (const button of shadow.querySelectorAll("#app-discussion-meta .app-sources-sync, #app-discussion-sync-empty")) {
+		for (const button of shadow.querySelectorAll("#source-menu .app-sources-sync, #app-discussion-sync-empty")) {
 			button.classList.toggle("is-syncing", busy);
 			button.disabled = busy;
 			if (busy) button.setAttribute("aria-busy", "true");
@@ -30897,16 +31815,15 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 	}
 
 	function syncFilterAffordances() {
-		const menu =
-			sidebarUI?.body?.querySelector(".source-menu") ||
-			appState?.ui.shadow.querySelector("#app-discussion-meta .source-menu");
+		const shadow = (appState?.ui || sidebarUI)?.shadow;
+		const menu = shadow?.getElementById("source-menu");
 
 		if (menu) {
 			syncSourceMenuState(menu);
 		}
 
-		appState?.ui.shadow
-			.querySelector("#app-discussion-meta .page-header-disclosure")
+		menu?.parentElement
+			.querySelector(".page-header-disclosure")
 			?.classList.toggle("is-filtered", activeCommentFilter?.type === "discussion");
 
 		syncSubmissionDetails();
@@ -30976,19 +31893,7 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		}).join("");
 	}
 
-	function discussionHintHTML(story, count, linkId) {
-		const text = escapeHTML(pluralize(count ?? 0, "comment"));
-		const href = discussionURL(story);
-		const label = `Open this discussion on ${sourceShortLabel(story)}`;
-
-		return `<div class="settings-option-hint source-menu-hint">${
-			href
-				? `<a id="${linkId}" class="discussion-thread-link" href="${escapeHTML(href)}" target="_blank" rel="noopener" title="${escapeHTML(label)}">${text}</a>`
-				: text
-		}</div>`;
-	}
-
-	function sourceMenuHTML(stories, state, id = "source-menu", liveKeys = liveDiscussions.keys()) {
+	function sourceMenuHTML(stories, state, { id = "source-menu", liveKeys = liveDiscussions.keys(), showTitles = false } = {}) {
 		const option = (control, attributes, about) => `<label class="settings-option source-menu-option" ${attributes}>${discussionChoiceHTML(
 			`<input type="checkbox" id="${control}" checked>`,
 			{ ...about, count: null },
@@ -30996,15 +31901,37 @@ ${settingsSelectHTML(id, "", id + "-label", "", sortChoices, unreadToggle)}`;
 		const row = (story, about) => {
 			const key = escapeHTML(story.key);
 			const control = `${id}-discussion-${key}`;
-			return `<div class="source-menu-entry">${option(control, `data-discussion-key="${key}"`, about)}${discussionHintHTML(story, about.count, id + "-link-" + key)}</div>`;
+			const source = getSource(story.source);
+			const label = showTitles && source && about.label === source.shortLabel ? source.label : about.label;
+			const title = showTitles && !story.collective ? linkTitleHTML((story.title || "").trim()) : "";
+			const count = escapeHTML(String(about.count));
+			const comments = escapeHTML(pluralize(about.count, "comment"));
+			const href = discussionURL(story);
+			const linkClass = title ? "source-menu-title" : "source-menu-count";
+			const linkTitle = title || escapeHTML(`Open this discussion on ${sourceShortLabel(story)}`);
+			const linkLabel = title ? "" : ` aria-label="${comments}"`;
+			const link = href ? `<a id="${id}-link-${key}" class="discussion-thread-link ${linkClass}"
+href="${escapeHTML(href)}" target="_blank" rel="noopener" title="${linkTitle}"${linkLabel}>${title || count}</a>` : "";
+			const pill = !title && link ? link : `<span class="source-menu-count" title="${comments}">${count}</span>`;
+			const hint = title ? `<div class="settings-option-hint source-menu-hint">${link ||
+				`<span class="source-menu-title" title="${title}">${title}</span>`}</div>` : "";
+			const rowClass = showTitles ? "source-menu-row" : "source-menu-row source-menu-row-title";
+			const checkbox = option(control, `data-discussion-key="${key}"`, { ...about, label });
+			return `<div class="source-menu-entry"><div class="${rowClass}">${checkbox}${pill}</div>${hint}</div>`;
 		};
 		const section = (source, live, rows) => {
+			const accordion = getSource(source.id)?.hasSubsources;
+			if (!accordion && source.stories.length === 1) return rows;
+
 			const key = (live ? "live:" : "other:") + source.id;
 			const list = id + "-" + escapeHTML(key);
+			const checkbox = option(list + "-select", `data-source-group="${escapeHTML(key)}"`, { label: source.label });
+			if (!accordion) return `<div class="source-menu-entry source-group-head">${checkbox}</div>${rows}`;
+
 			const expanded = state.expanded.get(key) ?? stories.length <= 4;
 			const count = source.stories.length;
 			const name = escapeHTML(`${source.label} discussions, ${count}${live ? ", live" : ""}`);
-			return `<div class="source-menu-entry source-group-head">${option(list + "-select", `data-source-group="${escapeHTML(key)}"`, { label: source.label })}
+			return `<div class="source-menu-entry source-group-head">${checkbox}
 <button type="button" class="source-group-disclosure" id="${list}-toggle" aria-controls="${list}" aria-expanded="${expanded}" aria-label="${name}">${count}</button></div>
 <div id="${list}" class="source-group-choices"${expanded ? "" : " hidden"}>${rows}</div>`;
 		};
@@ -32395,7 +33322,6 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 
 	function resetFilterBanner() {
 		sidebarUI?.filterBanner?.classList.add("hidden");
-		sidebarUI?.filterBanner?.classList.remove("app-pinned");
 		if (sidebarUI?.filterBannerQuote) {
 			sidebarUI.filterBannerQuote.textContent = "";
 			sidebarUI.filterBannerQuote.classList.remove("filter-banner-quote-comment");
@@ -32427,7 +33353,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			updateSubmissionVisibility(null);
 			syncFilterAffordances();
 
-			if (!paintAppPinnedDiscussion()) resetFilterBanner();
+			resetFilterBanner();
 
 			restoreReadingPosition(position);
 		}, options);
@@ -35117,7 +36043,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 
 		if (options.interactive) {
 			node.type = "button";
-			node.title = options.title || "Show linked Hacker News comments";
+			node.title = options.title || "Show linked Hacker\u00a0News comments";
 			node.onclick = (event) => {
 				event.preventDefault();
 				event.stopPropagation();
@@ -35442,7 +36368,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 				if (banner === false) {
 					resetFilterBanner();
 				} else {
-					sidebarUI.filterBanner.classList.remove("hidden", "app-pinned");
+					sidebarUI.filterBanner.classList.remove("hidden");
 					paintBanner(sidebarUI.filterBannerQuote);
 					syncFocusControls();
 					if (options.scroll !== false) scrollToFocusedDiscussion();
@@ -35510,28 +36436,29 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 	}
 
 	function appDiscussionFocusHeadHTML(closeID = "") {
-		return `<button${closeID ? ` id="${escapeHTML(closeID)}"` : ""} class="app-head-icon app-byline-icon" type="button" hidden>${APP_CLOSE_ICON}</button><div class="app-discussion-byline"></div>`;
+		return `<button${closeID ? ` id="${escapeHTML(closeID)}"` : ""} class="app-head-icon app-byline-icon" type="button" hidden>${APP_CLOSE_ICON}</button><div class="app-discussion-byline meta"></div>`;
 	}
+
+	const discussionSourceList = new Intl.ListFormat("en-US", { style: "short", type: "conjunction" });
 
 	function paintAppDiscussionByline(byline, filter, selected) {
 		if (!selected) {
-			const choices = discussionChoices(renderedDiscussions);
-			const keys = filter ? focusedDiscussionKeys(filter) : null;
-			selected = keys ? choices.filter((story) => keys.has(story.key)) : choices;
+			const keys = focusedDiscussionKeys(filter);
+			selected = discussionChoices(renderedDiscussions).filter((story) => keys.has(story.key));
 		}
-		const focus = filter?.type === "comment" ? "Focused comment" : filter?.type === "quote" ? "Article quote" : "";
-		const scope = focus || (selected.length > 1 ? pluralize(selected.length, "discussion") : "");
+		const focus = filter.type === "comment" ? "Focused comment" : filter.type === "quote" ? "Article quote" : "";
 		const sources = selected.map((story) => {
 			const source = getSource(story.source);
 			const label = discussionChoiceLabel(story);
 			const name = escapeHTML(label === source?.shortLabel ? source.label : label);
 			const href = discussionURL(story);
 			return href
-				? `<a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" title="Open discussion in a new tab">${name} <span aria-hidden="true">↗</span></a>`
-				: `<strong>${name}</strong>`;
+				? `<a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" title="Open discussion in a new tab">${name}</a>`
+				: name;
 		});
-		const count = !scope && selected.length === 1 ? escapeHTML(pluralize(selected[0].commentCount, "comment")) : "";
-		const html = [scope ? `<strong>${escapeHTML(scope)}</strong>` : "", ...sources, count].filter(Boolean).join(" · ");
+		const html = filter.type === "discussion" && sources.length
+			? `Only showing ${pluralize(sources.length, "discussion")}: ${discussionSourceList.format(sources)}`
+			: [focus ? `<strong>${focus}</strong>` : "", ...sources].filter(Boolean).join(" · ");
 		if (byline.innerHTML !== html) byline.innerHTML = html;
 	}
 
@@ -35545,29 +36472,8 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 		const label = filter?.type === "discussion" ? "Show all discussions" : "Show all comments";
 		close.setAttribute("aria-label", label);
 		close.title = label;
-		if (banner.classList.contains("hidden")) byline.replaceChildren();
+		if (!filter || banner.classList.contains("hidden")) byline.replaceChildren();
 		else paintAppDiscussionByline(byline, filter);
-	}
-
-	function paintAppPinnedDiscussion() {
-		const banner = sidebarUI?.filterBanner;
-		const quote = sidebarUI?.filterBannerQuote;
-		const choices = appState && !activeCommentFilter ? discussionChoices(renderedDiscussions) : [];
-		const story = choices.length === 1 ? choices[0] : null;
-
-		if (!banner || !quote) return false;
-		if (!story) {
-			if (banner.classList.contains("app-pinned")) resetFilterBanner();
-			return false;
-		}
-
-		quote.textContent = "";
-		quote.classList.remove("filter-banner-quote-comment");
-		banner.classList.add("app-pinned");
-		banner.classList.remove("hidden");
-		syncFocusControls();
-
-		return true;
 	}
 
 	function applyCommentFocus(commentId, options = {}) {
@@ -36373,25 +37279,18 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 
 	function syncDiscussionHeader(ui, stories, settings, loadStatus) {
 		const body = ui.body;
-		const oldHeader = body.querySelector(":scope > .page-header");
-		const oldSort = body.querySelector(":scope > .page-sort");
 		const menuState = captureDiscussionMenu(ui);
-		const header = renderPageHeader(stories, body, {
-			page: discussionsPageTitle(stories),
+		renderDiscussionControls(ui, stories, {
 			sort: settings.commentSort,
 			newCommentsFirst: settings.newCommentsFirst,
 			loadStatus,
 			onSortChange: () => renderDiscussionSnapshot(stories, ui),
 		});
-		if (oldHeader) oldHeader.replaceWith(header);
-		else body.prepend(header);
-		const newSort = body.querySelector(":scope > .page-sort:last-child");
-		if (oldSort && newSort) oldSort.replaceWith(newSort);
 		const details = body.querySelector(":scope > .submission-details");
 		if (details) for (const story of stories) {
 			let block = [...details.children].find((node) => node.dataset.discussionKey === story.key);
 			if (!block) {
-				block = renderStory(story, details, { compose: false, title: storyTitle(story, discussionsPageTitle(stories), stories.length > 1), showTitle: true });
+				block = renderStory(story, details, { title: storyTitle(story, discussionsPageTitle(stories), stories.length > 1) });
 				if (block) { block.classList.add("submission-detail"); block.dataset.discussionKey = story.key; }
 			}
 			const count = block?.querySelector(".story-comment-count");
@@ -36403,7 +37302,6 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			if (score && story.score != null) { score.textContent = String(story.score); score.dataset.storyScore = String(story.score); }
 		}
 		syncFilterAffordances();
-		paintAppPinnedDiscussion();
 		restoreDiscussionMenu(ui, menuState);
 	}
 
@@ -36539,8 +37437,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			generation, run, presentationUnknown: true, rankedRoots,
 			readers: new Map([...retained.keys()].map((key) => [key, previousPaint.readers.get(key)])),
 		});
-		const sortControls = [...ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button, #comments-content > .page-sort select, #comments-content > .page-sort button")];
-		for (const control of sortControls) control.disabled = true;
+		setDiscussionSortDisabled(ui, true);
 		for (const button of ui.body.querySelectorAll(".more-replies")) if (button._hnewhereMoreContext) button._hnewhereMoreContext.generation = generation;
 		setSidebarStage(ui, "discussion");
 		try {
@@ -36580,7 +37477,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			const vote = previousPaint?.presentationUnknown || canVote !== previousCanVote ? canVote : undefined;
 			setSidebarLoadingLabel(ui, "rendering comments…");
 			syncDiscussionHeader(ui, nextStories, settings, loadStatus);
-			for (const control of ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button, #comments-content > .page-sort select, #comments-content > .page-sort button")) control.disabled = true;
+			setDiscussionSortDisabled(ui, true);
 			const collapsedKeys = await loadCollapsed();
 			if (!current()) return;
 			const seenTimes = new Map(await Promise.all(nextStories.map(async (story) => [story.key, await visitSeenTime(story.key)])));
@@ -36662,8 +37559,7 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 			if (persisted) return { ...paint, comments: renderedComments.length, annotations: annotations ? discussionAnnotationState(settings) : null };
 		} finally {
 			if (current()) {
-				for (const control of sortControls) if (control.isConnected) control.disabled = false;
-				for (const control of ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button, #comments-content > .page-sort select, #comments-content > .page-sort button")) control.disabled = false;
+				setDiscussionSortDisabled(ui, false);
 				clearSidebarStage(ui);
 			}
 		}
@@ -36814,6 +37710,13 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 }
 `;
 
+	const APP_CONTROL_PATHS = {
+		save: '<path fill="currentColor" d="M3 2.75C3 1.784 3.784 1 4.75 1h6.5c.966 0 1.75.784 1.75 1.75v11.5a.75.75 0 0 1-1.227.579L8 11.722l-3.773 3.107A.75.75 0 0 1 3 14.25V2.75Z"/>',
+		discussion: '<path fill="currentColor" fill-rule="evenodd" d="M3.7 2.5h8.6A1.5 1.5 0 0 1 13.8 4v5.5A1.5 1.5 0 0 1 12.3 11H7.6l-2.5 2.4V11H3.7A1.5 1.5 0 0 1 2.2 9.5V4A1.5 1.5 0 0 1 3.7 2.5ZM5.3 5.8a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Z"/>',
+		style: '<path fill="currentColor" d="M6.71 10H2.332l-.874 2.498a.75.75 0 0 1-1.415-.496l3.39-9.688a1.217 1.217 0 0 1 2.302.018l3.227 9.681a.75.75 0 0 1-1.423.474Zm3.13-4.358C10.53 4.374 11.87 4 13 4c1.5 0 3 .939 3 2.601v5.649a.75.75 0 0 1-1.448.275C13.995 12.82 13.3 13 12.5 13c-.77 0-1.514-.231-2.078-.709-.577-.488-.922-1.199-.922-2.041 0-.694.265-1.411.887-1.944C11 7.78 11.88 7.5 13 7.5h1.5v-.899c0-.54-.5-1.101-1.5-1.101-.869 0-1.528.282-1.84.858a.75.75 0 1 1-1.32-.716ZM6.21 8.5 4.574 3.594 2.857 8.5Zm8.29.5H13c-.881 0-1.375.22-1.637.444-.253.217-.363.5-.363.806 0 .408.155.697.39.896.249.21.63.354 1.11.354.732 0 1.26-.209 1.588-.449.35-.257.412-.495.412-.551Z"/>',
+	};
+	const APP_CONTROL_MASK = (name) => `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">${APP_CONTROL_PATHS[name]}</svg>`)}")`;
+
 	const APP_ICON_CSS = `
 .app-head-icon {
 	flex:0 0 auto;
@@ -36839,6 +37742,38 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 	display:block;
 }
 
+:is(#app-article-actions, #sidebar-article-actions) .app-head-icon::before {
+	content:none;
+}
+
+:is(#app-article-actions, #sidebar-article-actions) .app-head-icon::after {
+	content:"";
+	position:absolute;
+	top:50%;
+	left:50%;
+	width:13px;
+	height:13px;
+	transform:translate(-50%, -50%);
+	background:currentColor;
+	-webkit-mask:var(--head-icon) center / contain no-repeat;
+	mask:var(--head-icon) center / contain no-repeat;
+	pointer-events:none;
+}
+
+:is(#app-article-actions, #sidebar-article-actions) .item-action-link {
+	font-size:0;
+	line-height:0;
+	text-decoration:none;
+}
+
+:is(#app-article-actions, #sidebar-article-actions) .item-action-link[hidden] {
+	display:none;
+}
+
+:is(#app-article-actions, #sidebar-article-actions) [data-item-action="save"] {
+	--head-icon:${APP_CONTROL_MASK("save")};
+}
+
 .app-byline-icon {
 	box-sizing:border-box;
 	width:15px;
@@ -36857,6 +37792,33 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 		background:var(--hover-tint);
 		color:var(--text);
 	}
+}
+
+.app-people {
+	position:relative;
+	display:block;
+	width:15px;
+	height:15px;
+}
+
+.app-people::before,
+.app-people::after {
+	content:"";
+	position:absolute;
+	inset:0;
+}
+
+.app-people::before {
+	display:var(--pressed-layer, none);
+	background:var(--icon-fill);
+	-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/g%3E%3C/svg%3E") center / 15px 15px no-repeat;
+	mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/g%3E%3C/svg%3E") center / 15px 15px no-repeat;
+}
+
+.app-people::after {
+	background:currentColor;
+	-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/g%3E%3Ccircle cx='5.9' cy='7' r='2.3' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 15px 15px no-repeat;
+	mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/g%3E%3Ccircle cx='5.9' cy='7' r='2.3' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 15px 15px no-repeat;
 }
 
 .app-sync-glyph {
@@ -36902,6 +37864,36 @@ ${discussionChoiceGroupsHTML(stories, row, section, liveKeys)}
 }
 
 ${APP_ICON_THEME_CSS}
+`;
+
+	const BOOKMARK_DIALOG_CSS = `
+:is(#bookmark-import, #topic-report) {
+	width:min(375px, calc(100vw - 30px));
+	box-sizing:border-box;
+	padding:17px;
+	border:1px solid var(--border-soft);
+	border-radius:12px;
+	background:var(--bg);
+	color:var(--text);
+	font:inherit;
+}
+
+:is(#bookmark-import, #topic-report)::backdrop { background:#0007; }
+:is(#bookmark-import, #topic-report) h2 { margin:0 0 10px; font-size:16px; }
+:is(#bookmark-import, #topic-report) p { margin:8px 0; color:var(--muted); overflow-wrap:anywhere; }
+:is(#bookmark-import, #topic-report) p:empty { display:none; }
+#bookmark-import dl {
+	display:grid;
+	grid-template-columns:1fr auto;
+	gap:5px 12px;
+	margin:10px 0;
+	padding:9px;
+	border:1px solid var(--border-soft);
+	border-radius:8px;
+	background:var(--surface);
+}
+#bookmark-import dd { margin:0; }
+:is(.bookmark-import-actions, .topic-report-actions) { display:flex; justify-content:flex-end; gap:7px; margin-top:12px; }
 `;
 
 	const SETTINGS_MODAL_CSS = `
@@ -38056,7 +39048,272 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 }
 `;
 
-	const SIDEBAR_SETTINGS_MODAL_CSS = `${APP_ICON_CSS}${SETTINGS_MODAL_CSS}${TIP_CSS}
+	const DISCUSSION_TOOLS_CSS = `
+.app-discussion-header {
+	--header-bg:var(--bg);
+	--header-text:var(--text);
+	box-sizing:border-box;
+	flex:none;
+	height:36px;
+	padding:0 8px;
+	border-bottom:1px solid var(--border-soft);
+	font:700 13px/1.25 var(--app-ui-font);
+}
+
+.app-discussion-title {
+	min-width:0;
+	padding-inline-start:12px;
+}
+
+.app-discussion-header .header-static-title {
+	margin:0;
+	font:inherit;
+}
+
+.app-discussion-actions {
+	display:flex;
+	flex:none;
+	align-items:center;
+	gap:2px;
+}
+
+.app-discussion-sort .page-sort {
+	gap:5px;
+	padding:0;
+	font-size:10px;
+	line-height:1.4;
+}
+
+.app-discussion-sort .settings-select {
+	min-width:67px;
+}
+
+.app-discussion-sort .settings-select-toggle {
+	border-radius:999px;
+}
+
+#panel:has(#comments-content.list-filtered) .app-discussion-sort {
+	display:none;
+}
+
+.app-discussion-meta {
+	display:inline-flex;
+	align-items:center;
+	margin-right:0;
+	font-weight:normal;
+}
+
+.app-discussion-meta .source-menu-anchor {
+	--source-menu-gap:8px;
+}
+
+.app-discussion-meta .page-header-disclosure {
+	display:inline-flex;
+	align-items:center;
+	justify-content:center;
+	box-sizing:border-box;
+	width:24px;
+	height:24px;
+	padding:0;
+	text-decoration:none;
+}
+
+.app-discussion-meta.app-discussion-lone {
+	display:none;
+}
+
+.app-discussion-meta .page-header-disclosure {
+	cursor:pointer;
+}
+
+.app-drop-arrow {
+	position:absolute;
+	z-index:6;
+	box-sizing:border-box;
+	width:10px;
+	height:10px;
+	border-top:1px solid var(--surface-border);
+	border-left:1px solid var(--surface-border);
+	background:var(--surface);
+	transform:rotate(45deg);
+	pointer-events:none;
+}
+
+.app-drop-arrow.is-down {
+	border-top:0;
+	border-left:0;
+	border-right:1px solid var(--surface-border);
+	border-bottom:1px solid var(--surface-border);
+}
+
+.app-drop-arrow[hidden] {
+	display:none;
+}
+
+#app-view-arrow,
+#app-collection-filter-arrow {
+	position:fixed;
+	z-index:31;
+}
+
+.app-discussion-meta .app-drop-arrow {
+	top:calc(100% + 3px);
+	left:calc(50% - 5px);
+}
+
+.app-discussion-meta .source-menu.opens-up + .app-drop-arrow {
+	top:auto;
+	bottom:calc(100% + 3px);
+	transform:rotate(225deg);
+}
+
+.app-discussion-meta .source-menu.hidden + .app-drop-arrow {
+	display:none;
+}
+
+.app-discussion-meta svg {
+	display:block;
+}
+
+
+.app-discussion-meta .source-menu {
+	left:auto;
+	right:0;
+	width:300px;
+	max-width:calc(100vw - 24px);
+	box-sizing:border-box;
+	overflow-x:hidden;
+	padding:10px 10px 13px;
+	color:var(--surface-text);
+	font-size:12px;
+	font-weight:normal;
+	line-height:1.35;
+	text-align:left;
+}
+
+.app-discussion-meta .source-menu-entry {
+	padding:0;
+	border-radius:0;
+}
+
+.app-discussion-meta .source-menu-option {
+	gap:8px;
+	font-size:12px;
+}
+
+.app-discussion-meta .source-menu-entry + .source-menu-entry {
+	margin-top:8px;
+}
+
+@media (hover: hover) {
+	.app-discussion-meta .source-menu-entry:hover {
+		background:none;
+	}
+}
+
+.app-discussion-meta .choice-label {
+	flex:1 1 auto;
+	min-width:0;
+}
+
+.app-discussion-meta .source-menu-hint {
+	margin:1.5px 0 0 23px;
+}
+
+.app-discussion-meta .source-menu-hint + .source-menu-option {
+	margin-top:8px;
+}
+
+.app-discussion-meta .choice-group + .choice-group {
+	margin-top:var(--source-group-spacing, 10px);
+	padding-top:var(--source-group-spacing, 10px);
+}
+
+#panel {
+	--live-ink:var(--header-text);
+}
+
+.app-discussion-meta .live-pill {
+	color:var(--live-ink);
+}
+
+.app-discussion-meta .choice-group.app-live-group {
+	padding-top:0;
+	border-top:0;
+}
+
+.app-discussion-meta .app-live-group .choice-head {
+	display:flex;
+	align-items:center;
+	gap:6px;
+}
+
+.app-discussion-meta .app-live-group .choice-head::after,
+.app-discussion-meta .app-live-group::after {
+	content:"";
+	height:1px;
+	background:rgba(var(--accent-rgb),.5);
+}
+
+.app-discussion-meta .app-live-group .choice-head::after {
+	flex:1 0 24px;
+}
+
+.app-discussion-meta .app-live-group::after {
+	display:block;
+	margin-top:8px;
+}
+
+.app-discussion-meta .app-live-group + .choice-group {
+	padding-top:0;
+	border-top:0;
+}
+
+.app-discussion-meta .choice-head,
+.app-discussion-meta .choice-sub-head {
+	margin:0 0 4px;
+	color:var(--muted);
+	font-size:11px;
+	font-weight:normal;
+	letter-spacing:0;
+	text-transform:none;
+}
+
+.app-discussion-meta .source-menu button:where(:not(.source-group-disclosure)) {
+	display:inline;
+	width:auto;
+	height:auto;
+	border-radius:0;
+	background:none;
+	color:inherit;
+	font-size:inherit;
+}
+
+:where(#panel > header, #sidebar-discussion-tools) .app-discussion-meta .source-menu .app-sources-sync,
+#app-discussion-sync-empty {
+	display:none;
+}
+
+@media (max-width: 700px) {
+	.app-discussion-meta .app-sources-head {
+		align-items:center;
+	}
+
+	.app-discussion-meta .source-menu .app-sources-sync {
+		display:inline-flex;
+		width:36px;
+		height:36px;
+		margin-left:auto;
+		padding:0;
+	}
+
+	#app-discussion-sync-empty:not([hidden]) {
+		display:inline-flex;
+	}
+}
+`;
+
+	const SIDEBAR_SETTINGS_MODAL_CSS = `${APP_ICON_CSS}${SETTINGS_MODAL_CSS}${TIP_CSS}${DISCUSSION_TOOLS_CSS}
 #app-settings-modal {
 	z-index:2147483647;
 	line-height:1.4;
@@ -38155,6 +39412,92 @@ ${Object.keys(ACCOUNT_BIRB_PRESETS.shape).map((shape, index) => `[data-birb-shap
 	text-decoration:none;
 }
 
+
+#app-list-body .browse-row,
+#app-list-body .browse-row:has(.browse-thumb-wrap) {
+	position:relative;
+	align-items:center;
+	gap:10px;
+	padding:8px 44px 8px 12px;
+}
+
+#app-list-body .browse-thumb-wrap {
+	margin-top:0;
+}
+
+#app-list-body .browse-more {
+	display:flex !important;
+	position:absolute;
+	top:50%;
+	inset-inline-end:4px;
+	transform:translateY(-50%);
+	-webkit-tap-highlight-color:transparent;
+}
+
+#app-list-body .browse-more svg {
+	width:16px;
+	height:16px;
+}
+
+#app-list-body .browse-more circle {
+	fill:currentColor;
+}
+
+#app-list-body .browse-more:focus-visible {
+	color:var(--text);
+}
+
+@media (hover: hover) {
+	#app-list-body .browse-more:hover {
+		color:var(--text);
+	}
+}
+
+#app-list-body .browse-more:active,
+#app-list-body .browse-more[aria-expanded="true"] {
+	background:var(--active-tint);
+	color:var(--text);
+}
+
+#app-list-body .browse-row:not(:last-child) {
+	border-bottom:1px solid var(--border-soft);
+}
+
+.reader-collection-meta { overflow-wrap:anywhere; }
+.reader-collection-new { color:var(--accent); font-weight:600; }
+#app-list-body .app-row:not(.is-unread) .browse-title-link {
+	color:var(--muted);
+}
+#app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-title-link, .browse-more:where(:not(:disabled))) {
+	color:var(--text);
+}
+
+#app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-site, .browse-sources-total, .reader-collection-new, .browse-rank),
+.app-topic-row[aria-current] .app-topic-meta {
+	color:color-mix(in srgb, var(--text) 82%, var(--meta));
+}
+
+#app-list-body .app-topic-row[aria-current] .app-topic-name {
+	color:var(--text);
+}
+
+#app-list-body .browse-card.app-row .browse-title-link {
+	color:inherit;
+}
+
+
+#app-row-menu {
+	display:flex !important;
+	position:fixed;
+	z-index:30;
+	box-sizing:border-box;
+	max-height:calc(100dvh - 16px);
+	overflow-y:auto;
+}
+
+#app-row-menu[hidden] {
+	display:none !important;
+}
 
 `;
 
@@ -38315,15 +39658,19 @@ ${SEARCH_CSS}
 }
 
 #browse-home-mark-read[hidden],
+#browse-home-unread-filter[hidden],
 #browse-home-sync[hidden],
+#panel:not(.browsing) #browse-home-unread-filter,
 #panel:not(.browsing) #browse-home-mark-read {
 	display:none;
 }
 
-#browse-home-mark-read svg {
+#browse-home-mark-read svg, #browse-home-unread-filter svg {
 	width:16px;
 	height:16px;
 }
+
+#browse-home-unread-filter[aria-pressed="true"] path { fill:currentColor; }
 
 #browse-home-sync .app-sync-glyph {
 	width:22px;
@@ -38340,8 +39687,40 @@ ${SEARCH_CSS}
 	height:14px;
 }
 
+#panel > header {
+	container-type:inline-size;
+	z-index:4;
+}
+
+#panel > header .header-wordmark {
+	overflow:hidden;
+}
+
+#panel > header .wordmark-root {
+	max-width:100%;
+	overflow:hidden;
+	text-overflow:ellipsis;
+	white-space:nowrap;
+}
+
 #panel > header .wordmark-tail {
 	overflow:hidden;
+}
+
+@container (max-width:220px) {
+	#panel > header .header-title { padding-inline:0; }
+
+	#panel > header .header-actions button {
+		--header-button-size:clamp(20px, calc((100cqi - 28px) / 6), 28px);
+		width:var(--header-button-size);
+		height:var(--header-button-size);
+	}
+}
+
+@media (pointer:coarse), (max-width:700px) {
+	#sidebar-discussion-meta { --source-group-spacing:6px; }
+	#sidebar-discussion-meta .app-sources-head { margin-bottom:4px; }
+	#sidebar-discussion-meta .source-group-disclosure { min-height:28px; }
 }
 
 .browse-home.is-searching #browse-list {
@@ -38373,13 +39752,6 @@ ${SEARCH_CSS}
 }
 
 #browse-home-filters {
-	display:flex;
-	flex-direction:column;
-	flex:0 0 auto;
-	min-width:0;
-}
-
-.browse-home-filter-reveal {
 	display:grid;
 	grid-template-rows:1fr;
 	min-width:0;
@@ -38389,7 +39761,7 @@ ${SEARCH_CSS}
 	transition:grid-template-rows .18s ease, opacity .18s ease, transform .18s ease, visibility .18s;
 }
 
-.browse-home-filter-reveal.is-collapsed {
+#browse-home-filters.is-collapsed {
 	grid-template-rows:0fr;
 	opacity:0;
 	visibility:hidden;
@@ -38397,7 +39769,7 @@ ${SEARCH_CSS}
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.browse-home-filter-reveal {
+	#browse-home-filters {
 		transition:none;
 	}
 }
@@ -38408,17 +39780,6 @@ ${SEARCH_CSS}
 	min-width:0;
 	min-height:0;
 	overflow:hidden;
-	box-shadow:inset 0 -1px 0 var(--surface-divider);
-}
-
-.browse-home-filter-label {
-	flex:0 0 60px;
-	box-sizing:border-box;
-	margin:0;
-	padding-left:12px;
-	color:var(--meta);
-	font-size:11px;
-	font-weight:500;
 }
 
 .browse-home #browse-blend-note {
@@ -38432,6 +39793,9 @@ ${SEARCH_CSS}
 	overflow:auto;
 	overscroll-behavior:contain;
 }
+
+.browse-home #browse-list:has(.sidebar-saved-list:not([hidden])) { padding:0; }
+.sidebar-saved-list { height:100%; }
 
 .browse-home .browse-row {
 	position:relative;
@@ -38551,14 +39915,18 @@ ${SEARCH_CSS}
 	}
 }
 
-.browse-home-nav-row {
-	display:flex;
+.browse-home-toolbar {
 	flex:0 0 auto;
 	min-width:0;
-	padding-left:8px;
-	border-bottom:1px solid var(--surface-divider);
-	background:var(--bg);
+	border-bottom:1px solid var(--surface-border);
+	background:color-mix(in srgb, var(--bg) 91%, var(--accent));
 	color:var(--text);
+}
+
+.browse-home-nav-row {
+	display:flex;
+	min-width:0;
+	padding-left:8px;
 }
 
 #browse-home-search-toggle {
@@ -38587,7 +39955,7 @@ ${SEARCH_CSS}
 	padding:0 8px 0 0;
 	overflow-x:auto;
 	scrollbar-width:none;
-	background:var(--bg);
+	background:transparent;
 	color:var(--text);
 	font-family:inherit;
 	font-size:12px;
@@ -38722,12 +40090,6 @@ ${SEARCH_CSS}
 }
 `;
 
-	const APP_CONTROL_PATHS = {
-		save: '<path fill="currentColor" d="M3 2.75C3 1.784 3.784 1 4.75 1h6.5c.966 0 1.75.784 1.75 1.75v11.5a.75.75 0 0 1-1.227.579L8 11.722l-3.773 3.107A.75.75 0 0 1 3 14.25V2.75Z"/>',
-		discussion: '<path fill="currentColor" fill-rule="evenodd" d="M3.7 2.5h8.6A1.5 1.5 0 0 1 13.8 4v5.5A1.5 1.5 0 0 1 12.3 11H7.6l-2.5 2.4V11H3.7A1.5 1.5 0 0 1 2.2 9.5V4A1.5 1.5 0 0 1 3.7 2.5ZM5.3 5.8a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Zm2.7 0a.95.95 0 1 0 0 1.9.95.95 0 0 0 0-1.9Z"/>',
-		style: '<path fill="currentColor" d="M6.71 10H2.332l-.874 2.498a.75.75 0 0 1-1.415-.496l3.39-9.688a1.217 1.217 0 0 1 2.302.018l3.227 9.681a.75.75 0 0 1-1.423.474Zm3.13-4.358C10.53 4.374 11.87 4 13 4c1.5 0 3 .939 3 2.601v5.649a.75.75 0 0 1-1.448.275C13.995 12.82 13.3 13 12.5 13c-.77 0-1.514-.231-2.078-.709-.577-.488-.922-1.199-.922-2.041 0-.694.265-1.411.887-1.944C11 7.78 11.88 7.5 13 7.5h1.5v-.899c0-.54-.5-1.101-1.5-1.101-.869 0-1.528.282-1.84.858a.75.75 0 1 1-1.32-.716ZM6.21 8.5 4.574 3.594 2.857 8.5Zm8.29.5H13c-.881 0-1.375.22-1.637.444-.253.217-.363.5-.363.806 0 .408.155.697.39.896.249.21.63.354 1.11.354.732 0 1.26-.209 1.588-.449.35-.257.412-.495.412-.551Z"/>',
-	};
-	const APP_CONTROL_MASK = (name) => `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">${APP_CONTROL_PATHS[name]}</svg>`)}")`;
 
 	const APP_CSS = `
 ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (_, state = "") => "#panel.app-docked" + state)}
@@ -38752,7 +40114,6 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	overscroll-behavior:none;
 	--rail-column:50px;
 	--app-split:.6;
-	--app-ui-font:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
 	display:grid;
 	grid-template-columns:var(--rail-column) min(var(--app-list-width, 300px), calc(100% - var(--rail-column) - 201px)) minmax(0, 1fr);
 	grid-template-rows:minmax(0, 1fr);
@@ -39003,7 +40364,6 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 	height:32px;
 	padding:0;
 	border:0;
-	border-radius:999px;
 	background:none;
 	color:var(--rail-fg);
 	cursor:pointer;
@@ -39062,16 +40422,12 @@ ${[THEME_CSS, APP_ICON_THEME_CSS].join("\n").replace(/:host(?:\(([^)]+)\))?/g, (
 }
 
 .rail-button.is-current {
-	background:var(--rail-fg);
-	color:var(--rail-bg);
 	--rail-glyph:var(--rail-bg);
 	--rail-knock:var(--rail-fg);
 }
 
 #app-rail-search {
 	border-radius:50%;
-	background:var(--rail-fg);
-	color:var(--rail-bg);
 	--rail-glyph:var(--rail-bg);
 	--rail-knock:var(--rail-fg);
 }
@@ -39318,6 +40674,7 @@ ${TIP_CSS}
 #app-list-view button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 
 ${APP_ICON_CSS}
+${DISCUSSION_TOOLS_CSS}
 
 #app-list .app-pane-actions {
 	flex:none;
@@ -39342,42 +40699,10 @@ ${APP_ICON_CSS}
 	display:none;
 }
 
-#app-article-actions .app-head-icon::before {
-	content:none;
-}
-
-#app-article-actions .app-head-icon::after {
-	content:"";
-	position:absolute;
-	top:50%;
-	left:50%;
-	width:13px;
-	height:13px;
-	transform:translate(-50%, -50%);
-	background:currentColor;
-	-webkit-mask:var(--head-icon) center / contain no-repeat;
-	mask:var(--head-icon) center / contain no-repeat;
-	pointer-events:none;
-}
-
 .app-head-group {
 	display:inline-flex;
 	align-items:center;
 	gap:6px;
-}
-
-#app-article-actions .item-action-link {
-	font-size:0;
-	line-height:0;
-	text-decoration:none;
-}
-
-#app-article-actions .item-action-link[hidden] {
-	display:none;
-}
-
-#app-article-actions [data-item-action="save"] {
-	--head-icon:${APP_CONTROL_MASK("save")};
 }
 
 .app-view-toggle {
@@ -39655,33 +40980,7 @@ ${APP_ICON_CSS}
 
 ${SETTINGS_MODAL_CSS}
 
-:is(#bookmark-import, #topic-report) {
-	width:min(375px, calc(100vw - 30px));
-	box-sizing:border-box;
-	padding:17px;
-	border:1px solid var(--border-soft);
-	border-radius:12px;
-	background:var(--bg);
-	color:var(--text);
-	font:inherit;
-}
-
-:is(#bookmark-import, #topic-report)::backdrop { background:#0007; }
-:is(#bookmark-import, #topic-report) h2 { margin:0 0 10px; font-size:16px; }
-:is(#bookmark-import, #topic-report) p { margin:8px 0; color:var(--muted); overflow-wrap:anywhere; }
-:is(#bookmark-import, #topic-report) p:empty { display:none; }
-#bookmark-import dl {
-	display:grid;
-	grid-template-columns:1fr auto;
-	gap:5px 12px;
-	margin:10px 0;
-	padding:9px;
-	border:1px solid var(--border-soft);
-	border-radius:8px;
-	background:var(--surface);
-}
-#bookmark-import dd { margin:0; }
-:is(.bookmark-import-actions, .topic-report-actions) { display:flex; justify-content:flex-end; gap:7px; margin-top:12px; }
+${BOOKMARK_DIALOG_CSS}
 
 .topic-report-link {
 	padding:9px;
@@ -39795,9 +41094,6 @@ ${SETTINGS_MODAL_CSS}
 	padding:0 0 32px;
 }
 
-#app-list-body .browse-row {
-	padding:8px 12px 9px 8px;
-}
 
 #app-list-body .bc-wall {
 	padding:8px 12px 0;
@@ -39968,13 +41264,13 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-focus-banner {
 	--comments-gutter:var(--topic-discussion-gutter);
 	--vote-gutter:0px;
+	font-family:var(--app-ui-font);
 }
 .app-topic-thread-detail[data-focused] .app-topic-thread-more { display:none; }
 .app-topic-discussions .app-compose-bar .compose-field { box-shadow:0 3px 12px #0002; }
 .app-topic-discussions .app-compose-bar .composer-text { min-width:0; }
-.app-topic-discussions .composer-text::placeholder { color:var(--topic-secondary); opacity:1; }
+.app-topic-discussions .composer-text { --composer-placeholder-color:var(--topic-secondary); }
 .app-topic-discussions .compose-field:focus-within { box-shadow:0 0 0 2px color-mix(in srgb, var(--reader-link) 18%, transparent); }
-.app-topic-discussions .compose-send-row:has(.compose-targets:not(.hidden)) { position:static; }
 .app-topic-discussions .compose-targets { width:max-content; max-width:min(270px, 100%); }
 .app-topic-discussions .compose-target .choice-label { white-space:normal; }
 .app-topic-discussions .choice-count { flex:none; white-space:nowrap; }
@@ -39982,8 +41278,9 @@ ${SETTINGS_MODAL_CSS}
 .app-topic-comments > li { padding:.68em 0; }
 .app-topic-feed-comment + .app-topic-feed-comment { border-top:1px solid var(--reader-rule); }
 .app-topic-comments > li[data-depth]:not([data-depth="0"]) { padding-inline-start:.65em; border-inline-start:1px solid var(--reader-rule); }
-.app-topic-comment-meta { flex-wrap:wrap; overflow:visible; font:10px/1.45 var(--app-ui-font); }
-.app-topic-discussions .app-topic-comment-meta a { color:var(--meta); }
+.app-topic-comment-meta { flex-wrap:wrap; overflow:visible; }
+.app-topic-discussions :is(.app-topic-comment-meta, .app-discussion-byline) { font:10px/1.45 var(--app-ui-font); }
+.app-topic-discussions :is(.app-topic-comment-meta, .app-discussion-byline) a { color:var(--meta); }
 .app-topic-comment-meta .comment-attribution-actions { white-space:nowrap; }
 .app-topic-comment-meta .toggle { text-decoration:none; }
 .app-topic-comment-votes { padding:3px 5px 0 0; }
@@ -40303,10 +41600,6 @@ ${SETTINGS_MODAL_CSS}
 	}
 }
 
-#app-list-body .browse-row:not(:last-child) {
-	border-bottom:1px solid var(--border-soft);
-}
-
 #app-list-body:has(> .browse-empty:only-child) { position:relative; }
 
 #app-list-body > .browse-empty:only-child {
@@ -40325,8 +41618,6 @@ ${SETTINGS_MODAL_CSS}
 #app-list-body > .reader-collection-empty:only-child { flex-direction:column; }
 #app-list-body .reader-collection-empty p { margin:0 0 6px; }
 
-.reader-collection-meta { overflow-wrap:anywhere; }
-.reader-collection-new { color:var(--accent); font-weight:600; }
 .reader-collection-section { margin:0; padding:10px 12px 4px; color:var(--muted); font-size:11px; font-weight:600; }
 .reader-saved-quotes { padding-right:12px; }
 .reader-saved-quotes summary { cursor:pointer; font-weight:600; }
@@ -40351,27 +41642,6 @@ ${SETTINGS_MODAL_CSS}
 
 #app-list-body .browse-row.is-open :is(.item-action-link, .browse-queue-link, .browse-comments-total) {
 	text-decoration-color:color-mix(in srgb, currentColor 50%, transparent);
-}
-
-#app-list-body .app-row:not(.is-unread) .browse-title-link {
-	color:var(--muted);
-}
-
-#app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-title-link, .browse-more:where(:not(:disabled))) {
-	color:var(--text);
-}
-
-#app-list-body .app-row:is(.is-open, .is-selected) :is(.browse-site, .browse-sources-total, .reader-collection-new, .browse-rank),
-.app-topic-row[aria-current] .app-topic-meta {
-	color:color-mix(in srgb, var(--text) 82%, var(--meta));
-}
-
-#app-list-body .app-topic-row[aria-current] .app-topic-name {
-	color:var(--text);
-}
-
-#app-list-body .browse-card.app-row .browse-title-link {
-	color:inherit;
 }
 
 .app-list-pull {
@@ -40693,34 +41963,6 @@ ${READER_LIST_CSS}
 	cursor:default;
 }
 
-.app-discussion-header {
-	--header-bg:var(--bg);
-	--header-text:var(--text);
-	box-sizing:border-box;
-	flex:none;
-	height:36px;
-	padding:0 8px;
-	border-bottom:1px solid var(--border-soft);
-	font:700 13px/1.25 var(--app-ui-font);
-}
-
-.app-discussion-title {
-	min-width:0;
-	padding-inline-start:12px;
-}
-
-.app-discussion-header .header-static-title {
-	margin:0;
-	font:inherit;
-}
-
-.app-discussion-actions {
-	display:flex;
-	flex:none;
-	align-items:center;
-	gap:2px;
-}
-
 @media (min-width:701px) {
 	.app-discussion-header.app-topic-discussion-head {
 		min-height:36px;
@@ -40761,276 +42003,6 @@ ${READER_LIST_CSS}
 	display:none;
 }
 
-.app-discussion-sort .page-sort {
-	gap:5px;
-	padding:0;
-	font-size:10px;
-	line-height:1.4;
-}
-
-.app-discussion-sort .settings-select {
-	min-width:67px;
-}
-
-.app-discussion-sort .settings-select-toggle {
-	border-radius:999px;
-}
-
-#panel.app-docked:has(#comments-content.list-filtered) .app-discussion-sort {
-	display:none;
-}
-
-.app-discussion-meta {
-	display:inline-flex;
-	align-items:center;
-	margin-right:0;
-	font-weight:normal;
-}
-
-.app-discussion-meta .source-menu-anchor {
-	--source-menu-gap:8px;
-}
-
-#panel.app-docked .app-discussion-meta .page-header-disclosure {
-	display:inline-flex;
-	align-items:center;
-	justify-content:center;
-	box-sizing:border-box;
-	width:24px;
-	height:24px;
-	padding:0;
-	text-decoration:none;
-}
-
-#app-discussion-meta.app-discussion-lone {
-	display:none;
-}
-
-.app-people {
-	position:relative;
-	display:block;
-	width:15px;
-	height:15px;
-}
-
-.app-people::before,
-.app-people::after {
-	content:"";
-	position:absolute;
-	inset:0;
-}
-
-.app-people::before {
-	display:var(--pressed-layer, none);
-	background:var(--icon-fill);
-	-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/g%3E%3C/svg%3E") center / 15px 15px no-repeat;
-	mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='black' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/g%3E%3C/svg%3E") center / 15px 15px no-repeat;
-}
-
-.app-people::after {
-	background:currentColor;
-	-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/g%3E%3Ccircle cx='5.9' cy='7' r='2.3' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 15px 15px no-repeat;
-	mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cmask id='k'%3E%3Crect x='-1' y='-1' width='18' height='18' fill='white'/%3E%3Cg fill='black' stroke='black' stroke-width='3.4' stroke-linejoin='round'%3E%3Ccircle cx='5.9' cy='7' r='2.3' /%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z'/%3E%3C/g%3E%3C/mask%3E%3Cg mask='url(%23k)'%3E%3Ccircle cx='10.9' cy='4.4' r='2.1' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7.3 11.9c0.25-2.35 1.65-3.75 3.6-3.75s3.35 1.4 3.6 3.75z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/g%3E%3Ccircle cx='5.9' cy='7' r='2.3' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M1.6 14.4c0.2-2.6 1.95-4.2 4.3-4.2s4.1 1.6 4.3 4.2z' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 15px 15px no-repeat;
-}
-
-#panel.app-docked .app-discussion-meta .page-header-disclosure {
-	cursor:pointer;
-}
-
-.app-drop-arrow {
-	position:absolute;
-	z-index:6;
-	box-sizing:border-box;
-	width:10px;
-	height:10px;
-	border-top:1px solid var(--surface-border);
-	border-left:1px solid var(--surface-border);
-	background:var(--surface);
-	transform:rotate(45deg);
-	pointer-events:none;
-}
-
-.app-drop-arrow.is-down {
-	border-top:0;
-	border-left:0;
-	border-right:1px solid var(--surface-border);
-	border-bottom:1px solid var(--surface-border);
-}
-
-.app-drop-arrow[hidden] {
-	display:none;
-}
-
-#app-view-arrow,
-#app-collection-filter-arrow {
-	position:fixed;
-	z-index:31;
-}
-
-.app-discussion-meta .app-drop-arrow {
-	top:calc(100% + 3px);
-	left:calc(50% - 5px);
-}
-
-.app-discussion-meta .source-menu.opens-up + .app-drop-arrow {
-	top:auto;
-	bottom:calc(100% + 3px);
-	transform:rotate(225deg);
-}
-
-.app-discussion-meta .source-menu.hidden + .app-drop-arrow {
-	display:none;
-}
-
-.app-discussion-meta svg {
-	display:block;
-}
-
-
-.app-discussion-meta .source-menu {
-	left:auto;
-	right:0;
-	width:300px;
-	max-width:calc(100vw - 24px);
-	box-sizing:border-box;
-	overflow-x:hidden;
-	padding:10px 10px 13px;
-	color:var(--surface-text);
-	font-size:12px;
-	font-weight:normal;
-	line-height:1.35;
-	text-align:left;
-}
-
-.app-discussion-meta .source-menu-entry {
-	padding:0;
-	border-radius:0;
-}
-
-.app-discussion-meta .source-menu-option {
-	gap:8px;
-	font-size:12px;
-}
-
-.app-discussion-meta .source-menu-entry + .source-menu-entry {
-	margin-top:8px;
-}
-
-@media (hover: hover) {
-	.app-discussion-meta .source-menu-entry:hover {
-		background:none;
-	}
-}
-
-.app-discussion-meta .choice-label {
-	flex:1 1 auto;
-	min-width:0;
-}
-
-.app-discussion-meta .source-menu-hint {
-	margin:1.5px 0 0 23px;
-}
-
-.app-discussion-meta .source-menu-hint + .source-menu-option {
-	margin-top:8px;
-}
-
-.app-discussion-meta .choice-group + .choice-group {
-	margin-top:10px;
-	padding-top:10px;
-}
-
-#panel.app-docked {
-	--live-ink:var(--header-text);
-}
-
-#panel.app-docked .app-discussion-meta .live-pill {
-	color:var(--live-ink);
-}
-
-#panel.app-docked .app-discussion-meta .choice-group.app-live-group {
-	padding-top:0;
-	border-top:0;
-}
-
-#panel.app-docked .app-discussion-meta .app-live-group .choice-head {
-	display:flex;
-	align-items:center;
-	gap:6px;
-}
-
-#panel.app-docked .app-discussion-meta .app-live-group .choice-head::after,
-#panel.app-docked .app-discussion-meta .app-live-group::after {
-	content:"";
-	height:1px;
-	background:rgba(var(--accent-rgb),.5);
-}
-
-#panel.app-docked .app-discussion-meta .app-live-group .choice-head::after {
-	flex:1 0 24px;
-}
-
-#panel.app-docked .app-discussion-meta .app-live-group::after {
-	display:block;
-	margin-top:8px;
-}
-
-#panel.app-docked .app-discussion-meta .app-live-group + .choice-group {
-	padding-top:0;
-	border-top:0;
-}
-
-.app-discussion-meta .choice-head,
-.app-discussion-meta .choice-sub-head {
-	margin:0 0 4px;
-	color:var(--muted);
-	font-size:11px;
-	font-weight:normal;
-	letter-spacing:0;
-	text-transform:none;
-}
-
-#panel.app-docked .app-discussion-meta .source-menu button:where(:not(.source-group-disclosure)) {
-	display:inline;
-	width:auto;
-	height:auto;
-	border-radius:0;
-	background:none;
-	color:inherit;
-	font-size:inherit;
-}
-
-#panel.app-docked .app-discussion-meta .source-menu .app-sources-sync,
-#app-discussion-sync-empty {
-	display:none;
-}
-
-@media (max-width: 700px) {
-	#panel.app-docked .app-discussion-meta .app-sources-head {
-		align-items:center;
-	}
-
-	:is(#panel.app-docked, .app-topic-controls) .app-discussion-meta .source-menu .app-sources-sync {
-		display:inline-flex;
-		width:36px;
-		height:36px;
-		margin-left:auto;
-		padding:0;
-	}
-
-	#app-discussion-sync-empty:not([hidden]) {
-		display:inline-flex;
-	}
-}
-
-
-
-#panel.app-docked .page-header-title,
-#panel.app-docked .page-header-meta,
-#panel.app-docked #comments-content > .page-header {
-	display:none;
-}
-
 #panel.app-docked .header-actions #app-bar-compose {
 	width:24px;
 	height:24px;
@@ -41043,10 +42015,6 @@ ${READER_LIST_CSS}
 #app #app-bar-compose svg {
 	width:14px;
 	height:14px;
-}
-
-#panel.app-docked > header:has(.source-menu:not(.hidden)) {
-	z-index:6;
 }
 
 #app-discussion-compose {
@@ -41062,129 +42030,10 @@ ${READER_LIST_CSS}
 	display:none;
 }
 
-.app-compose-bar .compose-box {
-	margin:0 auto;
-}
-
-.app-compose-bar .compose-field {
-	display:grid;
-	grid-template-columns:minmax(0, 1fr) auto;
-	align-items:end;
-	gap:0 3px;
-	border-radius:15px;
-	padding:2px 3px;
-}
-
-.app-compose-bar .composer-text {
-	padding:3px 7px;
-	resize:none;
-	border-radius:16px;
-	font-size:12px;
-	line-height:17px;
-}
-
-.app-compose-bar .composer-actions {
-	display:contents;
-}
-
-.app-compose-bar .compose-send-row {
-	grid-column:2;
-	grid-row:1;
-	align-items:center;
-	gap:3px;
-	max-width:0;
-	overflow:clip;
-	opacity:0;
-	visibility:hidden;
-	transform:translateX(4px);
-	transition:max-width .18s ease, opacity .16s ease, transform .16s ease, visibility 0s .18s;
-}
-
-.app-compose-bar .compose-box:is(.has-composer-text, :has(.is-sending)) .compose-send-row {
-	max-width:180px;
-	overflow:visible;
-	opacity:1;
-	visibility:visible;
-	transform:none;
-	transition-delay:0s;
-}
-
-.app-compose-bar .compose-send {
-	height:23px;
-	padding:0 7px;
-	font-size:10px;
-}
-
-.app-compose-bar .compose-send-comment {
-	padding:0 4px;
-	min-width:23px;
-}
-
-.app-compose-bar .compose-send-comment > svg {
-	flex:none;
-	width:14px;
-	height:14px;
-}
-
-.app-compose-bar .compose-send-comment:not(.is-sending) .compose-send-label {
-	position:absolute;
-	width:1px;
-	height:1px;
-	overflow:hidden;
-	clip-path:inset(50%);
-}
-
-.app-compose-bar .compose-send-comment.is-sending > svg {
-	display:none;
-}
-
-.app-compose-bar .composer-help-toggle,
-.app-compose-bar .composer-status {
-	grid-row:2;
-	margin:2px 8px 4px;
-}
-
-.app-compose-bar .composer-help-toggle {
-	justify-self:start;
-}
-
-.app-compose-bar .composer-status {
-	grid-column:1 / -1;
-}
-
-.app-compose-bar .compose-field:has(.composer-status:not(.hidden)) .composer-help-toggle {
-	grid-row:3;
-}
-
-.app-compose-bar .compose-box:not(.has-composer-text, :has(.composer-help:not(.hidden))) .composer-help-toggle {
-	display:none;
-}
-
-.app-compose-bar .compose-targets {
-	top:auto;
-	bottom:calc(100% + 6px);
-}
+${COMPACT_COMPOSER_CSS}
 
 @media (max-width:700px) {
-	.app-compose-bar .compose-field {
-		padding:4px 5px;
-	}
-
-	.app-compose-bar .composer-text {
-		padding:5px 9px;
-		font-size:16px;
-		line-height:19px;
-	}
-
-	.app-compose-bar .composer-text::placeholder {
-		font-size:13px;
-	}
-}
-
-@media (prefers-reduced-motion:reduce) {
-	.app-compose-bar .compose-send-row {
-		transition:none;
-	}
+	.app-compose-bar { ${PHONE_COMPOSER_FIELD_CSS} }
 }
 
 #panel.app-docked .header-actions button:not(.app-head-icon):where(:not(.settings-select button)) {
@@ -41573,52 +42422,6 @@ header .item-action-link {
 	}
 }
 
-#app-list-body .browse-row,
-#app-list-body .browse-row:has(.browse-thumb-wrap) {
-	position:relative;
-	align-items:center;
-	gap:10px;
-	padding:8px 44px 8px 12px;
-}
-
-#app-list-body .browse-thumb-wrap {
-	margin-top:0;
-}
-
-#app-list-body .browse-more {
-	display:flex !important;
-	position:absolute;
-	top:50%;
-	inset-inline-end:4px;
-	transform:translateY(-50%);
-	-webkit-tap-highlight-color:transparent;
-}
-
-#app-list-body .browse-more svg {
-	width:16px;
-	height:16px;
-}
-
-#app-list-body .browse-more circle {
-	fill:currentColor;
-}
-
-#app-list-body .browse-more:focus-visible {
-	color:var(--text);
-}
-
-@media (hover: hover) {
-	#app-list-body .browse-more:hover {
-		color:var(--text);
-	}
-}
-
-#app-list-body .browse-more:active,
-#app-list-body .browse-more[aria-expanded="true"] {
-	background:var(--active-tint);
-	color:var(--text);
-}
-
 #app-list-body .story-meta .browse-queue-link,
 #app-list-body .story-meta .item-action-link,
 #app-list-body .story-meta .browse-hide-link,
@@ -41636,19 +42439,6 @@ header .item-action-link {
 	color:var(--meta);
 	font-size:11px;
 	line-height:1.4;
-}
-
-#app-row-menu {
-	display:flex !important;
-	position:fixed;
-	z-index:30;
-	box-sizing:border-box;
-	max-height:calc(100dvh - 16px);
-	overflow-y:auto;
-}
-
-#app-row-menu[hidden] {
-	display:none !important;
 }
 
 @media (max-width: 700px) {
@@ -42676,13 +43466,8 @@ ${SETTINGS_MODAL_PHONE_CSS}
 
 	const APP_VIEWS = [
 		{
-			id: "unread",
-			label: "Unread",
-			icon: APP_ICON('<path fill="currentColor" fill-rule="evenodd" d="M4.1 2.8h7.8a1 1 0 0 1 .93.64l1.57 4.26c.07.17.1.35.1.53V12a1.2 1.2 0 0 1-1.2 1.2H2.7A1.2 1.2 0 0 1 1.5 12V8.23c0-.18.03-.36.1-.53l1.57-4.26a1 1 0 0 1 .93-.64zM4.45 4.3 3.2 7.7h2.55l.75 1.5h3l.75-1.5h2.55L11.55 4.3z"/>'),
-		},
-		{
 			id: "all",
-			label: "All articles",
+			label: "All\u00a0Front\u00a0Pages",
 			icon: APP_ICON('<path fill="currentColor" fill-rule="evenodd" d="M2.5 2.5h9a1 1 0 0 1 1 1V5h1a1 1 0 0 1 1 1v6.2a1.8 1.8 0 0 1-1.8 1.8H3.3a1.8 1.8 0 0 1-1.8-1.8V3.5a1 1 0 0 1 1-1zm10 4v5.7a.5.5 0 0 0 1 0V6.5zM4 4.5v3h6v-3zm0 4.5v1.2h6V9zm0 2.3v1.2h6v-1.2z"/>'),
 		},
 		{
@@ -42770,10 +43555,25 @@ ${SETTINGS_MODAL_PHONE_CSS}
 
 	const COLLECTION_FILTERS = [["all", "All saved"], ["notes", "Notes & quotes"], ["discussion", "New discussions"]];
 	const COLLECTION_SORTS = [["activity", "Recent activity"], ["saved", "Newest saved"], ["title", "Title A–Z"]];
-	const COLLECTION_FILTER_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M2.3 3.6h11.4L9.4 8.5v3.2l-2.8 1.4V8.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+	const LIST_FILTER_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M2.3 3.6h11.4L9.4 8.5v3.2l-2.8 1.4V8.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 	function collectionFilterHTML() {
-		return `<button class="app-head-icon app-collection-filter" type="button" aria-label="Filter and sort Collection" title="Filter and sort Collection" aria-haspopup="menu" aria-expanded="false" aria-controls="app-row-menu" hidden>${COLLECTION_FILTER_ICON}</button>`;
+		return `<button class="app-head-icon app-collection-filter" type="button" aria-label="Filter and sort Collection" title="Filter and sort Collection" aria-haspopup="menu" aria-expanded="false" aria-controls="app-row-menu" hidden>${LIST_FILTER_ICON}</button>`;
+	}
+
+	function frontPageUnreadFilterHTML(id, list) {
+		return `<button id="${id}" class="app-head-icon front-page-unread-filter" type="button" aria-label="Unread only" title="Unread only" aria-pressed="false" aria-controls="${list}" hidden>${LIST_FILTER_ICON}</button>`;
+	}
+
+	function paintFrontPageUnreadFilter(button, state, visible) {
+		button.hidden = !visible;
+		button.setAttribute("aria-pressed", String(state.unreadViews.has(state.view)));
+	}
+
+	function toggleFrontPageUnread(state) {
+		if (!appViewIsFrontPage(state.view)) return false;
+		if (!state.unreadViews.delete(state.view)) state.unreadViews.add(state.view);
+		return true;
 	}
 
 	function appRailButtonHTML(id, label, inner, { reorderable = false, disabled = false } = {}) {
@@ -42941,7 +43741,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 	const ACCOUNT_FOLDER_FIELDS = ["key", "url", "title", "site", "addedAt", "previewOnOpen"];
 	const ACCOUNT_SAVED_FIELDS = ["key", "url", "title", "site", "kind", "context", "by", "time", "focus", "source", "id", "parent", "text", "page", "addedAt"];
 	const ACCOUNT_NOTE_INDEX_FIELDS = ["key", "kind", "id", "url", "title", "excerpt", "count", "updated", "page"];
-	const ACCOUNT_NOTE_FIELDS = ["id", "created", "edited", "text", "exact", "prefix", "suffix", "page", "url"];
+	const ACCOUNT_NOTE_FIELDS = ["id", "created", "edited", "text", "rich", "exact", "prefix", "suffix", "page", "url"];
 	const ACCOUNT_QUEUE_STATE = ["key", "id", "url", "source", "permalink", "addedAt", "readAt"];
 	const ACCOUNT_QUEUE_FIELDS = [...ACCOUNT_QUEUE_STATE, "title", "by", "time", "site", "score", "descendants"];
 	const ACCOUNT_CIPHERTEXT_LIMIT = 1_398_102;
@@ -43752,7 +44552,7 @@ ${SETTINGS_MODAL_PHONE_CSS}
 <span id="account-profile-avatar" class="app-account-avatar account-default-avatar" aria-hidden="true"></span>
 ${editable ? '<button type="button" id="account-avatar-edit" aria-label="Edit birb" aria-expanded="false" aria-controls="account-avatar-editor" class="settings-button" hidden><span class="account-avatar-edit-label" aria-hidden="true">Edit</span></button>' : ""}
 </div>
-<h3 id="account-profile-name" class="account-profile-title">Backchannel Account</h3>
+<h3 id="account-profile-name" class="account-profile-title">Backchannel\u00a0Account</h3>
 <p id="account-email-value" class="appearance-row-hint">${ACCOUNT_SIGN_IN_HINT}</p>
 </section>`;
 	}
@@ -43937,7 +44737,7 @@ ${accountBackButton("account-manage-back")}
 			"incorrect-recovery-key": "That recovery key is incorrect. Check the key and try again.",
 			"passkey-sync-required": "This passkey provider can’t unlock sync. Use a passkey provider that supports encrypted sync.",
 			"passkey-sync-unavailable": "This passkey couldn’t unlock sync. Try again with the passkey you set up for Backchannel.",
-			"account-signing-unsupported": "Update your browser to use this Backchannel account.",
+			"account-signing-unsupported": "Update your browser to use this Backchannel\u00a0account.",
 			"retry-sign-in": "Sign-in could not finish. Try again.",
 			"signup-expired": "This sign-up expired. Verify your email to start again.",
 			"recovery-save-blocked": "Allow pop-ups to save your recovery key.",
@@ -43946,7 +44746,7 @@ ${accountBackButton("account-manage-back")}
 			"invalid-origin": "Backchannel couldn’t verify this page. Reload Reader and try again.",
 			"email-unavailable": "Email verification is unavailable right now.",
 			"email-required": "Verify your email address in Account to continue syncing.",
-			"email-in-use": "This email address already belongs to a Backchannel account. Sign in or recover that account.",
+			"email-in-use": "This email address already belongs to a Backchannel\u00a0account. Sign in or recover that account.",
 			"invalid-credential": "Backchannel couldn’t verify the passkey. Try again.",
 			"unknown-passkey": "This passkey is no longer linked to Backchannel. Use your email to continue.",
 			"passkey-timeout": "Passkey confirmation timed out. Try again.",
@@ -43959,7 +44759,7 @@ ${accountBackButton("account-manage-back")}
 			"snapshot-proof-invalid": "Sign in again to continue syncing your changes.",
 			"snapshot-restore-changed": "The account changed. Select Sync now to check the latest version.",
 			"sync-busy": "Another sync or local edit is in progress. Try Sync now again.",
-		}[error.message] || fallback || "Account sync couldn’t finish. Try again shortly.";
+		}[error.message] || fallback || "Account\u00a0sync couldn’t finish. Try again shortly.";
 	}
 
 	function accountDeviceName() {
@@ -44008,7 +44808,7 @@ ${accountBackButton("account-manage-back")}
 <section class="account-section" id="account-sidebar-summary" hidden>
 <div class="account-setting-row">
 <div id="account-sidebar-sync" hidden>${accountSyncStatusHTML()}</div>
-<div><a id="account-sidebar-link" class="settings-button" href="${START_PAGE_ORIGIN}/#account-sync" target="_blank" rel="noopener noreferrer">Sign in to Backchannel</a></div>
+<div><a id="account-sidebar-link" class="settings-button" href="${settingsWindowURL("account")}" target="_blank" rel="noopener noreferrer">Sign in to Backchannel</a></div>
 </div>
 </section>`;
 		const summary = panel.querySelector("#account-sidebar-summary");
@@ -44018,11 +44818,10 @@ ${accountBackButton("account-manage-back")}
 		const time = last.querySelector("time");
 		const avatarElement = panel.querySelector("#account-profile-avatar");
 		const navStatus = shadow.getElementById("account-nav-status");
-		navStatus.textContent = "Backchannel Account";
+		navStatus.textContent = "Backchannel\u00a0Account";
 		let request = 0;
 
-		const refresh = async (event) => {
-			if (!event?.isTrusted) return;
+		const refresh = async () => {
 			const current = ++request;
 			const state = await load(ACCOUNT_SYNC_KEY, null);
 			const signedIn = hasAccountSyncSession(state) && state.expiresAt > Date.now();
@@ -44030,22 +44829,30 @@ ${accountBackButton("account-manage-back")}
 			const avatar = signedIn ? await load(ACCOUNT_AVATAR_PREFIX + state.account, null) : null;
 			if (current !== request) return;
 
-			navStatus.textContent = signedIn ? "Backchannel Account" : "Sign in to Backchannel";
+			navStatus.textContent = signedIn ? "Backchannel\u00a0Account" : "Sign in to Backchannel";
 			panel.querySelector("#account-email-value").textContent = signedIn ? "Signed in on this device" : ACCOUNT_SIGN_IN_HINT;
 			paintAccountAvatar(shadow.getElementById("account-nav-avatar"), avatar);
 			paintAccountAvatar(avatarElement, avatar);
 			syncStatus.hidden = !signedIn || setupPending;
 			last.querySelector("span").hidden = writeAccountTime(time, syncStatus.hidden ? null : state.lastSync);
-			link.textContent = setupPending ? "Finish setup in Reader" : signedIn ? "Manage account in Reader" : "Sign in to Backchannel";
+			link.textContent = setupPending ? "Finish setup" : signedIn ? "Manage account" : "Sign in to Backchannel";
 			summary.hidden = false;
+		};
+		const onFocus = () => {
+			if (shadow.host.isConnected) refresh().catch(console.error);
 		};
 		panel.addEventListener("account-section-hidden", () => {
 			request++;
+			window.removeEventListener("focus", onFocus);
 			summary.hidden = true;
 			writeAccountTime(time, null);
 			paintAccountAvatar(avatarElement, null);
 		});
-		return refresh;
+		return (event) => {
+			if (!event?.isTrusted) return;
+			window.addEventListener("focus", onFocus);
+			return refresh();
+		};
 	}
 
 	function wireAccountSettings(shadow, updateDiagnosticSharing) {
@@ -44297,13 +45104,13 @@ ${accountBackButton("account-manage-back")}
 			const navigationName = signedIn && email ? email : "Account";
 			find("nav-title").textContent = navigationName;
 			find("nav-title").title = navigationName;
-			find("nav-status").textContent = signedIn ? "Backchannel Account" : "Sign in to Backchannel";
+			find("nav-status").textContent = signedIn ? "Backchannel\u00a0Account" : "Sign in to Backchannel";
 			const navTab = find("nav-tab");
 			if (signedIn && email) navTab.setAttribute("aria-describedby", "account-nav-title");
 			else navTab.removeAttribute("aria-describedby");
 			find("sign-in-actions").hidden = !available;
 			find("create-unavailable").hidden = !available || emailAvailable;
-			find("profile-name").textContent = signingUp ? "Create your account" : "Backchannel Account";
+			find("profile-name").textContent = signingUp ? "Create your account" : "Backchannel\u00a0Account";
 			find("email-value").textContent = signedIn && !backingUp ? email || "" : ACCOUNT_SIGN_IN_HINT;
 			emailInput.placeholder = email || "No email on file";
 			find("avatar-edit").hidden = !signedIn || backingUp || importRequired;
@@ -45161,7 +45968,7 @@ ${accountBackButton("account-manage-back")}
 				emailAvailable = capabilities?.emailAvailable === true;
 				emailContinuation = capabilities?.emailContinuation === true;
 				deviceStepUp = capabilities?.deviceStepUp === true;
-				if (!available) return "Account sync is unavailable right now.";
+				if (!available) return "Account\u00a0sync is unavailable right now.";
 				const held = await GM.getValue(ACCOUNT_SYNC_KEY, null);
 				if (hasAccountSyncSession(held)) {
 					if (expired || held.expiresAt <= Date.now()) return "Your session expired. Sign in again to sync.";
@@ -45202,7 +46009,7 @@ ${accountBackButton("account-manage-back")}
 		return showAccount;
 	}
 
-	function settingsModalHTML(reader = false) {
+	function settingsModalHTML({ privateContent = false } = {}) {
 		return `
 <div id="app-settings-modal" class="app-settings-modal" hidden>
 <div class="app-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1">
@@ -45214,14 +46021,14 @@ ${accountBackButton("account-manage-back")}
 <button type="button" class="app-settings-tab" data-settings-section="collection"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M5 2.5h6a1 1 0 0 1 1 1v10L8 10.8l-4 2.7v-10a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Collection</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="appearance"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M8 2.2a5.8 5.8 0 1 0 0 11.6c.9 0 1.4-.6 1.4-1.3 0-.7-.5-1-.5-1.6 0-.7.6-1.2 1.3-1.2h1.4a2.2 2.2 0 0 0 2.2-2.2C13.8 4.5 11.2 2.2 8 2.2Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5.2" cy="7.6" r=".95" fill="currentColor"/><circle cx="7.4" cy="5.1" r=".95" fill="currentColor"/><circle cx="10.5" cy="5.6" r=".95" fill="currentColor"/></svg><span>Appearance</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="sources"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M8 2.6 13.8 5.6 8 8.6 2.2 5.6Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.2 8.4 8 11.4l5.8-3M2.2 11.1 8 14.1l5.8-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Sources</span></button>
-<button type="button" class="app-settings-tab" data-settings-section="filters">${COLLECTION_FILTER_ICON}<span>Filters</span></button>
+<button type="button" class="app-settings-tab" data-settings-section="filters">${LIST_FILTER_ICON}<span>Filters</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="sidebar"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="2" y="3.3" width="12" height="9.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.8 3.6v8.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Sidebar</span></button>
 <button type="button" class="app-settings-tab" data-settings-section="shortcuts"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="1.8" y="3.6" width="12.4" height="8.8" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.7 6.7h.01M8 6.7h.01M11.3 6.7h.01M5.2 9.6h5.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Shortcuts</span></button>
 <div class="settings-credits"><a href="${escapeHTML(REPO_URL)}/issues" target="_blank" rel="noopener noreferrer">Report an issue</a></div>
 </nav>
 <div id="app-settings-content" class="app-settings-content" tabindex="-1" role="group" aria-labelledby="app-settings-heading"><div id="app-settings-heading" class="app-settings-heading">General</div>
 ${accountSettingsHTML()}
-${settingsPanelHTML(reader)}
+${settingsPanelHTML(privateContent)}
 </div>
 </div>
 </div>
@@ -45253,7 +46060,7 @@ ${settingsPanelHTML(reader)}
 	}
 
 	function appShellOpenHTML() {
-		const listViewControls = `${collectionFilterHTML()}${appSelectLinksHTML()}`;
+		const listViewControls = `${frontPageUnreadFilterHTML("app-unread-filter", "app-list-body")}${collectionFilterHTML()}${appSelectLinksHTML()}`;
 		return `<div id="app" data-stage="list">
 <div id="app-tip" class="app-tip" role="tooltip" hidden></div>
 <section id="app-onboarding" class="app-onboarding" aria-label="Welcome" hidden></section>
@@ -45288,7 +46095,7 @@ ${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon, { di
 <div id="app-rail-sources"></div>
 <div class="rail-spacer"></div>
 <div id="app-rail-foot-rule" class="rail-rule" aria-hidden="true"></div>
-<button id="settings-toggle" class="rail-button" type="button" data-tip="Settings" aria-label="Open Backchannel settings" aria-expanded="false" aria-controls="app-settings-modal" aria-haspopup="dialog"><span class="rail-icon">${APP_SETTINGS_ICON}</span><span class="rail-label" aria-hidden="true">Settings</span></button>
+<button id="settings-toggle" class="rail-button" type="button" data-tip="Settings" aria-label="Open Backchannel\u00a0settings" aria-expanded="false" aria-controls="app-settings-modal" aria-haspopup="dialog"><span class="rail-icon">${APP_SETTINGS_ICON}</span><span class="rail-label" aria-hidden="true">Settings</span></button>
 </nav>
 <button id="app-bar-back" class="app-stack-button" type="button" aria-label="Back to the articles" data-glyph="down" hidden>${APP_ICON('<path d="M2.2 5.1a1 1 0 0 1 1.4-.1L8 9l4.4-4a1 1 0 0 1 1.3 1.5l-5 4.6a1 1 0 0 1-1.4 0l-5-4.6a1 1 0 0 1-.1-1.4z"/>')}</button>
 <div id="app-row-menu" class="dropdown app-row-menu" role="menu" aria-label="This link" hidden></div>
@@ -45307,7 +46114,7 @@ ${APP_VIEWS.map((view) => appRailButtonHTML(view.id, view.label, view.icon, { di
 ${listViewControls}
 </span></div>
 <div id="app-list-pull" class="app-list-pull" aria-hidden="true"></div>
-<div id="app-list-heading" class="app-list-heading"><button id="app-list-heading-button" type="button" aria-haspopup="menu" aria-expanded="false"><span id="app-list-heading-text"></span></button><span class="app-pane-actions">${collectionFilterHTML()}</span></div>
+<div id="app-list-heading" class="app-list-heading"><button id="app-list-heading-button" type="button" aria-haspopup="menu" aria-expanded="false"><span id="app-list-heading-text"></span></button><span class="app-pane-actions">${frontPageUnreadFilterHTML("app-heading-unread-filter", "app-list-body")}${collectionFilterHTML()}</span></div>
 <div id="app-list-view" role="tablist" aria-label="Link view" hidden>
 <button id="app-all-links-tab" type="button" role="tab" aria-selected="true" aria-controls="app-list-body">By link</button>
 <button id="app-topics-tab" type="button" role="tab" aria-selected="false" aria-controls="app-list-body" tabindex="-1">By topic</button>
@@ -45315,20 +46122,20 @@ ${listViewControls}
 <div id="app-list-tags" class="app-list-tags" role="group" aria-label="Filters" hidden></div>
 <div id="app-list-topic" class="app-topic-header" hidden>
 <button id="app-list-topic-back" class="app-head-icon app-byline-icon" type="button" aria-label="Back to topics" title="Back to topics">${APP_BACK_ICON}</button>
-<button type="button" class="app-topic-summary" id="app-list-topic-article" aria-label="Read topic article"><strong id="app-list-topic-title"></strong><span id="app-list-topic-count" class="app-topic-meta"></span></button>
+<button type="button" class="app-topic-summary" id="app-list-topic-article" aria-label="Read topic\u00a0article"><strong id="app-list-topic-title"></strong><span id="app-list-topic-count" class="app-topic-meta"></span></button>
 </div>
 <div id="app-list-body" class="reader-list" role="region" aria-label="Articles"></div>
 <div id="app-list-resize" class="app-list-resize" aria-hidden="true"></div>
 </section>
 ${appSelectionBarHTML()}
-${settingsModalHTML(true)}
+${settingsModalHTML({ privateContent: true })}
 ${bookmarkImportHTML()}
 ${topicReportHTML()}
 ${readingListShareHTML()}
 <div class="toast-viewport">${TOAST_HTML}</div>
 <div id="app-reading">
 <section id="app-article" aria-label="Article">
-<div class="app-pane-head"><button id="app-toggle-list" class="app-pane-toggle app-head-icon app-article-disc app-wide-only" type="button" aria-pressed="true" aria-label="Front Pages" title="${escapeHTML(appShortcutTip("front-pages"))}">${APP_LIST_TOGGLE_ICON}</button><span class="app-pane-middle"><span id="app-article-actions" class="app-article-actions" hidden></span><button id="app-view-toggle" class="app-head-icon app-article-disc app-view-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden>${APP_ICON(APP_CONTROL_PATHS.style)}</button></span><button id="app-toggle-discussion" class="app-pane-toggle app-head-icon app-article-disc app-wide-only" type="button" aria-pressed="true" aria-label="Discussion" title="${escapeHTML(appShortcutTip("discussion"))}" disabled>${APP_DISCUSSION_TOGGLE_ICON}<span class="rail-badge"></span></button></div>
+<div class="app-pane-head"><button id="app-toggle-list" class="app-pane-toggle app-head-icon app-article-disc app-wide-only" type="button" aria-pressed="true" aria-label="Front\u00a0Pages" title="${escapeHTML(appShortcutTip("front-pages"))}">${APP_LIST_TOGGLE_ICON}</button><span class="app-pane-middle"><span id="app-article-actions" class="app-article-actions" hidden></span><button id="app-view-toggle" class="app-head-icon app-article-disc app-view-toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="app-view-menu" aria-label="Style settings" title="Style settings" hidden>${APP_ICON(APP_CONTROL_PATHS.style)}</button></span><button id="app-toggle-discussion" class="app-pane-toggle app-head-icon app-article-disc app-wide-only" type="button" aria-pressed="true" aria-label="Discussion" title="${escapeHTML(appShortcutTip("discussion"))}" disabled>${APP_DISCUSSION_TOGGLE_ICON}<span class="rail-badge"></span></button></div>
 <div id="app-article-scroll">
 <div id="app-article-body" class="app-article-body" data-mode="empty"><div class="app-article-note">Pick an article to read it here, with what people said about it beside it.</div></div>
 <nav id="app-article-coverage" class="app-article-nav" aria-labelledby="app-article-coverage-title" hidden><h2 id="app-article-coverage-title">Related coverage</h2><ul></ul></nav>
@@ -45346,7 +46153,8 @@ ${readingListShareHTML()}
 	function createAppState(ui) {
 		return {
 			ui,
-			view: "unread",
+			view: "all",
+			unreadViews: new Set(["all"]),
 			listView: "",
 			bulk: null,
 			rows: [],
@@ -45387,6 +46195,41 @@ ${readingListShareHTML()}
 			previews: new Map(),
 			listIndex: [],
 		};
+	}
+
+	async function runSidebarLibrary(view) {
+		await documentReady();
+		const ui = await createSidebar({ pageMode: true });
+		sidebarUI = ui;
+		sidebarHasDiscussion = false;
+		ui.shadow.getElementById("panel").style.height = "100dvh";
+		document.title = "Backchannel " + appViewLabel(view);
+		document.documentElement.setAttribute("data-backchannel-installed", "1");
+		for (const node of document.querySelectorAll("[data-backchannel-promo]")) node.hidden = true;
+		await refreshQueueCount(ui.shadow);
+		setBrowseMode(ui, true, { tab: view, animate: false });
+	}
+
+	async function runSettingsWindow(section) {
+		await documentReady();
+		await loadSettings();
+		const host = document.createElement("div");
+		const shadow = host.attachShadow({ mode: "open" });
+		shadow.innerHTML = `<style>${THEME_CSS}${CHROME_CSS}${SIDEBAR_SETTINGS_MODAL_CSS}${BOOKMARK_DIALOG_CSS}
+#app-settings-modal { background:var(--bg); }
+#app-settings-content .settings-app-only { display:block; }
+</style>${settingsModalHTML({ privateContent: true })}${bookmarkImportHTML()}`;
+		document.body.append(host);
+		adoptStyles(shadow);
+		watchTheme(host);
+		const settingsControls = wireSettingsPanel(shadow);
+		wireSettingsModal(shadow, settingsControls, { standalone: true });
+		wireBookmarkImport(shadow, collectionImportActions(shadow));
+		await settingsControls.ready;
+		document.title = "Backchannel\u00a0Settings";
+		document.documentElement.setAttribute("data-backchannel-installed", "1");
+		for (const node of document.querySelectorAll("[data-backchannel-promo]")) node.hidden = true;
+		openAppSettingsSection(section, section === "sidebar" ? "#settings-blocked-section" : "");
 	}
 
 	async function runAppPass() {
@@ -45445,9 +46288,19 @@ ${readingListShareHTML()}
 		const composeToggle = appState.phoneComposeToggle = shadow.getElementById("app-bar-compose");
 
 		ui.headerSubtitle = null;
-		wireBookmarkImport(shadow);
+		wireBookmarkImport(shadow, collectionImportActions(shadow));
 		for (const button of shadow.querySelectorAll(".app-collection-filter")) {
 			button.onclick = () => openCollectionFilterMenu(button);
+		}
+		for (const button of shadow.querySelectorAll(".front-page-unread-filter")) {
+			button.onclick = () => {
+				const state = appState;
+				if (!toggleFrontPageUnread(state)) return;
+				state.unreadTopic = null;
+				endAppSelection();
+				resetAppListScroll();
+				renderAppList().catch(console.error);
+			};
 		}
 		const allLinksTab = shadow.getElementById("app-all-links-tab");
 		const topicsTab = shadow.getElementById("app-topics-tab");
@@ -46271,7 +47124,7 @@ ${readingListShareHTML()}
 		window.addEventListener("message", onAppMessage);
 	}
 
-	function wireSettingsModal(shadow, settingsControls) {
+	function wireSettingsModal(shadow, settingsControls, { standalone = false } = {}) {
 		const modal = shadow.querySelector("#app-settings-modal");
 		const content = shadow.querySelector("#app-settings-content");
 		const panel = shadow.querySelector("#settings-panel");
@@ -46288,7 +47141,7 @@ ${readingListShareHTML()}
 		const close = shadow.querySelector("#app-settings-close");
 		const app = shadow.querySelector("#app");
 		const behind = (app ? ["#app-rail", "#app-list", "#app-reading", "#app-chin", "#app-selection-bar"] : ["#panel"])
-			.map((selector) => shadow.querySelector(selector));
+			.map((selector) => shadow.querySelector(selector)).filter(Boolean);
 
 		const holdBehind = (held) => {
 			for (const element of behind) {
@@ -46298,12 +47151,12 @@ ${readingListShareHTML()}
 
 		const tabStops = () => {
 			const stops = [];
-			const focusable = "a[href], button, input, select, textarea, [tabindex]";
+			const focusable = "a[href], button, input, select, textarea, [tabindex], [data-settings-frame]";
 			const candidates = [...modal.querySelectorAll(focusable + ", slot")].flatMap((element) => element.localName === "slot"
 				? element.assignedElements({ flatten: true }).filter((control) => control.matches(focusable)) : [element]);
 
 			for (const element of candidates) {
-				if (element.disabled || element.tabIndex < 0 || element.closest("[inert]") || element.assignedSlot?.closest("[inert]") ||
+				if (element.disabled || (element.tabIndex < 0 && !element.hasAttribute("data-settings-frame")) || element.closest("[inert]") || element.assignedSlot?.closest("[inert]") ||
 					!element.getClientRects().length || getComputedStyle(element).visibility === "hidden") {
 					continue;
 				}
@@ -46318,6 +47171,17 @@ ${readingListShareHTML()}
 			}
 
 			return stops;
+		};
+
+		const focusTab = (element, backwards) => {
+			if (element?.hasAttribute("data-settings-frame")) settingsControls.focusPrivateFrame(backwards);
+			else element?.focus();
+		};
+
+		const moveTab = (from, backwards) => {
+			const stops = tabStops();
+			const current = stops.indexOf(from);
+			if (current >= 0) focusTab(stops[(current + (backwards ? -1 : 1) + stops.length) % stops.length], backwards);
 		};
 
 		if (report) {
@@ -46368,7 +47232,7 @@ ${readingListShareHTML()}
 			section = tab.dataset.settingsSection;
 			modal.dataset.section = section;
 			for (const group of groups) group.hidden = group.dataset.appSection !== section;
-			settingsControls.show(section);
+			settingsControls.show(section, moveTab);
 			shadow.querySelector("#app-settings-heading").textContent = tab.dataset.settingsSection === "account" ? "Account" : tab.textContent.trim();
 
 			for (const each of tabs) {
@@ -46402,8 +47266,8 @@ ${readingListShareHTML()}
 				return;
 			}
 
-			gear.classList.toggle("is-open", open);
-			gear.setAttribute("aria-expanded", String(open));
+			gear?.classList.toggle("is-open", open);
+			gear?.setAttribute("aria-expanded", String(open));
 			modal.hidden = !open;
 			holdBehind(open);
 			hideAppTip();
@@ -46426,13 +47290,13 @@ ${readingListShareHTML()}
 			settingsControls.close();
 
 			if (!returnAppSettingsCaret()) {
-				gear.focus({ preventScroll: true });
+				gear?.focus({ preventScroll: true });
 			}
 
 			loadAppShortcuts().catch(console.error);
 		};
 
-		gear.onclick = (event) => {
+		if (gear) gear.onclick = (event) => {
 			event.preventDefault();
 			event.stopPropagation();
 			setOpen(modal.hidden);
@@ -46442,26 +47306,26 @@ ${readingListShareHTML()}
 			tab.onclick = (event) => showSection(tab.dataset.settingsSection, "", event);
 		}
 
-		close.onclick = () => setOpen(false);
+		const closeModal = standalone ? () => window.close() : () => setOpen(false);
+		close.onclick = closeModal;
 		openAppSettingsSection = (section, target) => {
 			if (modal.hidden) setOpen(true, section, target);
 			else showSection(section, target).focus({ preventScroll: true });
 		};
-		const closeModal = () => setOpen(false);
 		closeAppSettings = closeModal;
 
 		modal.addEventListener("click", (event) => {
 			event.stopPropagation();
 
-			if (event.target === modal) {
-				setOpen(false);
+			if (event.target === modal && !standalone) {
+				closeModal();
 			}
 		});
 
 		modal.addEventListener("keydown", (event) => {
 			if (event.key === "Escape") {
 				event.preventDefault();
-				setOpen(false);
+				closeModal();
 			}
 
 			if (event.key !== "Tab") {
@@ -46474,7 +47338,7 @@ ${readingListShareHTML()}
 
 			if (edge && (active === edge || (event.shiftKey && active === dialog) || (active?.type === "radio" && edge.type === "radio" && active.name === edge.name))) {
 				event.preventDefault();
-				(event.shiftKey ? stops.at(-1) : stops[0]).focus();
+				focusTab(event.shiftKey ? stops.at(-1) : stops[0], event.shiftKey);
 			}
 		});
 
@@ -46749,7 +47613,7 @@ ${readingListShareHTML()}
 		state.ui.shadow.querySelector("#app-rail-rule").hidden = !filters.length;
 
 		if (!frontPageViewAvailable(state.view, state.sourceIds, state.topicIds, state.hasHeadlines)) {
-			state.view = "unread";
+			state.view = "all";
 			state.listTopic = null;
 		}
 
@@ -46770,7 +47634,7 @@ ${readingListShareHTML()}
 	}
 
 	function appViewIsFrontPage(view) {
-		return view === "unread" || view === "all" || frontPageViewIsFiltered(view);
+		return view === "all" || (Boolean(view) && frontPageViewIsFiltered(view));
 	}
 
 	function appRowThumbHTML(story, { look = null, fallbackFavicon = true } = {}) {
@@ -47402,6 +48266,9 @@ ${readingListShareHTML()}
 		}
 
 		state.ui.shadow.querySelector("#app-mark-read").hidden = !appViewIsFrontPage(state.view);
+		for (const button of state.ui.shadow.querySelectorAll(".front-page-unread-filter")) {
+			paintFrontPageUnreadFilter(button, state, !state.noSources && appViewIsFrontPage(state.view));
+		}
 		for (const button of state.ui.shadow.querySelectorAll(".app-collection-filter")) {
 			button.hidden = state.view !== "collection";
 			button.toggleAttribute("data-filtered", state.collectionFilter !== "all" || state.collectionSort !== "activity" || Boolean(state.collectionTagFilter));
@@ -47612,7 +48479,7 @@ ${readingListShareHTML()}
 
 		if (appIsPhone()) {
 			restoreAppStageScroll(was, stage);
-			if (stage === "list" && appState.view === "unread") refreshAppSeen({ returnedToList: true }).catch(console.error);
+			if (stage === "list" && appState.unreadViews.has(appState.view)) refreshAppSeen({ returnedToList: true }).catch(console.error);
 		}
 	}
 
@@ -47786,7 +48653,7 @@ ${readingListShareHTML()}
 			paintAppChrome();
 			window.scrollTo(0, appState.scrolls.list || 0);
 			finish();
-			if (appState.view === "unread") refreshAppSeen({ returnedToList: true }).catch(console.error);
+			if (appState.unreadViews.has(appState.view)) refreshAppSeen({ returnedToList: true }).catch(console.error);
 		});
 	}
 
@@ -48096,7 +48963,7 @@ ${readingListShareHTML()}
 
 	const APP_SHORTCUTS = [
 		{ id: "search", label: "Search", keys: [appKeyBinding("k", true)] },
-		{ id: "front-pages", label: "Front Pages", keys: [appKeyBinding("[")] },
+		{ id: "front-pages", label: "Front\u00a0Pages", keys: [appKeyBinding("[")] },
 		{ id: "discussion", label: "Discussion", keys: [appKeyBinding("]")] },
 		{ id: "sidebar", label: "Sidebar on other sites", keys: [appKeyBinding(".", true)] },
 		{ id: "settings", label: "Settings", keys: [] },
@@ -48818,7 +49685,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		const feedCoverage = readerArticleCoverage(frontPageRowStories(candidates), settings, hiddenKeys);
 		const feedGroups = await readerFrontPageTopicGroups(candidates, feedCoverage, { index, includeStories: true });
 		const visibleFeed = filterReaderTopicRows(candidates, settings.hiddenTopics, feedGroups, feedCoverage);
-		const scopes = [["all", "Front Pages", visibleFeed, feedGroups]];
+		const scopes = [["all", "Front\u00a0Pages", visibleFeed, feedGroups]];
 
 		if (documents.length) {
 			const coverage = readerArticleCoverage([...stories, ...documents.flatMap((doc) => doc.discussions)], settings, hiddenKeys);
@@ -51782,7 +52649,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 				card.setAttribute("aria-description", "Read");
 				card.classList.remove("is-unread");
 			}
-			if (state.view === "unread") {
+			if (state.unreadViews.has(state.view)) {
 				state.unreadTopic = group;
 				const read = shadow.querySelectorAll('.app-topic-row[aria-description="Read"]:not([aria-current])');
 				for (const previous of read) previous.parentElement.remove();
@@ -51831,7 +52698,7 @@ ${note ? appShortcutNoteHTML(note) : ""}
 		resetAppListScroll();
 		await renderAppList();
 		if (!state.topicsMode || state.view !== view || (state.listTopic !== id && !state.activeListTopic?.equivalentIds?.includes(id))) return;
-		if (id && view === "unread") state.unreadTopic = state.activeListTopic;
+		if (id && state.unreadViews.has(view)) state.unreadTopic = state.activeListTopic;
 		const shadow = state.ui.shadow;
 		const target = id ? shadow.getElementById("app-list-topic-back") :
 			[...shadow.querySelectorAll(".app-topic-row")].find((button) => button.dataset.sharedTopic === previous);
@@ -51894,10 +52761,10 @@ ${note ? appShortcutNoteHTML(note) : ""}
 	function appOnboardingHTML() {
 		return `<div class="app-onboarding-card">
 <h1 class="app-onboarding-title">Welcome to Backchannel</h1>
-<p class="app-onboarding-intro">Backchannel finds what people are saying about the pages you visit, and fills Front Pages with links worth reading, from the sources you pick here. Nothing is contacted until you start.</p>
+<p class="app-onboarding-intro">Backchannel finds what people are saying about the pages you visit, and fills Front\u00a0Pages with links worth reading, from the sources you pick here. Nothing is contacted until you start.</p>
 <div class="sources-grid">${sourceListHTML({ cells: true })}</div>
-<div class="sources-subhead">Front Pages</div>
-<div class="sources-subhint">Choose what Backchannel shows in Front Pages. Links come only from the sources you've enabled above.</div>
+<div class="sources-subhead">Front\u00a0Pages</div>
+<div class="sources-subhint">Choose what Backchannel shows in Front\u00a0Pages. Links come only from the sources you've enabled above.</div>
 ${frontPageChooserHTML()}
 <div class="app-onboarding-actions"><button class="app-onboarding-start" type="button" disabled>Start reading</button></div>
 </div>`;
@@ -51913,13 +52780,8 @@ ${frontPageChooserHTML()}
 
 		const welcome = state.ui.shadow.querySelector("#app-rail-welcome");
 
-		for (const view of ["unread", "all"]) {
-			const button = state.ui.shadow.querySelector(`#app-rail [data-app-view="${view}"]`);
-
-			if (button) {
-				button.hidden = state.noSources;
-			}
-		}
+		const all = state.ui.shadow.querySelector('#app-rail [data-app-view="all"]');
+		if (all) all.hidden = state.noSources;
 
 		if (welcome) {
 			welcome.hidden = !state.noSources;
@@ -51968,6 +52830,7 @@ ${frontPageChooserHTML()}
 		const ui = state.ui;
 		const list = ui.shadow.querySelector("#app-list-body");
 		const view = state.view;
+		const unreadOnly = state.unreadViews.has(view);
 		const request = ++state.listSeq;
 		let outcome;
 
@@ -51996,7 +52859,7 @@ ${frontPageChooserHTML()}
 			paintAppTopicProjection(list, {}, () => request === state.listSeq);
 		} else {
 			if (state.listView !== view || !list.childElementCount) {
-				renderBrowseSkeleton(list, "Loading Front Pages…");
+				renderBrowseSkeleton(list, "Loading Front\u00a0Pages…");
 			}
 
 			const cardSettings = await loadSettings();
@@ -52023,9 +52886,7 @@ ${frontPageChooserHTML()}
 				if (request !== state.listSeq || revision !== paintRevision) return;
 				const seenRows = seen || {};
 				const openKey = appUnreadOpenKey(state);
-				const rowsForView = (entries, read = seenRows, retained = openKey) => view === "unread" && retained
-					? entries.filter((row) => rowIsUnread(row, read) || (normalizeURL(row.story.url) || row.story.url) === retained)
-					: appViewRows(entries, view, read);
+				const rowsForView = (entries, read = seenRows, retained = openKey) => appViewRows(entries, view, read, unreadOnly, retained);
 				const shown = rowsForView(rows);
 				const filteredEmpty = !shown.length && rows !== candidates && rowsForView(candidates).length > 0;
 				const isCurrent = () => request === state.listSeq && revision === paintRevision;
@@ -52043,7 +52904,7 @@ ${frontPageChooserHTML()}
 					if (request !== state.listSeq || revision !== paintRevision) return;
 				}
 				const hasTopics = Boolean(projection.topics?.length);
-				const topics = view === "unread" && state.topicsMode && !projection.active && hasTopics
+				const topics = unreadOnly && state.topicsMode && !projection.active && hasTopics
 					? appUnreadTopics(projection.topics, state) : projection.topics;
 				const topicsCaughtUp = hasTopics && !topics.length;
 				state.rows = rows;
@@ -52060,10 +52921,10 @@ ${frontPageChooserHTML()}
 				if ((!shown.length || topicsCaughtUp) && !projection.active) {
 					const unavailable = frontPageViewUnavailable(feedStates, view);
 					renderAppListMessage(
-						pending ? "Loading Front Pages…" : failureText || (filteredEmpty
-								? "No links match your topic filters." : !frontPageTopicRows(allRows, view).length
-							? unavailable ? "Could not load Front Pages." : "Nothing here right now."
-							: view === "unread"
+						pending ? "Loading Front\u00a0Pages…" : failureText || (filteredEmpty
+							? "No links match your topic filters." : !frontPageTopicRows(allRows, view).length
+							? unavailable ? "Could not load Front\u00a0Pages." : "Nothing here right now."
+							: unreadOnly
 								? "All caught up."
 								: "Nothing here right now."),
 					);
@@ -52102,6 +52963,7 @@ ${frontPageChooserHTML()}
 				refreshSaveControls().catch(console.error);
 				decorateAppRows(list);
 				await paintAppCounts();
+				return { feedStates };
 			};
 			outcome = await loadFrontPageView(view, cardSettings, { force, automatic, redditReady, dueFeedKeys }, paint);
 		}
@@ -52163,8 +53025,7 @@ ${frontPageChooserHTML()}
 			queue: queue.length > 0,
 		});
 		const badges = {
-			unread: counts.unread,
-			all: counts.all,
+			all: state.unreadViews.has("all") ? counts.unread : counts.all,
 			queue: unreadQueueCount(queue),
 			collection: freshCollectedCount(collected),
 		};
@@ -52198,7 +53059,7 @@ ${frontPageChooserHTML()}
 			}
 
 			const was = !button.classList.contains("rail-empty");
-			const show = Boolean(filled[id]) || state.view === id;
+			const show = Boolean(filled[id]);
 
 			button.classList.toggle("rail-empty", !show);
 
@@ -52225,7 +53086,8 @@ ${frontPageChooserHTML()}
 
 		const previous = state.seen;
 		state.seen = (await load(STORAGE.seen, {})) || {};
-		if (state.view === "unread" && state.topicsMode && !state.listTopic &&
+		const unreadOnly = state.unreadViews.has(state.view);
+		if (unreadOnly && state.topicsMode && !state.listTopic &&
 			(returnedToList && state.open || state.rows.some((row) => rowIsUnread(row, previous) !== rowIsUnread(row, state.seen)))) {
 			renderAppList().catch(console.error);
 			return;
@@ -52233,7 +53095,7 @@ ${frontPageChooserHTML()}
 		const list = state.ui.shadow.querySelector("#app-list-body");
 		const elements = [...list.querySelectorAll(".app-row")];
 		const openKey = appUnreadOpenKey(state);
-		const removing = new Set(state.view === "unread" ? elements.filter((element) => {
+		const removing = new Set(unreadOnly ? elements.filter((element) => {
 			const row = state.rowsByURL.get(element.dataset.appKey);
 
 			return row && !element.hasAttribute("data-topic-extra") && element.dataset.appKey !== openKey && !rowIsUnread(row, state.seen);
@@ -52287,11 +53149,11 @@ ${frontPageChooserHTML()}
 			}
 		}
 
-		if (state.view === "unread" && !state.topicsMode && !list.querySelector(".app-row")) {
+		if (unreadOnly && !state.topicsMode && !list.querySelector(".app-row")) {
 			renderAppListMessage("All caught up.");
 			paintAppTopicTabs(false);
 		}
-		if (state.view === "unread" && state.listTopic && removing.size) {
+		if (unreadOnly && state.listTopic && removing.size) {
 			renderAppList().catch(console.error);
 			return;
 		}
@@ -52320,7 +53182,7 @@ ${frontPageChooserHTML()}
 			rows = rows.filter(({ story }) => visible.has(normalizeURL(story.url) || story.url));
 		}
 		await markAppRowsRead(rows);
-		if (bulk && state.bulk === bulk && view === "unread") endAppSelection();
+		if (bulk && state.bulk === bulk && state.unreadViews.has(view)) endAppSelection();
 	}
 
 	async function markAppRowsRead(candidates) {
@@ -53092,7 +53954,8 @@ ${frontPageChooserHTML()}
 		let signature;
 		const update = () => {
 			const targets = entries();
-			const count = targets.filter(canReply).length;
+			const replies = targets.filter(canReply).map(({ discussion }) => discussion);
+			const count = replies.length;
 			const canNote = Boolean(reading.settings.notepad && targets.length);
 			const next = JSON.stringify([canNote, targets.map(({ thread, source }) => [thread.url, source.url])]);
 			if (next === signature) return;
@@ -53103,12 +53966,7 @@ ${frontPageChooserHTML()}
 			note.hidden = !canNote;
 			if (canNote && new Set(targets.map(({ source }) => source.url)).size > 1) note.setAttribute("aria-expanded", "false");
 			else note.removeAttribute("aria-expanded");
-			const help = box.querySelector(".composer-help-toggle");
-			if (help) {
-				help.hidden = !count;
-				if (!count && help.classList.contains("is-open")) help.click();
-			}
-			setComposeOptions(box, count, canNote);
+			setComposeOptions(box, replies, canNote);
 		};
 		update();
 		return { holder, update };
@@ -53729,7 +54587,7 @@ ${frontPageChooserHTML()}
 				const focusId = menu.contains(focused) ? focused.id : "";
 				if (menu.firstChild) menuScroll = menu.scrollTop;
 				const choices = appTopicArticleNode("div");
-				choices.innerHTML = sourceMenuHTML(stories, sourceState, menu.id, []);
+				choices.innerHTML = sourceMenuHTML(stories, sourceState, { id: menu.id, liveKeys: [] });
 				const total = stories.reduce((sum, story) => sum + story.commentCount, 0);
 				const top = appDiscussionSourcesHead(menu, () => {
 					const selected = panel.entries.get(panel.selected);
@@ -53998,9 +54856,8 @@ ${frontPageChooserHTML()}
 		);
 		if (!stories.length) return;
 		renderedDiscussions = stories;
-		const header = renderPageHeader(stories, ui.body, { page: opened.row?.story?.title || "" });
-		ui.body.insertBefore(header, waiting);
-		for (const control of ui.shadow.querySelectorAll("#app-discussion-sort select, #app-discussion-sort button")) control.disabled = true;
+		renderDiscussionControls(ui, stories);
+		setDiscussionSortDisabled(ui, true);
 		const settings = await loadSettings();
 		if (appState !== state || state.open !== opened || waiting.parentElement !== ui.body) return;
 		const composer = mountComposeBox(ui, stories, settings, waiting, null, { anticipateReplies: true });
@@ -54728,7 +55585,7 @@ ${frontPageChooserHTML()}
 
 	const READER_PAGE_NAMES = { auto: "Auto", paper: "Paper", white: "White", sepia: "Sepia", gray: "Gray", night: "Night" };
 
-	const READER_FONT_NAMES = { charter: "Charter", newyork: "New York", georgia: "Georgia", system: "System" };
+	const READER_FONT_NAMES = { charter: "Charter", newyork: "New\u00a0York", georgia: "Georgia", system: "System" };
 
 	const READER_FONT_PROBES = {
 		charter: ["Charter", "Bitstream Charter"],
@@ -59395,24 +60252,16 @@ ${frontPageChooserHTML()}
 		return [row?.story, ...(row?.also || [])].some((story) => storyCarriesTopic(story, topicId));
 	}
 
-	function appViewRows(rows, view, seen) {
-		if (view === "unread") {
-			return rows.filter((row) => rowIsUnread(row, seen));
-		}
-
+	function appViewRows(rows, view, seen, unreadOnly = false, retained = "") {
 		if (String(view).startsWith("source:")) {
 			const sourceId = view.slice("source:".length);
-
-			return rows.filter((row) => rowCarriesSource(row, sourceId));
-		}
-
-		if (String(view).startsWith("topic:")) {
+			rows = rows.filter((row) => rowCarriesSource(row, sourceId));
+		} else if (String(view).startsWith("topic:")) {
 			const topicId = view.slice("topic:".length);
-
-			return rows.filter((row) => rowCarriesTopic(row, topicId));
+			rows = rows.filter((row) => rowCarriesTopic(row, topicId));
 		}
-
-		return rows;
+		return unreadOnly ? rows.filter((row) => rowIsUnread(row, seen) ||
+			(retained && (normalizeURL(row.story.url) || row.story.url) === retained)) : rows;
 	}
 
 	function appViewCounts(rows, seen, sourceIds, topicIds = []) {
@@ -59646,7 +60495,11 @@ ${frontPageChooserHTML()}
 		}
 
 		if (onStartPage()) {
-			await runAppPass();
+			const section = location.hash.match(/^#settings\/(account|collection|filters|sidebar)$/)?.[1];
+			const library = location.hash.match(/^#library\/(collection|queue)$/)?.[1];
+			if (section) await runSettingsWindow(section);
+			else if (library) await runSidebarLibrary(library);
+			else await runAppPass();
 			return;
 		}
 
@@ -59828,8 +60681,14 @@ ${frontPageChooserHTML()}
 	}
 
 	if (window.top === window.self) {
-		init().catch(console.error);
+		if (isSidebarComposerPage) {
+			runSidebarComposerWindow().catch(console.error);
+		} else {
+			init().catch(console.error);
+		}
 		scheduleStorageSweep();
+	} else if (isSidebarComposerFrame) {
+		runSidebarComposerFrame().catch(console.error);
 	} else {
 		installFrameAgent();
 	}

@@ -52,7 +52,7 @@ export function prepareTopicDecision(payload, index, resolveTopic, requestId) {
     }
     if (Object.hasOwn(payload, "image")) {
       changes.image = payload.image === null ? null : reviewImage(payload.image);
-      if (payload.image !== null && !changes.image) return invalid("Use a Wikimedia Commons image with attribution and a subject");
+      if (payload.image !== null && !changes.image) return invalid("Use a Wikimedia\u00a0Commons image with attribution and a subject");
     }
     return Object.keys(changes).length ? accept({ target: source, changes }) : invalid("Enter a title or image change");
   }

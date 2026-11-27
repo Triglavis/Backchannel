@@ -8,14 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The version in `HNewhere.user.js`'s `@version` header is what userscript managers
 use to detect updates, so every release bumps it.
 
+## [1.6.20] — 2026-11-26
+
+### Changed
+
+- Reader and Sidebar use All Front Pages for the combined list. The Unread
+  button filters the selected Front Page.
+- Collection link menus call the action Remove.
+- The Sidebar puts Sort and Sources together at the right of Discussion.
+  Reader and Sidebar share the Sources menu, including discussion totals
+  and links to the original posts.
+- The Sources menu shows up to two lines per post title and puts comment
+  counts in pills beside each source. Reddit and Lemmy keep their community
+  groups.
+- Reader and Sidebar name the selected discussions in the filtered byline
+  and use the same dotted links and typography as comment bylines.
+
+- The shared composer puts Aa, Note, and Comment on one row and opens
+  formatting controls above the writing field.
+
+### Fixed
+
+- Queue and Collection open inside the Sidebar with Reader list styling.
+  Queue appears in navigation when it contains a link.
+- The Sidebar header can save the current page to Collection.
+- The Sidebar shows the same inline writing field as Reader. Notes save in
+  place and comments go to the selected discussion. If the page blocks both
+  private frames, the composer can open in its own Backchannel window.
+- Sidebar Settings includes bookmark import, exports, Front Page filters, and
+  disabled sites. Account opens directly in Backchannel Settings.
+- Link titles display characters such as `&` in place of HTML entities.
+- On phones, the Sidebar has tighter Sources spacing and truncates its
+  title when resized. The composer reveals its controls on focus and
+  preserves the page zoom when the keyboard opens.
+
 ## [1.6.19.4] — 2026-11-25
 
 ### Fixed
 
-- Phone Reader list menus use consistent sizing and spacing. Topic Article
+- Phone Reader list menus use consistent sizing and spacing. Topic Article
   cards offer actions for opening the article and managing its links.
-- Regular and Topic Articles use the same Discussion title and header layout.
-  The Topic Article divider follows the selected Reader theme.
+- Regular and Topic Articles use the same Discussion title and header layout.
+  The Topic Article divider follows the selected Reader theme.
   On a phone, the composer toggle sits beside Sources and uses the same pressed
   style. The floating controls run bottom to top as Discussion, Save, and Aa.
 - Phone Reader keeps list content visible beneath its navigation and Safari’s
@@ -32,9 +66,9 @@ use to detect updates, so every release bumps it.
   rate limit during the same Sync.
 - Reddit discussion redirects leave other Reddit reads available. Sync honors
   retry delays per host and distinguishes an outage from a rate limit.
-- Queue and Notes keep edits made in separate tabs. Account sync preserves edits
+- Queue and Notes keep edits made in separate tabs. Account sync preserves edits
   made during an upload alongside changes already saved by other devices.
-- Topic Article Discussion keeps expanded replies, Focus, and the reading
+- Topic Article Discussion keeps expanded replies, Focus, and the reading
   position during Sync.
 - Reader and Sidebar show available replies when a Reddit archive response
   leaves some out. Newly loaded replies follow the selected sort.
@@ -53,31 +87,31 @@ use to detect updates, so every release bumps it.
 - Comment requests keep moving while individual replies are slow. Discussion
   updates reuse the comment branches already on screen.
 - Other sources can start syncing while Safari prepares the Reddit helper tab,
-  including when re-clicking the open Reader article or when Front Pages refresh
+  including when re-clicking the open Reader article or when Front Pages refresh
   automatically.
 - Safari starts the Reddit helper sooner by overlapping shared-storage checks.
-- Lobsters Front Pages reuse saved results when the source confirms the feed is
+- Lobsters Front Pages reuse saved results when the source confirms the feed is
   unchanged.
-- Topic Articles keep cited reporting visible during a refresh and can show
+- Topic Articles keep cited reporting visible during a refresh and can show
   newly reported developments under What changed.
-- Best in Topic Articles samples relevant discussions across enabled sources,
+- Best in Topic Articles samples relevant discussions across enabled sources,
   uses the article brief to give substantive replies more weight, and ranks
   each batch before adding it below comments already shown.
 - Topic matching better recognizes the same post-IPO sell-off across sources.
-- By topic prefers images from the linked articles and ranks Front Pages topics
+- By topic prefers images from the linked articles and ranks Front Pages topics
   using recency, discussion activity, and distinct source articles.
 
 ### Fixed
 
-- Front Pages share refresh timing for the same feed across Headlines and topic
+- Front Pages share refresh timing for the same feed across Headlines and topic
   views, including after returning to a tab.
-- In Unread, opening another Topic Article clears the previous topic card.
+- In Unread, opening another Topic Article clears the previous topic card.
 
 ## [1.6.19.2] — 2026-11-24
 
 ### Fixed
 
-- Topic Article comments use the same actions and focused byline as Reader.
+- Topic Article comments use the same actions and focused byline as Reader.
   Closing Focus returns you to your place in the discussion.
 - The Sidebar composer stays at the bottom and shows its actions as you type.
   You can carry a note into Reader and save it even if its discussion is unavailable.
@@ -91,7 +125,7 @@ use to detect updates, so every release bumps it.
 - Preserve Collection discussion-check opt-outs and send less information in
   background lookups.
 - Add safeguards for Account recovery and sessions, topic reports and shared
-  Topic Article generation.
+  Topic Article generation.
 - Once an account upgrades to signed sync proofs, update Reader on every device
   to keep signing in and uploading sync snapshots. A Worker rollback must also
   support signed proofs.
@@ -102,7 +136,7 @@ use to detect updates, so every release bumps it.
 
 - Settings › Collection imports browser bookmark HTML with a preview and undo.
   Export bookmarks and download notes from the same settings section.
-- By topic groups links about the same development. Topic Articles show a cited
+- By topic groups links about the same development. Topic Articles show a cited
   brief, available images and a timeline alongside comments from the original
   discussions. Best ranks replies across sources, and scrolling loads more.
 - Search finds topics across Reader views. Settings › Filters lets you hide
@@ -113,7 +147,7 @@ use to detect updates, so every release bumps it.
 
 ### Changed
 
-- The Topic Article brief and Discussions scroll independently on desktop. On
+- The Topic Article brief and Discussions scroll independently on desktop. On
   phones, the Discussion button opens comments over the article and preserves
   the reading position. The right-hand controls open the comment and note
   composer, and Aa offers the original page. The Discussion controls use the
@@ -124,7 +158,7 @@ use to detect updates, so every release bumps it.
 
 ### Fixed
 
-- Topic Articles with an empty shared brief can show cited publisher excerpts
+- Topic Articles with an empty shared brief can show cited publisher excerpts
   or labeled shared link previews. Imported bookmarks marked for preview on
   open use saved metadata until you open the link.
 - Open link rows keep their titles, metadata and menu icons legible in light
@@ -138,17 +172,17 @@ use to detect updates, so every release bumps it.
 
 ### Added
 
-- Rail navigation temporarily reveals collapsed Front Pages until hover and
-  focus leave. The explicit Front Pages toggle keeps it open.
+- Rail navigation temporarily reveals collapsed Front Pages until hover and
+  focus leave. The explicit Front Pages toggle keeps it open.
 - The desktop Reader chin contains Aa, Save and Discussion controls, a comment
   count and an embossed Triglavis mark. The complete privacy policy is available
-  at the end of General settings. Open the original page from Aa or a Front Pages
+  at the end of General settings. Open the original page from Aa or a Front Pages
   article's menu.
 - The Backchannel birds rise through center stage as discussions load. Each
   bird tilts its head, opens its beak as its speech bubble appears, and closes
   it as the bubble disappears. With reduced motion enabled, the loader shows a
   still bird.
-- Optional Account sync in Reader requires a verified email for setup and
+- Optional Account sync in Reader requires a verified email for setup and
   uses a passkey and recovery key to sync encrypted settings, Collection,
   and reading queue data across devices. Independent changes merge
   automatically, and Settings prompts when edits overlap.
@@ -156,7 +190,7 @@ use to detect updates, so every release bumps it.
   last-sync timestamp, and linked devices. Reader syncs settings changes
   automatically after the device is connected. A verified email can restore
   account access from the signed-out Account screen.
-- Account sync uses Safari-compatible compression and decompression in the
+- Account sync uses Safari-compatible compression and decompression in the
   userscript’s isolated environment.
 - Account setup confirms a passkey can unlock sync before creating the
   account. Sign-in unlocks sync in the same flow, and lost-passkey recovery
@@ -164,7 +198,7 @@ use to detect updates, so every release bumps it.
   managers to remove the old passkey.
 - Account can restore the previous encrypted snapshot when the current one
   cannot be read, while keeping local edits.
-- Optional diagnostics report source and Account sync reliability while signed
+- Optional diagnostics report source and Account sync reliability while signed
   in. Sharing starts off and can be changed during signup or in Settings →
   Account → Manage account → Privacy. The sharing choice syncs with encrypted
   Account preferences. The Reader and site privacy policy describe what the
@@ -175,7 +209,7 @@ use to detect updates, so every release bumps it.
 - Drag to reorder sources and topics in the Reader rail. The order is saved;
   Search, Unread, All articles, Queue, Collection and Settings stay fixed.
 - Sync schedule in Settings → Sources, with 5, 15, 30,
-  or 60 minute intervals and Manual. Front Pages refresh while visible;
+  or 60 minute intervals and Manual. Front Pages refresh while visible;
   discussions are checked whenever an article is opened.
 - An opt-in X source finds public posts linking a page through a temporary
   signed-in X search tab. Search coverage is incomplete, and replies that do
@@ -184,12 +218,12 @@ use to detect updates, so every release bumps it.
 
 ### Fixed
 
-- The Front Pages toggle overlaps its panel. Discussion uses the linked article's
+- The Front Pages toggle overlaps its panel. Discussion uses the linked article's
   light or dark appearance in Auto, including the built-in Reader's page color.
-- Front Pages opens and closes within its final bounds, including narrow desktop
+- Front Pages opens and closes within its final bounds, including narrow desktop
   layouts with a saved width larger than the available space.
 - Reader panels animate together with the article's available space, and the
-  built-in Reader keeps its rounded corner when Front Pages is closed.
+  built-in Reader keeps its rounded corner when Front Pages is closed.
 - Settings uses consistent label and action layouts for sync, updates and cached
   data. Update availability replaces the Installed label, with one matching action.
 - Manage account keeps email changes available if a startup sync is still
@@ -319,12 +353,12 @@ use to detect updates, so every release bumps it.
   with the row menu button at the pane head's size in place of the inline
   links.
 - Backchannel is now licensed under the GNU General Public License version 3
-  or later, with Triglavis LLC as the copyright holder. Releases through
+  or later, with Triglavis LLC as the copyright holder. Releases through
   1.6.18.3 remain available under the MIT license.
 
 ### Removed
 
-- Submitting a page to Hacker News or Reddit from the Sidebar, and the Submit
+- Submitting a page to Hacker News or Reddit from the Sidebar, and the Submit
   button in its header.
 
 ## [1.6.18.3] — 2026-11-09
@@ -379,7 +413,7 @@ use to detect updates, so every release bumps it.
   Continue button to start. Article lists then try automatically. Sync and
   loading more replies use the same temporary window. Sign in there if asked; it closes when finished, and a
   toast confirms the overall sync. The introduction is remembered locally
-  after confirmation or dismissal. Front Pages tries refreshing on its first
+  after confirmation or dismissal. Front Pages tries refreshing on its first
   load; later refreshes start with Sync, without a repeated window reminder.
   Settings › Sources explains Reddit's access changes and session refreshes
   under (?). Lists no longer repeat the temporary-window instruction.
@@ -440,7 +474,7 @@ use to detect updates, so every release bumps it.
 
 - **The Aa menu chooses a read-out's theme and font family.** Auto follows
   the reader's appearance, Paper in light and Night in dark; Paper, White,
-  Sepia, Gray and Night stay as chosen. The fonts are Charter, New York,
+  Sepia, Gray and Night stay as chosen. The fonts are Charter, New York,
   Georgia and System; the first three are offered only when your device has
   them. The choice applies at once and is kept. Framed pages keep their own
   look. The menu, now headed Style (its button's tip reads Style settings), is
@@ -531,17 +565,17 @@ use to detect updates, so every release bumps it.
 
 ### Security
 
-- **A link can no longer submit a story to Hacker News as you.** Submitting
-  from Backchannel opens Hacker News's submit form in a popup, which fills in
+- **A link can no longer submit a story to Hacker News as you.** Submitting
+  from Backchannel opens Hacker News's submit form in a popup, which fills in
   your title and address and sends it. The popup sent the form whether or not
   Backchannel had opened it, so a link to that form carrying the popup's
-  marker, followed while you were signed in to Hacker News, sent it under the
+  marker, followed while you were signed in to Hacker News, sent it under the
   title the link chose. The popup now sends only a submission Backchannel
   stored for it just before opening it. This affected every version from
   1.5.3 through 1.6.17.3.
 
 - **Every popup needs a request Backchannel stored for it.** The reply popups
-  on Hacker News and Reddit, and Reddit's submit popup, posted nothing for a
+  on Hacker News and Reddit, and Reddit's submit popup, posted nothing for a
   link carrying their marker, but they still answered it: Reddit's submit
   form showed Backchannel's note that your submission was filled in, over a
   form the link had filled, and each popup kept a small stored value that was
@@ -554,8 +588,7 @@ use to detect updates, so every release bumps it.
 ### Fixed
 
 - **Posting a comment keeps the reader and the page's other discussions.**
-  After a comment went through, the Sidebar was rebuilt around the one Hacker
-  News story it was posted to. In the reader that replaced the whole reader
+  After a comment went through, the Sidebar was rebuilt around the one Hacker News story it was posted to. In the reader that replaced the whole reader
   with a floating panel, and on a page with several discussions the others
   disappeared. Posting now refreshes the discussions already shown, as Sync
   does.
@@ -571,7 +604,7 @@ use to detect updates, so every release bumps it.
   It now waits until the reset time Reddit gives, or ten minutes when it
   gives none, then asks again.
 
-- **A Hacker News story, comment or set of vote arrows that failed to load
+- **A Hacker News story, comment or set of vote arrows that failed to load
   once is fetched again.** One timeout kept it missing until the page was
   reloaded.
 
@@ -590,12 +623,12 @@ use to detect updates, so every release bumps it.
 ### Security
 
 - **A link can no longer vote as you.** Voting from Backchannel opens a popup
-  on Hacker News or old.reddit.com that presses the arrow. The popup took the
+  on Hacker News or old.reddit.com that presses the arrow. The popup took the
   vote from its own address, so a link carrying the popup's marker, followed
   while you were signed in, cast the vote the link named, up, down or unvote,
   on the story or comment it named. A vote is now cast only when Backchannel
   stored it just before opening the popup, and opening the same address again
-  after the vote does nothing. This affected Hacker News from 1.5.1 and
+  after the vote does nothing. This affected Hacker News from 1.5.1 and
   Reddit from 1.6.7, through 1.6.17.2.
 
 ## [1.6.17.2] — 2026-10-21
@@ -623,7 +656,7 @@ use to detect updates, so every release bumps it.
   toggle without one grows by 4px on hover.
 
 - **Settings › General has Clear cache**, which removes the temporary data
-  used to find discussions and load Front Pages. Backchannel fetches fresh
+  used to find discussions and load Front Pages. Backchannel fetches fresh
   results when it needs them; notes, the Collection and settings are kept.
 
 ### Fixed
@@ -638,12 +671,12 @@ use to detect updates, so every release bumps it.
 - **Stored data no longer grows without limit.** Clearing a stored value
   wrote an empty value over it, so every vote, post and finished draft left
   one behind for good, and from 1.4.7 to 1.6.15.1 each page you looked up
-  kept a Hacker News lookup of its own that nothing removed. Backchannel now
+  kept a Hacker News lookup of its own that nothing removed. Backchannel now
   asks your userscript manager for three more permissions so it can delete
   values instead, and once a day it removes what older versions left behind
-  and Front Pages unused for a week. A discussion's last visit is forgotten
+  and Front Pages unused for a week. A discussion's last visit is forgotten
   after 90 days, Sidebar widths and open states are kept for the 200 most
-  recent sites, and a cached Hacker News search keeps only the fields
+  recent sites, and a cached Hacker News search keeps only the fields
   Backchannel reads, about a quarter of the size.
 
 ### Security
@@ -651,8 +684,7 @@ use to detect updates, so every release bumps it.
 - **Links from a source's answer are only ever web addresses.** A
   discussion's link took the address its source gave, some of which a remote
   server sets, such as a Lemmy post's ActivityPub id, and Mastodon's trending
-  links on the Front Page were checked only for having an address. A Front
-  Pages row with a `javascript:` address drew like any other: a plain click
+  links on the Front Page were checked only for having an address. A Front Pages row with a `javascript:` address drew like any other: a plain click
   did nothing, but in WebKit, Safari's engine, a ⌘-, Ctrl-, Shift-, Alt- or
   middle-click ran it on backchnnl.app. A discussion now links only to an
   http or https address, and a trending link that is neither is left out.
@@ -682,8 +714,7 @@ use to detect updates, so every release bumps it.
 
 - **The article's buttons are desktop-sized in the stacked reader.** Below
   1336px, where the discussion sits under the article, the stack at the
-  article's bottom right used the phone's 36px buttons beside the 24px Front
-  Pages button. With a mouse they now match it, icons included. Touch screens
+  article's bottom right used the phone's 36px buttons beside the 24px Front Pages button. With a mouse they now match it, icons included. Touch screens
   keep the larger buttons.
 
 ## [1.6.17] — 2026-10-18
@@ -714,13 +745,13 @@ use to detect updates, so every release bumps it.
   to swap. Reset puts one row back, Reset all every row. ⌘/ (Ctrl+/ on Windows
   and Linux) opens the tab from the reader.
 
-- **New shortcuts in the reader.** [ shows or hides Front Pages, ] the
+- **New shortcuts in the reader.** [ shows or hides Front Pages, ] the
   Discussion, S saves or unsaves the open article and R syncs. These, along
   with ⌘K, J, K and O, now also work after a click into the article; a key the
   page uses itself, or one typed in its fields, stays with the page.
 
 - **⌘. shows or hides the Sidebar on any page** (Ctrl+. on Windows and
-  Linux), wherever its button shows, Hacker News included.
+  Linux), wherever its button shows, Hacker News included.
 
 - **Below 1336px the article and its discussion stack**, the article above
   and the discussion below, with a divider you can drag. The article's buttons
@@ -738,7 +769,7 @@ use to detect updates, so every release bumps it.
 - **Search is the first button in the reader's rail.** ⌘K (Ctrl+K on Windows
   and Linux) opens it from anywhere in the reader. Its Go to lists every topic
   and source the rail offers, matched by name or short name, so "hn" finds
-  Hacker News, and it lists queued and saved pages in groups of their own.
+  Hacker News, and it lists queued and saved pages in groups of their own.
 
 - **The list stays beside the article at every desktop width.** Below 1100px
   it slid over the article as a drawer.
@@ -797,8 +828,8 @@ use to detect updates, so every release bumps it.
 - **Lobsters threads are found for addresses that start with www.**, such as
   YouTube videos.
 
-- **The Sidebar's Front Pages follow a source you switch in Settings.** The
-  list kept the old source's links until you left Front Pages and came back.
+- **The Sidebar's Front Pages follow a source you switch in Settings.** The
+  list kept the old source's links until you left Front Pages and came back.
 
 - **No discussion found sits in the middle of the reader's Discussion**, like
   its other notes, instead of at its top left.
@@ -812,24 +843,23 @@ use to detect updates, so every release bumps it.
 
 ### Security
 
-- **A source you turned off is left alone.** After you turned Hacker News
-  off, opening a Hacker News link the reader still listed, as in the Queue,
-  fetched its thread from Hacker News, and opening the Queue, in the reader or
-  the Sidebar, fetched the latest points and comments of every Hacker News
-  link in it. Both now happen only while Hacker News is on. 1.6.16 did both.
+- **A source you turned off is left alone.** After you turned Hacker News
+  off, opening a Hacker News link the reader still listed, as in the Queue,
+  fetched its thread from Hacker News, and opening the Queue, in the reader or
+  the Sidebar, fetched the latest points and comments of every Hacker News
+  link in it. Both now happen only while Hacker News is on. 1.6.16 did both.
 
 ## [1.6.16] — 2026-10-06
 
 ### Added
 
-- **Front Pages built from topics.** Under **Sources** in Settings,
-  **Front Pages** offers **Topics you follow** or **Top links from your
-  sources**. Top links is what Front Pages shows now, and it stays chosen
+- **Front Pages built from topics.** Under **Sources** in Settings,
+  **Front Pages** offers **Topics you follow** or **Top links from your
+  sources**. Top links is what Front Pages shows now, and it stays chosen
   until you pick a topic.
   Topics offers eight: World, U.S., Business, Technology, Entertainment,
   Sports, Science and Health. Each reads a few subreddits, Lemmy communities
-  and Bluesky feeds picked for it, and Technology adds Lobsters' and Hacker
-  News's front pages, but only from sources you have on. A topic none of
+  and Bluesky feeds picked for it, and Technology adds Lobsters' and Hacker News's front pages, but only from sources you have on. A topic none of
   them covers can't be picked, and hovering it says which sources would.
   A story found on more than one source moves up. In the reader on
   backchnnl.app, each topic gets its own icon in the rail, beside the views
@@ -838,7 +868,7 @@ use to detect updates, so every release bumps it.
 
 - **You are asked once how to build it.** A new reader is asked right after
   picking sources. A reader who already has sources sees a card at the top of
-  Front Pages, once; closing it keeps Top links.
+  Front Pages, once; closing it keeps Top links.
 
 ### Changed
 
@@ -864,7 +894,7 @@ use to detect updates, so every release bumps it.
   − or Delete to remove it, or + to hide a link or disable a site or page by
   its address.
 
-- **The reader's pane buttons read Front Pages and Discussions**, once
+- **The reader's pane buttons read Front Pages and Discussions**, once
   Articles and Discussion.
 
 - **Settings has an Appearance section.** It lists Theme, Color and the
@@ -883,7 +913,7 @@ use to detect updates, so every release bumps it.
 ### Fixed
 
 - **The reader welcomes you when no source is on.** It shows the sources,
-  each summed up in two bullets, and the Front Pages choice in one place,
+  each summed up in two bullets, and the Front Pages choice in one place,
   with Welcome in the rail; **Start reading** saves both. Its list used to say "Pick where comments
   come from" without offering a way to, and changing views replaced that
   with "Could not reach any front page."
@@ -923,7 +953,7 @@ use to detect updates, so every release bumps it.
 ### Added
 
 - **A comment's age links to the comment (#146).** The time beside a comment's
-  author opens that comment where it lives, in a new tab: on Hacker News,
+  author opens that comment where it lives, in a new tab: on Hacker News,
   Reddit, Bluesky, Lobsters, Lemmy, Mastodon and Hypothes.is, and on a
   Wikipedia talk page. A note of your own has nowhere to link to and keeps a
   plain age.
@@ -939,8 +969,8 @@ use to detect updates, so every release bumps it.
   sat about 9px under the header's buttons, and the sources and comment menus
   4px under theirs. All four now open 3px under the button that opens them.
 
-- **Hacker News lookups are kept for an hour, thirty pages at most.** Every
-  page looked up on Hacker News used to leave a stored value of its own, named
+- **Hacker News lookups are kept for an hour, thirty pages at most.** Every
+  page looked up on Hacker News used to leave a stored value of its own, named
   for the page's address, and none was ever removed. They now share one value
   that drops a page an hour after it was looked up. The values an earlier
   version left are still in your userscript manager's storage: the script has
@@ -1057,7 +1087,7 @@ use to detect updates, so every release bumps it.
 
 ### Fixed
 
-- **Hacker News rows show their age again.** The front page began sending its
+- **Hacker News rows show their age again.** The front page began sending its
   time in a form the script did not read, and every row lost its age:
   "(developer.apple.com, )". A row with no time at all now reads "(site)".
 
@@ -1123,7 +1153,7 @@ use to detect updates, so every release bumps it.
 - **The site has a favicon.** The hand-drawn bird, on the green.
 
 - **The site has a privacy policy.** Privacy, in the page's chin, opens it in
-  place. Without the script installed, the chin also links to Triglavis LLC and
+  place. Without the script installed, the chin also links to Triglavis LLC and
   GitHub, and offers Install.
 
 ### Changed
@@ -1208,7 +1238,7 @@ use to detect updates, so every release bumps it.
 
 ### Fixed
 
-- **A vote on Hacker News lights the arrow.** After voting, the arrow
+- **A vote on Hacker News lights the arrow.** After voting, the arrow
   disappeared and the word "unvote" took its place, with nothing to say it
   could be clicked. The arrow now stays, colored in, the way it already does
   for Reddit, and clicking it removes the vote. The messages that can appear in
@@ -1274,7 +1304,7 @@ use to detect updates, so every release bumps it.
 - **Queueing stories in quick succession keeps all of them.** Each queue press
   rewrote the stored list from what it had read a moment earlier, so presses in
   flight together each saved a list missing the others' stories — queueing your
-  way down the Hacker News front page kept almost none of them. Writes to the
+  way down the Hacker News front page kept almost none of them. Writes to the
   queue now take turns. (#116)
 
 - **The Focused discussion banner sits on the page header's edge.** It kept
@@ -1328,7 +1358,7 @@ use to detect updates, so every release bumps it.
   holds the time of your arrival for as long as you are on the page, instead of
   re-reading a timestamp it had already moved forward.
 
-- **front pages**, **queue** and **collection** carry the dotted underline that
+- **front pages**, **queue** and **collection** carry the dotted underline that
   marks everything else you can press, and the one you are on is underlined
   solid. They were told apart by color alone, which did not say they were
   pressable.
@@ -1338,7 +1368,7 @@ use to detect updates, so every release bumps it.
   now sits at the same left edge as the tabs and the blend note above it.
 
 - **Where a source has both arrows, the one you did not use dims** once a vote is
-  placed, instead of sitting at full strength beside the one you did. Hacker News
+  placed, instead of sitting at full strength beside the one you did. Hacker News
   is unaffected — it replaces its arrow with **unvote**.
 
 - **Blended from …** is set at the size of the byline it sits above, rather than
@@ -1392,7 +1422,7 @@ use to detect updates, so every release bumps it.
 
   That list is the same shape as the **N discussions** menu above it: the ones
   running now under a **LIVE** heading and the rest below, each band split by
-  source — **Hacker News**, **Reddit** — in alphabetical order, each source's own
+  source — **Hacker News**, **Reddit** — in alphabetical order, each source's own
   threads busiest first, and a comment count on every row. Two threads in one subreddit used to be two
   rows both reading *r/live* with nothing to choose between them; they now carry
   the month they were posted, as they already did elsewhere in the panel. One
@@ -1470,7 +1500,7 @@ use to detect updates, so every release bumps it.
   rebuilt the page from scratch. It now puts the notepad in place and adds the
   note to it, the way every note after the first was already handled.
 
-- **A Hacker News action on a phone reported a blocked popup and left nowhere to
+- **A Hacker News action on a phone reported a blocked popup and left nowhere to
   go.** Voting opened its window one step after the press rather than during it,
   which is when browsers stop allowing it — measured across three engines, only
   the synchronous case keeps the activation a popup blocker looks for. The window
@@ -1606,15 +1636,15 @@ use to detect updates, so every release bumps it.
 - **un-favorite** is **unfavorite**, and **remove** in the queue is **unqueue**,
   matching unwatch.
 
-- **favorite keeps an item here rather than favoriting it on Hacker News.** It
+- **favorite keeps an item here rather than favoriting it on Hacker News.** It
   used to do the latter, through the same popup vote and reply use. Every source
-  has some equivalent of favoriting and only Hacker News could be wired to it,
+  has some equivalent of favoriting and only Hacker News could be wired to it,
   so it is kept locally for now and works on all of them.
 
-- **favorite is on everything there is to keep**, rather than on Hacker News
+- **favorite is on everything there is to keep**, rather than on Hacker News
   alone: every source's discussions, in both the front pages and the queue, and
   every comment in them. A favorited item now says **unfavorite** wherever it
-  appears, which it did not when the label was still asking Hacker News.
+  appears, which it did not when the label was still asking Hacker News.
 
 - A page carrying several discussions is favorited as a page. **favorite** sits
   beside watch above them, keeping the page rather than picking one of them.
@@ -1633,7 +1663,7 @@ use to detect updates, so every release bumps it.
 
 ### Removed
 
-- **flag** is gone. It was Hacker News's alone, it could not be offered anywhere
+- **flag** is gone. It was Hacker News's alone, it could not be offered anywhere
   else, and it is the one thing here that asks a moderator to act rather than
   keeping something for you. Flagging is where it always was, on the item's own
   page.
@@ -1720,7 +1750,7 @@ use to detect updates, so every release bumps it.
   `>` line at the top, so changing your mind about which words you meant is
   editing a line, and the highlight moves to the words you left in it.
 
-- **Enhanced PDF support**, off by default, under Enable annotations. Turned on,
+- **Enhanced PDF support**, off by default, under Enable annotations. Turned on,
   it covers Chrome's and Safari's PDF viewer with
   [pdf.js](https://mozilla.github.io/pdf.js/), which is what lets a quoted
   passage be highlighted on the PDF itself. It is a choice rather than the
@@ -1743,7 +1773,7 @@ use to detect updates, so every release bumps it.
   comments from lemmy.world, quotes were the commonest thing in them, ahead of
   emphasis and links. (#96)
 
-- Ticking Enable annotations, Enhanced PDF support or Enable notepad folds that
+- Ticking Enable annotations, Enhanced PDF support or Enable notepad folds that
   setting's explanation away, the way a source's caveat already does — the tick
   is the acknowledgement.
 
@@ -1788,7 +1818,7 @@ use to detect updates, so every release bumps it.
   password or token is read, stored or moved.
 
 - What you are able to do is read off the page rather than assumed. A subreddit
-  with downvotes turned off, a locked thread, or a karma threshold on Hacker News
+  with downvotes turned off, a locked thread, or a karma threshold on Hacker News
   means the arrow is not offered — because the site did not offer it, not because
   a table somewhere says the site supports voting.
 
@@ -1886,7 +1916,7 @@ use to detect updates, so every release bumps it.
   URL, so anyone who had set one got a link to nobody.
 
 - Favouriting and flagging are offered only where the source has them. Both were
-  shown for any source that could vote, which was true of Hacker News alone until
+  shown for any source that could vote, which was true of Hacker News alone until
   it wasn't.
 
 - Annotations made on a different copy of a document no longer appear. Asked
@@ -1914,7 +1944,7 @@ use to detect updates, so every release bumps it.
   ft.com's paywalled render names the bare address and its subscriber render
   names the reader's own address back with the syndication tag still on it, so
   the tracking list gains families — `utm_*`, `syn-*` — for the names whose
-  suffix is per link. The two catch what the other cannot. Hacker News' own canonical keeps `?id=`, so nothing is stripped there;
+  suffix is per link. The two catch what the other cannot. Hacker News' own canonical keeps `?id=`, so nothing is stripped there;
   arXiv's `og:url` names `…v1` to a reader standing on the version-less address
   and is turned down. (#82)
 - **A queued article counts as read however you got back to it.** The queue was
@@ -1931,7 +1961,7 @@ use to detect updates, so every release bumps it.
   the panel did not open itself, and a comment count pressed to read what was
   said about a story landed on it in silence.
 - **Submitting sends the address the page claims, not the one you arrived
-  with.** Hacker News tells a resubmission from a new story by comparing the URL
+  with.** Hacker News tells a resubmission from a new story by comparing the URL
   it is handed, and a campaign parameter walks straight past that. What that
   produces is not a rejected submission but an accepted one: a second thread for
   an article that already had a thread. The field is still yours to edit.
@@ -2001,7 +2031,7 @@ use to detect updates, so every release bumps it.
   rather than as part of the count.
 - **A front-page row's comment count goes to the page it counts**, and opens the
   conversation when it gets there. The title reads the article and the count
-  reads what was said about it, the way a Hacker News row splits the same two.
+  reads what was said about it, the way a Hacker News row splits the same two.
   The panel only ever shows the discussion of the page behind it, so there is
   nowhere else for a conversation to be read from.
 - That count is marked as a floor — `2,419+`. A row knows what the front pages
@@ -2029,10 +2059,10 @@ use to detect updates, so every release bumps it.
 - The panel stops saying it is loading once it has. Opening a conversation from
   a front-page count, changing the sort, or switching a source off left the
   subtitle claiming to load for as long as the panel stayed open.
-- Opening a queued story from another source no longer offers a Hacker News
+- Opening a queued story from another source no longer offers a Hacker News
   discussion that does not exist. The strip at the foot of a thread recorded
   which page it was opening but not where it came from, so a Lobsters id could
-  be read back as a Hacker News item number.
+  be read back as a Hacker News item number.
 - Two submissions of one page are told apart wherever the panel opens them. The
   date that separates them was added on arrival but not when a conversation is
   opened from a front-page count, so both pills read "HN".
@@ -2042,23 +2072,22 @@ use to detect updates, so every release bumps it.
 ### Added
 
 - **The front page behind the wordmark is every source's front page, merged.**
-  It was Hacker News' own, which was the right answer while Hacker News was the
-  only source that had one. Now Hacker News, Reddit, Lobsters and Lemmy each
+  It was Hacker News' own, which was the right answer while Hacker News was the
+  only source that had one. Now Hacker News, Reddit, Lobsters and Lemmy each
   contribute their own ranking and the panel blends them — by the same
   rank-fraction over log-scaled standing that already merges a page's comments,
   because a front page is already that source's own ranking. Bluesky and
   Wikipedia do not appear: neither ranks URLs, so neither has a front page to
   contribute. A byline under the tab names which ones went in.
-- A page on more than one front page is one row, not two. Hacker News and
+- A page on more than one front page is one row, not two. Hacker News and
   Lobsters shared three of twenty-five URLs on the day this was built, which as
   two adjacent identical titles read as the panel repeating itself. The merged
   row carries a comment link per source — `HN 211 comments · Lobsters 24
-  comments` — and never adds the counts up, because a Reddit number and a Hacker
-  News number are not the same unit.
+  comments` — and never adds the counts up, because a Reddit number and a Hacker News number are not the same unit.
 
 ### Changed
 
-- The queue identifies an article by its address rather than by its Hacker News
+- The queue identifies an article by its address rather than by its Hacker News
   item number, so a page can be queued from any source and queueing something
   already in the list is a no-op rather than a second copy. Existing queues are
   migrated in place on first run; nothing is re-fetched and nothing is lost.
@@ -2066,13 +2095,12 @@ use to detect updates, so every release bumps it.
   Their front pages are mostly native content — measured at 80% of `r/popular`,
   44 of 100 being bare images — and a reading list of memes is not what the
   wordmark is for. Videos and articles hosted anywhere else are kept.
-- Flag and favorite appear only on Hacker News rows, which are the only ones
+- Flag and favorite appear only on Hacker News rows, which are the only ones
   where they could do anything. Every source already declared its capabilities;
   the front page now reads them.
-- The front page tab reads "front pages", and the wordmark's tooltip "front
-  pages and your queue". Both said Hacker News — and lower case now that the
+- The front page tab reads "front pages", and the wordmark's tooltip "front pages and your queue". Both said Hacker News — and lower case now that the
   name has gone, matching `queue` beside it.
-- Queueing your first story slides the queue tab out from under "front pages"
+- Queueing your first story slides the queue tab out from under "front pages"
   and pushes it across, rather than snapping a second tab into a row that had
   one. Clearing the last one slides it away again. Only for something you just
   did: opening the panel on a queue that already has entries shows the tab
@@ -2083,13 +2111,12 @@ use to detect updates, so every release bumps it.
 ### Fixed
 
 - Clicking a non-Hacker-News story and then losing the network no longer offers a
-  Hacker News discussion that does not exist. The record of what you clicked is
-  recovered as a Hacker News item reference when discovery comes back empty, and
-  it now records which source it came from so only Hacker News rows are recovered
+  Hacker News discussion that does not exist. The record of what you clicked is
+  recovered as a Hacker News item reference when discovery comes back empty, and
+  it now records which source it came from so only Hacker News rows are recovered
   that way.
-- A queued story from another source no longer costs a wasted Hacker News request
-  every time the queue is drawn. The refresh asks Hacker News only about Hacker
-  News entries; the rest keep the numbers they were saved with.
+- A queued story from another source no longer costs a wasted Hacker News request
+  every time the queue is drawn. The refresh asks Hacker News only about Hacker News entries; the rest keep the numbers they were saved with.
 
 ## [1.6.3] — 2026-08-06
 
@@ -2115,7 +2142,7 @@ use to detect updates, so every release bumps it.
 ### Changed
 
 - **The blended list knows what year it is.** Opening the panel on the Wikipedia
-  article for Western Sahara — posted to Hacker News the day before — led with a
+  article for Western Sahara — posted to Hacker News the day before — led with a
   comment from September 2013, and with fourteen more from the same thread before
   the current one got a word in. The merge ranked each comment by where it sat in
   its own discussion and nothing else, so a 284-comment thread from 2013 beat a
@@ -2126,7 +2153,7 @@ use to detect updates, so every release bumps it.
   and 1,916 votes, and it is still the best conversation about the page. It keeps
   its place in the list and most of the list — it just no longer owns the top of
   it. Votes count on a log scale, because 1,916 upvotes in a default subreddit
-  and 102 points on Hacker News were never the same currency, and the discount for
+  and 102 points on Hacker News were never the same currency, and the discount for
   age is gentle enough that a genuinely good old thread outranks a mediocre new
   one.
 
@@ -2138,8 +2165,7 @@ use to detect updates, so every release bumps it.
   is bookended, so you can see where it starts and ends, and several sites
   talking about the same page on the same day all sit inside it.
 
-- **The discussion you came from goes first among those.** Arriving from Hacker
-  News puts the Hacker News thread at the top, and the same for Reddit and
+- **The discussion you came from goes first among those.** Arriving from Hacker News puts the Hacker News thread at the top, and the same for Reddit and
   Bluesky.
 
 - **The submission date only appears where it is still telling you something.**
@@ -2153,7 +2179,7 @@ use to detect updates, so every release bumps it.
 - **Blended comments arrive in the order they were ranked.** They were rendered
   five at a time and appended in whichever order the sites answered — and they
   do not answer at the same speed, since Reddit sends a whole thread at once
-  while Hacker News is asked for one comment at a time. A comment could land up
+  while Hacker News is asked for one comment at a time. A comment could land up
   to four places from where the ranking put it. Never visible on a page with a
   single discussion, because there every answer takes equally long.
 
@@ -2175,7 +2201,7 @@ use to detect updates, so every release bumps it.
   invented. Newest and Oldest ignore which site a comment came from and order
   everything by time.
 
-  There is no "Score". Hacker News publishes no comment scores at any endpoint,
+  There is no "Score". Hacker News publishes no comment scores at any endpoint,
   so one would have to be invented for a third of the sources. Best already is
   the score-ordered blend, honestly named: each site's own ranking, read as a
   position rather than a number.
@@ -2237,10 +2263,10 @@ use to detect updates, so every release bumps it.
 ### Fixed
 
 - **Posting a comment no longer warns that it might not have worked.** A comment
-  that went through could still come back with "Submitted, but Hacker News did
+  that went through could still come back with "Submitted, but Hacker News did
   not show the comment back" — about one in seven of them. The check compares
   what you typed against what the page shows, and there were two differences it
-  did not account for: Hacker News renders a blank line as a paragraph, which
+  did not account for: Hacker News renders a blank line as a paragraph, which
   runs the words either side of it together, and it turns `*emphasis*` into
   italics, which drops the asterisks. Both sides are now compared on the same
   terms. Measured across 468 real comments: 65 of them would have been reported
@@ -2253,7 +2279,7 @@ use to detect updates, so every release bumps it.
 - **HNewhere is now Backchannel.** The name described a product that checked one
   site. This one asks several, so it is named for what it shows rather than where
   it looked: the conversation running alongside the page you are reading. The
-  accent color moves off Hacker News orange for the same reason — the panel
+  accent color moves off Hacker News orange for the same reason — the panel
   speaks for several sources now and should not wear any one of their colors —
   and the floating button reads **BC** rather than **HN**.
 
@@ -2269,12 +2295,12 @@ use to detect updates, so every release bumps it.
 
 ### Added
 
-- **Reddit, and a source picker.** HNewhere told you what Hacker News said about
-  a page. It now tells you what the internet said: Hacker News and Reddit —
+- **Reddit, and a source picker.** HNewhere told you what Hacker News said about
+  a page. It now tells you what the internet said: Hacker News and Reddit —
   every subreddit a link was posted to — merged into one conversation rather
-  than presented as two feeds. Each source is a checkbox, including Hacker News
+  than presented as two feeds. Each source is a checkbox, including Hacker News
   itself, so a reader who wants only one gets only one. A fresh install opens on
-  the picker; an existing install keeps Hacker News on and sees no change.
+  the picker; an existing install keeps Hacker News on and sees no change.
 - **Reddit is marked BETA**, the way annotations are. It works, and there is more
   of it to come — no front page, no writing, and long threads fill in on request
   rather than arriving whole.
@@ -2286,7 +2312,7 @@ use to detect updates, so every release bumps it.
   stated where the checkbox is rather than in a document nobody opens. Nothing is ever posted to Reddit on your behalf.
   When reddit.com declines the request the sidebar falls back to a cookie-free
   archive mirror, so the comments still arrive.
-- **The floating button's label is yours.** It read `HN` when Hacker News was the
+- **The floating button's label is yours.** It read `HN` when Hacker News was the
   only source and `BC` after the rename, and neither is right for everyone. The
   preview in the settings panel is now the field: click it and type one or two
   characters. It is the preview precisely so the mark is edited on the thing it
@@ -2314,7 +2340,7 @@ use to detect updates, so every release bumps it.
 - **A single blended thread.** Top-level comments from every discussion are
   interleaved by where each one ranks within its own discussion, so a big thread
   contributes proportionally more without an upvote ever being compared to a
-  point — Hacker News publishes no comment scores, so that comparison was never
+  point — Hacker News publishes no comment scores, so that comparison was never
   available. Reply trees stay intact beneath their own root, and the source sits
   in the byline at the weight of the timestamp: available, not announced.
 
@@ -2330,20 +2356,20 @@ use to detect updates, so every release bumps it.
   long thread.
 - **Reply, flag and favorite no longer appear on comments that cannot take
   them.** They are offered where the source supports them and nowhere else; on
-  Reddit they would have acted on an item id Hacker News never issued.
+  Reddit they would have acted on an item id Hacker News never issued.
 - **A switched-off source stays off, whichever way the panel is opened.** The URL
-  lookup consulted your sources; arriving from Hacker News, opening something
+  lookup consulted your sources; arriving from Hacker News, opening something
   from the queue and reopening a thread after commenting did not, so a source you
   had turned off could still fill the sidebar. Every path goes through one check
   now.
-- **The front page is only offered when Hacker News is on.** It is Hacker News'
+- **The front page is only offered when Hacker News is on.** It is Hacker News'
   own page, so with that source off the tab goes — and with an empty queue there
   is nothing behind the wordmark at all, so the wordmark goes too rather than
   opening onto an empty list.
 - **A single discussion gets a single heading.** The page header, a source pill
   and the submission's own line were three headings saying one thing. With one
   discussion the page header steps aside entirely and the submission reads the
-  way a Hacker News story does: the arrow, the title and the subline as one
+  way a Hacker News story does: the arrow, the title and the subline as one
   unit, count and all.
 - **A failed lookup is no longer cached as "no discussion".** `request()`
   resolves null on an error, a timeout or a bad response, so a moment offline
@@ -2386,7 +2412,7 @@ use to detect updates, so every release bumps it.
 - **The accent is green.** `#237140`, in place of the indigo the rename first
   landed on. The indigo said nothing about conversation.
 - **The front page tab says whose front page it is.** It read *front page*,
-  which was unambiguous while Hacker News was the only source. The queue beside
+  which was unambiguous while Hacker News was the only source. The queue beside
   it stays unqualified, because it is not any source's.
 - **The discussion count is gone from under the wordmark.** It counted
   submissions when the panel had no other way to say there were several. The
@@ -2420,22 +2446,22 @@ use to detect updates, so every release bumps it.
 
 ### Added
 
-- **The sidebar can show the Hacker News front page.** Reading an article with
+- **The sidebar can show the Hacker News front page.** Reading an article with
   HNewhere open, you could reach its discussion and nothing else; deciding what
-  to read next still meant going back to Hacker News. The wordmark in the panel
+  to read next still meant going back to Hacker News. The wordmark in the panel
   header is now the way there, and the way back, with the list paged the way
-  Hacker News pages its own.
+  Hacker News pages its own.
 
-  It leads to **Read more** rather than to Hacker News, because Hacker News is
+  It leads to **Read more** rather than to Hacker News, because Hacker News is
   only one of the two things behind it. Your queue is the other, and it is the
   half you put there yourself. An ellipsis after the wordmark says the title can
   be pressed at all — it has no border, no background, and on a touch screen no
   hover to discover it with.
 
-  A story opened from that list is opened the way one clicked on Hacker News is.
+  A story opened from that list is opened the way one clicked on Hacker News is.
   The panel records the click exactly as it does while you are on HN, so the page
   you land on reads it as an arrival — which means automatic opening applies, and
-  so does *Only when arriving from Hacker News*, without either of them knowing
+  so does *Only when arriving from Hacker News*, without either of them knowing
   this path exists.
 
   The discussion you were reading is hidden while you browse rather than thrown
@@ -2454,10 +2480,10 @@ use to detect updates, so every release bumps it.
   that way leaves the page as it found it: minimizing gives back the grey submit
   button and records no preference about a discussion that does not exist.
 
-  The first page offers *More*, which is what Hacker News offers. Deeper in, where
+  The first page offers *More*, which is what Hacker News offers. Deeper in, where
   there is a way back as well, the row says which page you are on.
 
-- **A reading queue.** *queue* on any story — on Hacker News itself, in its own
+- **A reading queue.** *queue* on any story — on Hacker News itself, in its own
   row in front of *flag*, or on any row in the sidebar's front page — puts it in
   a list, and the list is waiting under *Queue* when you want it. At the foot of
   a finished discussion, where the question actually gets asked, a strip offers
@@ -2469,7 +2495,7 @@ use to detect updates, so every release bumps it.
   eaten cannot be corrected, so read entries dim and sink beneath the unread ones
   until you clear them.
 
-  **The queue is offered on Hacker News itself**, once there is something in it.
+  **The queue is offered on Hacker News itself**, once there is something in it.
   That is where a queue gets filled, often across several pages, and what you do
   next is read it — which otherwise meant remembering what you had put in. The
   button appears there and opens the panel on the queue. Nothing sits behind the
@@ -2492,7 +2518,7 @@ use to detect updates, so every release bumps it.
   of comments, the ones that quote nothing. *focus*, beside *reply*, shows a
   comment's chain up to the root and everything below it.
 
-  That is Hacker News' own `parent`, `root` and `context` in a single view, and
+  That is Hacker News' own `parent`, `root` and `context` in a single view, and
   it is the same view a quoted passage opens rather than one that resembles it:
   both ask for a comment's ancestors and its whole subtree, and both return you
   to where you were reading when you leave.
@@ -2502,14 +2528,14 @@ use to detect updates, so every release bumps it.
   named by its author, because it is the comment itself.
 
 - **Favorite and flag, on stories and on comments.** The sidebar offered one of
-  Hacker News' actions and read as though it offered them all.
+  Hacker News' actions and read as though it offered them all.
 
   These take a different route from the rest of the panel. Everything HNewhere
-  reads, it reads over a cross-site request, and the browser strips Hacker News'
+  reads, it reads over a cross-site request, and the browser strips Hacker News'
   session cookie from those — so the page that comes back is a logged-out one,
   which renders no favorite link and no flag link at all. There is no state to
   read and nothing to act with. Both therefore travel the same way a vote does,
-  through a brief popup on Hacker News itself, which is the only place the truth
+  through a brief popup on Hacker News itself, which is the only place the truth
   is visible; what it reports is what the panel remembers.
 
   Both links appear everywhere, because the panel cannot know in advance whether
@@ -2521,13 +2547,13 @@ use to detect updates, so every release bumps it.
 ### Changed
 
 - **A hatched band marks where the panel changes subject.** An article submitted
-  to Hacker News more than once shows each submission in turn, and the break
+  to Hacker News more than once shows each submission in turn, and the break
   between them was a hairline — which says "and" where it means "different thing
   now". It is diagonal hatching now, running the full width of the panel rather
   than stopping short of its edges, and the same band separates a finished thread
   from what to read next.
 
-- **The line under a story title follows Hacker News' order and punctuation.**
+- **The line under a story title follows Hacker News' order and punctuation.**
   It reads `214 points by someone 2 hours ago | flag | favorite | 21 comments`,
   where HN reads `118 points by eniac111 6 hours ago | flag | hide | past |
   favorite | 17 comments`. Ours had a bar between the author and the age, where
@@ -2538,7 +2564,7 @@ use to detect updates, so every release bumps it.
   This is a change to a line that was already there — the story header at the
   top of every discussion — rather than only to the new front page.
 
-- **The front page is set to Hacker News' own measure.** A story there runs 35px
+- **The front page is set to Hacker News' own measure.** A story there runs 35px
   from one title to the next: a title line, a subtext line, and a five-pixel
   spacer. Ours ran 65. Most of the difference was that the story header's type is
   sized for the top of a discussion, where the story is the headline and the only
@@ -2546,7 +2572,7 @@ use to detect updates, so every release bumps it.
   now measures 35.4px, and the separator between links carries HN's own spacing
   rather than twice it.
 
-  Titles still wrap where Hacker News' would not. That is a 420px panel against a
+  Titles still wrap where Hacker News' would not. That is a 420px panel against a
   1200px page, and it is the panel's width rather than its spacing.
 
 ### Fixed
@@ -2564,7 +2590,7 @@ use to detect updates, so every release bumps it.
   already there and stopped. The two walks are asking different questions, and
   they now keep separate answers.
 
-- **Discussions on X are found again.** X renamed itself and Hacker News did
+- **Discussions on X are found again.** X renamed itself and Hacker News did
   not. HN holds years of submissions under `twitter.com` while the site now
   serves `x.com`, and the lookup asked for the address it was standing on — so a
   tweet with a couple of hundred comments waiting on it came up empty and got a
@@ -2588,8 +2614,8 @@ use to detect updates, so every release bumps it.
 
 ### Added
 
-- Automatic opening can be narrowed to pages you reached from Hacker News.
-  **Only when arriving from Hacker News** appears under *Automatically open the
+- Automatic opening can be narrowed to pages you reached from Hacker News.
+  **Only when arriving from Hacker News** appears under *Automatically open the
   sidebar when a discussion exists* once that is on. It is off by default, so an
   existing setup keeps opening everywhere until you say otherwise.
 
@@ -2657,7 +2683,7 @@ use to detect updates, so every release bumps it.
   stopped it opening there again, whatever the setting said, with nothing on
   screen to say so and no way back except opening it by hand. A setting that
   reads *automatically open the sidebar when a discussion exists* has to do that,
-  and *only when arriving from Hacker News* narrows the same sentence rather than
+  and *only when arriving from Hacker News* narrows the same sentence rather than
   making a second rule. Shutting a panel on one visit is not a standing objection
   to a preference you have since expressed.
 
@@ -2701,7 +2727,7 @@ use to detect updates, so every release bumps it.
   it reports no box at all, which would otherwise satisfy the test.
 - Code blocks in comments wrap instead of running off the side of the panel. A
   `<pre>` does not wrap at any width by default, so a code block — or a quote
-  someone marked by indenting it, which Hacker News turns into one — pushed 697
+  someone marked by indenting it, which Hacker News turns into one — pushed 697
   pixels of content through a 419 pixel panel and took the comment's own edge with
   it. It now wraps while keeping the indentation and line breaks that made the
   author reach for a code block, and anything that still cannot break scrolls
@@ -2729,7 +2755,7 @@ use to detect updates, so every release bumps it.
   article words it rather than whichever excerpt happened to be found first.
   Quotes that merely sit end to end stay separate, because two adjacent sentences
   are two things to talk about.
-- Quoting without Hacker News' `>` marker is now recognised as quoting. HN has no
+- Quoting without Hacker News' `>` marker is now recognised as quoting. HN has no
   quote syntax — `>` is a convention, not markup — so a commenter who wraps the
   passage in quotation marks instead, or pastes it as its own paragraph with no
   marks at all, was quoting just as plainly and had it rendered as their own words.
@@ -2778,7 +2804,7 @@ use to detect updates, so every release bumps it.
   multi-paragraph comment. The same thing set the gap under a comment's byline,
   from 4px to 8px depending on what it opened with.
 
-  The cause is that Hacker News opens a comment's first paragraph without a `<p>`
+  The cause is that Hacker News opens a comment's first paragraph without a `<p>`
   and never closes the ones that follow, so the opening paragraph arrives as loose
   text rather than an element — as does the reply beneath a quote, which is what
   "> quoted line" plus an answer produces. Loose text becomes an anonymous block:
@@ -2844,7 +2870,7 @@ use to detect updates, so every release bumps it.
   indent into a column that narrows at every level, which is the thing the indent
   spends horizontal space to avoid.
 - A story's opening paragraph ran into the one below it, with no break between
-  them. Hacker News does not wrap the first paragraph of a story's text — it
+  them. Hacker News does not wrap the first paragraph of a story's text — it
   emits it as bare text and wraps only the ones after it — so a rule zeroing the
   top margin of `p:first-child` was never matching the first paragraph at all. It
   matched the second, and closed the gap the reader needed. The comment renderer
@@ -2854,7 +2880,7 @@ use to detect updates, so every release bumps it.
 
 ### Added
 
-- **Quotes render as quotes.** Hacker News has no quote syntax — commenters start
+- **Quotes render as quotes.** Hacker News has no quote syntax — commenters start
   a line with `>` and HN prints the marker literally, so quoted text is styled
   exactly like the commenter's own words. Consecutive `>` lines are now folded
   into a real blockquote, set in italics behind a ❛ in the gutter, with the
@@ -2879,7 +2905,7 @@ use to detect updates, so every release bumps it.
 
 ### Changed
 
-- **Focused discussion reads as part of Hacker News.** Its header uses HN's own
+- **Focused discussion reads as part of Hacker News.** Its header uses HN's own
   pipe-separated meta form — `Focused discussion | show all comments` —
   left-aligned, in sentence case, with the close as a text link rather than a
   floating `×`. The quote sits at the comment text size, opened and closed by

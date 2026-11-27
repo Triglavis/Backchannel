@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { launchApp, STORIES, waitFor } from "./harness.mjs";
+import { fillComposer, launchApp, showAllFrontPages, sidebarComposer, STORIES, waitFor } from "./harness.mjs";
 import { discussionFixture } from "./fixtures.mjs";
 
 const url = STORIES[0].url;
@@ -25,21 +25,22 @@ for (const mode of ["partial", "empty", "rate-limit"]) {
     });
     try {
       await app.page.goto(url);
-      assert(await waitFor(async () => await app.page.locator('#comments-content .page-header-disclosure').count() > 0 && await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000), "missing sources menu after loading");
+      const disclosure = app.page.locator('#sidebar-discussion-meta .page-header-disclosure');
+      assert(await waitFor(async () => await disclosure.count() > 0 && await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000), "missing sources menu after loading");
       assert.equal(await app.page.locator("#comments-content .discussion-load-warning").count(), 0, "load errors should not cover the discussion");
-      const disclosure = app.page.locator('#comments-content .page-header-disclosure');
-      assert.match(await disclosure.textContent(), /6 discussions/, "the discussion count has no failure marker");
+      assert.match(await disclosure.getAttribute('title'), /6 discussions/, "the discussion count has no failure marker");
       assert.doesNotMatch(await disclosure.getAttribute('aria-label') || '', /could not be loaded/i, "internal load diagnostics are not announced to screen readers");
       await disclosure.click();
-      assert.equal(Math.round((await app.page.locator('#comments-content .source-menu').boundingBox()).width), 300, 'the Sources menu is 300px wide in Sidebar');
+      const sources = app.page.locator('#source-menu');
+      assert.equal(Math.round((await sources.boundingBox()).width), 300, 'the Sources menu is 300px wide in Sidebar');
       assert(await waitFor(async () => {
-        const menu = await app.page.locator('#comments-content .source-menu').boundingBox();
+        const menu = await sources.boundingBox();
         const panel = await app.page.locator('#panel').boundingBox();
         return menu.x >= panel.x && menu.x + menu.width <= panel.x + panel.width;
       }, 3000), 'the menu stays inside the panel');
-      const failed = app.page.locator('#comments-content .source-menu-entry').filter({ has: app.page.locator('[data-discussion-key="reddit:fixture0"]') });
+      const failed = sources.locator('.source-menu-entry').filter({ has: app.page.locator('[data-discussion-key="reddit:fixture0"]') });
       assert.equal(await failed.count(), 1, 'the source still has a reported nonzero comment total');
-      assert.equal(await app.page.locator('#comments-content .source-menu-entry .discussion-source-status').count(), 0, "load diagnostics are not added to the source rows");
+      assert.equal(await sources.locator('.discussion-source-status').count(), 0, "load diagnostics are not added to the source rows");
       if (mode === "rate-limit") {
         assert(!app.requests.some(({ url }) => isMain(url, main.id)), "429 must not trigger an immediate fallback retry");
       }
@@ -203,8 +204,8 @@ test("the bird loader reports completed discussions while slower sources are pen
       }));
     });
     assert.deepEqual(art, [208, 208, 208, 208, 208, 208, 108], 'both promotional poses and the speech bubble are available without a fetch');
-    assert((await app.page.locator('#comments-content .page-header-title').textContent()).length > 0, "the known article title appears immediately");
-    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
+    assert(await app.page.locator('#sidebar-discussion-meta').getByRole('button', {name:'Sources', exact:true}).isVisible(), "the known sources are available while comments load");
+    const write = (await sidebarComposer(app.page)).getByRole('textbox');
     await write.waitFor();
     assert.equal(await app.page.locator('#comments-content .compose-box').count(), 0);
     const area = await app.page.locator('#comments').boundingBox();
@@ -297,7 +298,7 @@ test("Reader shows the bird loader and aligned loading hint without a progress b
     await sources.click();
     await menu.waitFor({ state: 'hidden' });
     assert(await app.page.locator('#app-discussion-compose .compose-send-comment').isDisabled(), 'submitting remains disabled while discovering discussions');
-    await app.page.locator('.compose-box .composer-text').fill('Reader draft while loading');
+    await fillComposer(app.page.locator('.compose-box .composer-text'), 'Reader draft while loading');
     assert.doesNotMatch(await app.page.locator('#comments-content').textContent(), /Finding what people said/);
     const strip = app.page.locator('#panel.app-docked > .discussion-progress-strip');
     assert(await waitFor(async () => await strip.count() === 1, 10000), "progress appears directly below the Discussion header");
@@ -318,7 +319,7 @@ test("Reader shows the bird loader and aligned loading hint without a progress b
     assert.notEqual(await strip.locator('.discussion-progress-label').evaluate((element) => getComputedStyle(element).animationName), 'none', 'the Reader loading hint glimmers');
     const composer = app.page.locator('#panel .compose-box');
     assert.equal(await composer.count(), 1);
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'Reader draft while loading', 'the early draft is kept when discovered sources arrive');
+    assert.equal(await composer.locator('.composer-text').innerText(), 'Reader draft while loading', 'the early draft is kept when discovered sources arrive');
     await app.page.evaluate(() => window.__releaseFixtureHN());
     assert(await waitFor(async()=>await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').count()>0,10000),'a ready discussion appears before slower sources finish');
     assert(!(await composer.locator('.compose-send-note').isDisabled()),'notes become available with the ready discussion');
@@ -331,7 +332,7 @@ test("Reader shows the bird loader and aligned loading hint without a progress b
     assert.equal(await app.page.locator('#comments-content .discussion-matrix-reveal').count(), 0, 'Reader uses no scrambled visual copies');
     assert(await waitFor(async () => await strip.count() === 0, 20000), "progress slides away when requests finish");
     assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 15000));
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'Reader draft while loading');
+    assert.equal(await composer.locator('.composer-text').innerText(), 'Reader draft while loading');
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();
@@ -369,7 +370,7 @@ test("Reader keeps saved comments available while checking revisited articles", 
   const app = await launchApp({ sharedStore: true, settings: { sources: { hn: true }, frontPageMode: "sources", updateCheck: false } });
   try {
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-rail [data-app-view="all"]').click();
+    await showAllFrontPages(app.page);
     const first = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[0].url}"]`).first();
     const second = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[1].url}"]`).first();
     await first.click();
@@ -456,11 +457,11 @@ test("Reader retains an early note draft when a newly discovered source accepts 
     await app.page.goto('https://backchnnl.app/');
     await app.page.locator('#app-list-body .browse-title-link', { hasText: story.title }).first().click();
     const composer = app.page.locator('#panel .compose-box');
-    await composer.locator('.composer-text').fill('A note drafted while sources load');
-    assert.equal(await composer.locator('.composer-text').inputValue(),'A note drafted while sources load');
+    await fillComposer(composer.locator('.composer-text'), 'A note drafted while sources load');
+    assert.equal(await composer.locator('.composer-text').innerText(),'A note drafted while sources load');
     assert(await waitFor(async () => await composer.locator('.compose-send-comment').isVisible(), 15000), 'the discovered Hacker News discussion offers commenting');
     assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 15000));
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'A note drafted while sources load');
+    assert.equal(await composer.locator('.composer-text').innerText(), 'A note drafted while sources load');
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();
@@ -489,17 +490,17 @@ test("Reader retains an early draft while a zero-count feed source is checked", 
     await app.page.locator('#app-list-body .browse-title-link', { hasText: story.title }).first().click();
     assert.doesNotMatch(await app.page.locator('#app-discussion-meta .source-menu').textContent(), /Bluesky/, 'a provisional source with no comments is not selectable');
     const composer = app.page.locator('#panel .compose-box');
-    await composer.locator('.composer-text').fill('A draft from a Bluesky feed');
+    await fillComposer(composer.locator('.composer-text'), 'A draft from a Bluesky feed');
     assert(await waitFor(async()=>await app.page.locator('#comments-content .comment[data-comment-id^="bsky:"]').count()>0,15000),'the feed post resolves into its collective discussion');
     assert(await waitFor(async()=>/Bluesky/.test(await app.page.locator('#app-discussion-meta .source-menu').textContent()),5000),'the source becomes selectable once real posts arrive');
     assert(await waitFor(async () => await composer.locator('.compose-send-comment').isVisible(), 15000));
     assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 15000));
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'A draft from a Bluesky feed');
+    assert.equal(await composer.locator('.composer-text').innerText(), 'A draft from a Bluesky feed');
     await app.page.locator('#comment-sort').click();
     await app.page.getByRole('menuitemradio', { name: 'Newest', exact: true }).click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .discussion-loading').count() === 1, 5000), 'changing sort refreshes the discussion');
     assert(await waitFor(async () => !(await composer.locator('.compose-send-comment').isDisabled()), 15000));
-    assert.equal(await composer.locator('.composer-text').inputValue(), 'A draft from a Bluesky feed', 'sorting keeps the draft after the collective discussion is resolved');
+    assert.equal(await composer.locator('.composer-text').innerText(), 'A draft from a Bluesky feed', 'sorting keeps the draft after the collective discussion is resolved');
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();
@@ -520,7 +521,7 @@ test("Reader retains more than twenty saved discussions while rechecking an arti
   });
   try {
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-rail [data-app-view="all"]').click();
+    await showAllFrontPages(app.page);
     const first = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[0].url}"]`).first();
     const second = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[1].url}"]`).first();
     await first.click();
