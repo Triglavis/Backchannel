@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {launchApp, STORIES} from './harness.mjs';
+import {launchApp, STORIES, waitFor} from './harness.mjs';
 
 const source = await readFile(process.env.BC_SCRIPT || new URL('../../HNewhere.user.js', import.meta.url), 'utf8');
+const settingsFrameURL = 'https://backchnnl.app/sidebar-settings';
 const installedVersion = /^\/\/ @version\s+(\S+)/m.exec(source)?.[1];
 assert(installedVersion, 'the fixture uses the script version from the installed build');
 const newerVersion = `${Number(installedVersion.split('.')[0]) + 1}.0.0`;
@@ -27,7 +28,7 @@ async function openGeneral({reader, width, theme, found}) {
     handler: 'Userscripts',
     sharedStore: true,
     viewport: {width, height: 900},
-    ...(reader ? {} : {appHost: new URL(STORIES[0].url).hostname}),
+    ...(reader ? {} : {appHost: new URL(STORIES[0].url).hostname, contentPages: [settingsFrameURL]}),
     settings: {sources: {hn: true}, frontPageMode: 'sources', theme, autoOpenSidebar: !reader, updateCheck: false},
     values: {'HNewhere:update_check': {checkedAt: Date.now(), tipShown: found ? newerVersion : '', releases: found ? [release] : []}},
   });
@@ -36,6 +37,13 @@ async function openGeneral({reader, width, theme, found}) {
     if (message.type() === 'error') app.consoleErrors.push(message.text());
   });
   try {
+    if (!reader) {
+      await app.context.route(settingsFrameURL, route => route.fulfill({
+        contentType: 'text/html',
+        body: '<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body></body></html>',
+      }));
+      await app.context.route('https://backchnnl.app/account/status', route => route.fulfill({json: {available: true}}));
+    }
     await app.page.goto(reader ? 'https://backchnnl.app/' : STORIES[0].url);
     await app.page.locator('#settings-toggle').click();
     await app.page.locator('[data-settings-section="general"]').click();
@@ -186,7 +194,10 @@ for (const fixture of cases.slice(0, 2).concat(cases.at(-1))) {
       await account.waitFor();
       assert.equal(await tab.getAttribute('aria-current'), 'page');
       assert.equal(await modal.locator('#app-settings-heading').innerText(), 'Account');
-      assert(await account.getByText('Sync your reading experience across all your devices.',{exact:true}).isVisible());
+      const getFrame = () => app.page.frame('backchannel-sidebar-settings');
+      if (!fixture.reader) assert(await waitFor(getFrame));
+      const details = fixture.reader ? account : getFrame();
+      await details.getByText('Sync your reading experience across all your devices.', {exact: true}).waitFor();
       assert.equal(await modal.locator('#setting-source-refresh').isVisible(), false);
       await modal.getByRole('button', {name: 'General', exact: true}).click();
       await modal.locator('#settings-cache-clear').waitFor();

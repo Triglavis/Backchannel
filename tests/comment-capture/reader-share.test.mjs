@@ -18,7 +18,7 @@ const selected = [
 
 async function shareApp(options = {}) {
 	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
-	const end = source.lastIndexOf("\n\tif (window.top === window.self)");
+	const end = source.lastIndexOf("\n})();");
 	assert(end >= 0);
 	const hook = '\n\twindow.__openReadingListShare = typeof openReadingListShare === "function" && openReadingListShare;';
 	return launchApp({
