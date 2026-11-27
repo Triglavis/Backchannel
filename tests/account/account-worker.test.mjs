@@ -1229,8 +1229,12 @@ test('Reader settings verify account email, connect two devices, resolve edits, 
   assert.equal(phone.store.get(notesKey).notes[0].exact, note.exact);
   await phone.panel.getByRole('button',{name:'Sync now',exact:true}).waitFor();
   assert.equal(await phone.panel.locator('#account-profile-avatar').getAttribute('data-birb-shape'),'long-bill');
-  assert(await waitFor(() => phone.panel.locator('#account-device-list li').count().then(count => count === 2)));
-  assert.equal(await phone.panel.locator('#account-device-list li').filter({hasText:'This device'}).count(),1);
+  await phone.syncButton('Manage account');
+  const devices = phone.panel.getByRole('region', {name:'Linked devices',exact:true});
+  await devices.getByRole('button', {name:'Sign out other sessions',exact:true}).waitFor();
+  assert.equal(await devices.getByRole('listitem').count(),2);
+  assert.equal(await devices.getByRole('listitem').filter({hasText:'This device'}).count(),1);
+  await phone.syncButton('Back');
   await phone.panel.locator('#account-last-sync time[datetime]').waitFor();
   const conflict = phone.panel.locator('#account-conflict');
   assert.equal(await conflict.isVisible(),false);

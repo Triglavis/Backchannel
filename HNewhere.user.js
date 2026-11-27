@@ -44801,6 +44801,12 @@ ${accountBackButton("account-manage-back")}
 <span><span id="account-diagnostics-label">Share diagnostics</span><span id="account-diagnostics-hint" class="appearance-row-hint">Help improve Backchannel by sharing anonymized usage data.</span></span>
 </label>
 </section>
+<section id="account-devices-section" class="account-inner-section" aria-labelledby="account-devices-heading" hidden>
+<h4 id="account-devices-heading" class="account-row-label">Linked devices</h4>
+<ul id="account-device-list" class="account-device-list"></ul>
+<div id="account-revoke-other-sessions-row" class="account-actions" hidden><button type="button" id="account-revoke-other-sessions" class="settings-button" aria-describedby="account-status-devices">Sign out other sessions</button></div>
+<div id="account-status-devices"></div>
+</section>
 </section>
 <section id="account-import" class="account-section account-flow" data-account-step="1" tabindex="-1" hidden>
 <h3 class="account-section-heading">Use this device’s reading data?</h3>
@@ -44827,12 +44833,6 @@ ${accountBackButton("account-manage-back")}
 <div class="account-actions"><button type="button" id="account-restore-snapshot" class="settings-button" aria-describedby="account-status-snapshot-restore"><span class="settings-control-label">Restore previous version</span></button></div>
 <div id="account-status-snapshot-restore"></div>
 </div>
-</section>
-<section id="account-devices-section" class="account-section" hidden>
-<h3 class="account-section-heading">Linked devices</h3>
-<ul id="account-device-list" class="account-device-list"></ul>
-<div id="account-revoke-other-sessions-row" class="account-actions" hidden><button type="button" id="account-revoke-other-sessions" class="settings-button" aria-describedby="account-status-devices">Sign out other sessions</button></div>
-<div id="account-status-devices"></div>
 </section>
 <section class="account-section" id="account-delete-section">
 <div id="account-actions">

@@ -10,6 +10,10 @@ use to detect updates, so every release bumps it.
 
 ## [1.6.20.1] — 2026-11-27
 
+### Changed
+
+- Linked devices appears below Privacy in Manage account.
+
 ### Fixed
 
 - On mobile, the whole Settings dialog follows the Sidebar’s size preference,
