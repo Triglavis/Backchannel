@@ -797,11 +797,13 @@ test("Sidebar Front Pages edits hidden topics and links in its private Settings 
 		assert.equal(await settings.getByRole("listbox", { name: "Hidden links" }).count(), 0);
 		assert(await waitFor(() => page.frame("backchannel-sidebar-settings")));
 		const filters = page.frame("backchannel-sidebar-settings");
-		await filters.getByRole("button", { name: "Show again, Browser privacy", exact: true }).click();
+		const showTopic = filters.getByRole("button", { name: "Show again, Browser privacy", exact: true });
+		await showTopic.click();
 		const search = filters.getByRole("searchbox", { name: "Search topics" });
 		await search.fill("Browser privacy");
 		await filters.getByRole("button", { name: "Hide Browser privacy", exact: true }).click();
-		await filters.getByRole("button", { name: "Show again, Browser privacy", exact: true }).click();
+		await showTopic.click();
+		await showTopic.waitFor({ state: "hidden" });
 		const hidden = "https://private.example.org/a-saved-address";
 		await filters.getByRole("button", { name: "Hide a link", exact: true }).click();
 		const url = filters.getByRole("textbox", { name: "Paste a link to hide" });
