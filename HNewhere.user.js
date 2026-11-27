@@ -81,7 +81,8 @@
 
 	const SIDEBAR_COMPOSER_FRAME = "backchannel-sidebar-composer";
 	const SIDEBAR_COMPOSER_URL = "https://topics.backchnnl.app/sidebar-composer";
-	const isSidebarComposerFrame = window.name === SIDEBAR_COMPOSER_FRAME && location.origin + location.pathname === SIDEBAR_COMPOSER_URL;
+	const isSidebarComposerPage = location.origin + location.pathname === SIDEBAR_COMPOSER_URL;
+	const isSidebarComposerFrame = isSidebarComposerPage && window.name === SIDEBAR_COMPOSER_FRAME;
 	if (window.top !== window.self && window.name !== "backchannel-article" && !isSidebarComposerFrame) {
 		return;
 	}
@@ -28828,6 +28829,9 @@ ${appMode ? '<div id="app-discussion-compose" class="app-compose-bar"></div>' : 
 		.sidebar-composer .compose-field > .composer-actions {display:var(--composer-actions-display, flex);}
 		.sidebar-composer [hidden], .sidebar-composer .hidden {display:none!important;}
 		.sidebar-composer .compose-targets {box-sizing:border-box;max-width:min(270px, calc(100vw - 12px));}
+		html:has(.sidebar-composer.is-window) {background:var(--bg);}
+		.sidebar-composer.is-window {max-width:560px;margin-inline:auto;padding:16px;}
+		.sidebar-composer.is-window .compose-targets {top:calc(100% + 6px);bottom:auto;}
 	`;
 
 	function sidebarComposerFrame(connectKey, readyKey, parentOrigin = null) {
@@ -28868,19 +28872,19 @@ sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)})
 </script></body></html>`;
 	}
 
-	function sidebarComposerOptions({ targets, canNote }, shadow, phone, viewportScale) {
+	function sidebarComposerOptions({ targets, canNote }, theme, phone, viewportScale) {
 		return {
 			targets: targets.map(({ key, source }) => ({ key, source })),
 			choices: targets.length > 1 ? composeCommentChoices(targets) : "",
 			canNote,
-			theme: sidebarFrameTheme(shadow),
+			theme,
 			darkClass: DARK_CLASS,
 			phone,
 			viewportScale,
 		};
 	}
 
-	async function submitSidebarComposition(data, { targets, canNote, ui }, reply) {
+	async function submitSidebarComposition(data, { targets, canNote, ui, context = null }, reply) {
 		const finish = (message, saved = false, confirmQuote = false) =>
 			reply({ message, saved, error: !saved, confirmQuote, done: true, closePopup: true });
 		if (typeof data?.text !== "string" || data.text.length > 20000 || !data.text.trim()) {
@@ -28894,11 +28898,11 @@ sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)})
 					finish("Write something first.");
 					return;
 				}
-				if (note.exact && !data.confirmQuote && !anchorNoteQuote(note.exact)) {
+				if (note.exact && !data.confirmQuote && (context || !anchorNoteQuote(note.exact))) {
 					finish("Press note again to keep the quotation without a highlight.", false, true);
 					return;
 				}
-				await writeNote(note);
+				await writeNote(note, context);
 				finish("Note saved.", true);
 				return;
 			}
@@ -28918,13 +28922,25 @@ sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)})
 			await rememberAuthFromResult(target.source, result).catch(console.error);
 			if (result?.ok) {
 				finish("Comment posted.", true);
-				window.setTimeout(() => reloadDiscussion(ui, discussions), 1400);
+				if (ui) window.setTimeout(() => reloadDiscussion(ui, discussions), 1400);
 			} else {
 				finish(commentFailureMessage(result, label));
 			}
 		} catch (error) {
 			finish(data.mode === "note" ? "Couldn’t save your note. Try again." : "Couldn’t post your comment. Try again.");
 			console.error(error);
+		}
+	}
+
+	function mountSidebarComposerPage(standalone = false) {
+		document.documentElement.lang = "en";
+		document.body.className = "sidebar-composer app-compose-bar";
+		document.body.classList.toggle("is-window", standalone);
+		document.body.innerHTML = composeBoxHTML({ canComment: true, canNote: true, placeholder: "" });
+		if (!adoptStyle(document, SIDEBAR_COMPOSER_CSS)) {
+			const style = document.createElement("style");
+			style.textContent = SIDEBAR_COMPOSER_CSS;
+			document.head.append(style);
 		}
 	}
 
@@ -28937,16 +28953,33 @@ sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)})
 		if (Date.now() - staged.ts > 60000) return;
 
 		await documentReady();
-		document.documentElement.lang = "en";
-		document.body.className = "sidebar-composer app-compose-bar";
-		document.body.innerHTML = composeBoxHTML({ canComment: true, canNote: true, placeholder: "" });
-		if (!adoptStyle(document, SIDEBAR_COMPOSER_CSS)) {
-			const style = document.createElement("style");
-			style.textContent = SIDEBAR_COMPOSER_CSS;
-			document.head.append(style);
-		}
+		mountSidebarComposerPage();
 		sidebarComposerFrame(staged.connectKey, staged.readyKey, staged.origin);
 		window.parent.postMessage("backchannel-sidebar-composer-connect", staged.origin);
+	}
+
+	async function runSidebarComposerWindow() {
+		const nonce = /^#compose=([a-f0-9]{32})$/.exec(location.hash)?.[1];
+		if (nonce) history.replaceState(history.state, "", location.pathname + location.search);
+		const staged = nonce ? await readBridgePayload(nonce) : null;
+		await documentReady();
+		if (staged?.kind !== "sidebar-composer-window") {
+			document.body.textContent = "Open the composer from the Sidebar.";
+			return;
+		}
+		await clearBridgePayload(nonce);
+		if (Date.now() - staged.ts > 60000) {
+			document.body.textContent = "The composer link expired. Open it again from the Sidebar.";
+			return;
+		}
+
+		mountSidebarComposerPage(true);
+		const phone = matchMedia("(max-width: 700px), (pointer: coarse)");
+		const receive = wireSidebarComposerClient(document, (data) => submitSidebarComposition(data, staged, receive));
+		const update = () => receive({ options: sidebarComposerOptions(staged, staged.theme, phone.matches, window.visualViewport?.scale || 1) });
+		update();
+		phone.addEventListener("change", update);
+		window.visualViewport?.addEventListener("resize", update);
 	}
 
 	function mountSidebarComposer(ui, targets, canNote) {
@@ -28986,7 +29019,7 @@ sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)})
 			article, targets, canNote,
 			update() {
 				viewportScale = visual?.scale || 1;
-				activePort?.postMessage({ options: sidebarComposerOptions(composer, ui.shadow, phone.matches, viewportScale) });
+				activePort?.postMessage({ options: sidebarComposerOptions(composer, sidebarFrameTheme(ui.shadow), phone.matches, viewportScale) });
 			},
 			dispose() {
 				disposed = true;
@@ -29005,7 +29038,44 @@ sidebarComposerFrame(${JSON.stringify(connectKey)}, ${JSON.stringify(readyKey)})
 		phone.addEventListener("change", composer.update);
 		visual?.addEventListener("resize", updateScale);
 		const unavailable = () => {
-			status.textContent = "The private composer is unavailable on this page.";
+			status.textContent = "The inline composer couldn’t load on this page.";
+			const open = document.createElement("button");
+			open.type = "button";
+			open.className = "settings-button";
+			open.textContent = "Open composer in Backchannel";
+			open.onclick = async (event) => {
+				if (!event.isTrusted || !active()) return;
+				const popup = window.open("about:blank", "_blank", "width=640,height=420,resizable=yes,scrollbars=yes");
+				if (!popup) {
+					status.textContent = "Allow pop-ups to open the Backchannel composer.";
+					return;
+				}
+				popup.opener = null;
+				const key = sidebarFrameKey();
+				const { link, title, site } = openPageContext();
+				const targets = composer.targets.map(({ key, id, source, label, baseLabel, commentCount }) => ({ key, id, source, label, baseLabel, commentCount }));
+				try {
+					await stageBridgePayload(key, {
+						kind: "sidebar-composer-window", context: { link, title, site },
+						targets, canNote: composer.canNote, theme: sidebarFrameTheme(ui.shadow),
+					});
+					if (popup.closed) {
+						await clearBridgePayload(key);
+						return;
+					}
+					const destination = popup.document.createElement("a");
+					destination.href = SIDEBAR_COMPOSER_URL + "#compose=" + key;
+					destination.rel = "noreferrer";
+					popup.document.body.append(destination);
+					destination.click();
+				} catch (error) {
+					popup.close();
+					await clearBridgePayload(key).catch(console.error);
+					status.textContent = "Couldn’t open the Backchannel composer. Try again.";
+					console.error(error);
+				}
+			};
+			status.after(open);
 		};
 
 		const mountFrame = (hosted = false) => {
@@ -41194,6 +41264,7 @@ ${BOOKMARK_DIALOG_CSS}
 .app-topic-focus-banner {
 	--comments-gutter:var(--topic-discussion-gutter);
 	--vote-gutter:0px;
+	font-family:var(--app-ui-font);
 }
 .app-topic-thread-detail[data-focused] .app-topic-thread-more { display:none; }
 .app-topic-discussions .app-compose-bar .compose-field { box-shadow:0 3px 12px #0002; }
@@ -60610,7 +60681,11 @@ ${frontPageChooserHTML()}
 	}
 
 	if (window.top === window.self) {
-		init().catch(console.error);
+		if (isSidebarComposerPage) {
+			runSidebarComposerWindow().catch(console.error);
+		} else {
+			init().catch(console.error);
+		}
 		scheduleStorageSweep();
 	} else if (isSidebarComposerFrame) {
 		runSidebarComposerFrame().catch(console.error);

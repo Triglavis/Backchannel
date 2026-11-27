@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {launchApp, STORIES, waitFor} from './harness.mjs';
+import {launchApp, showAllFrontPages, STORIES, waitFor} from './harness.mjs';
 
 const original=await readFile(process.env.BC_SCRIPT || new URL('../../HNewhere.user.js',import.meta.url),'utf8');
 const seam='init().catch(console.error);';
@@ -98,7 +98,7 @@ test('each Reader reopen checks discovery again while reusing saved comments',{t
   }`),sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-rail [data-app-view="all"]').click();
+    await showAllFrontPages(app.page);
     const first=app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first();
     await first.click();
     await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor({timeout:10000});
@@ -123,7 +123,7 @@ test('Reader shows saved comments immediately when a reopened article is still b
   }`),sharedStore:true,settings:{sources:{hn:true},frontPageMode:'sources',updateCheck:false}});
   try{
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-rail [data-app-view="all"]').click();
+    await showAllFrontPages(app.page);
     const first=app.page.locator('#app-list-body .browse-title-link',{hasText:STORIES[0].title}).first();
     await first.click();
     assert(await waitFor(async()=>await app.page.locator('#comments-content .comment[data-story-id="9001"]').count()===30,10000));

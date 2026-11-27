@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { frontPageHTML, launchApp, STORIES, waitFor } from "./harness.mjs";
+import { frontPageHTML, launchApp, showAllFrontPages, STORIES, waitFor } from "./harness.mjs";
 
 const url = "https://backchnnl.app/";
 const settings = { sources: { hn: true }, frontPageMode: "sources", updateCheck: false, sourceRefreshMinutes: 0 };
@@ -327,7 +327,7 @@ test("Mark all as read stays available during selection and includes unselected 
 					window.__gmXHR = (options) => options.url === "https://news.ycombinator.com/news"
 						? ready.then(() => request(options)) : request(options);
 				});
-				await page.locator('#app-rail [data-app-view="all"]').click();
+				await showAllFrontPages(page);
 				await heading.click();
 				await page.getByRole("menuitem", { name: "Sync", exact: true }).click();
 			} else {

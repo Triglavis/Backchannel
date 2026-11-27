@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {frontPageHTML, launchApp, STORIES, waitFor} from './harness.mjs';
+import {fillComposer, frontPageHTML, launchApp, STORIES, waitFor} from './harness.mjs';
 
 const appURL = 'https://backchnnl.app/';
 const storage = 'HNewhere:account_sync';
@@ -65,10 +65,14 @@ for (const notes of [false, true]) test(`two Reader tabs keep both ${notes ? 'no
       await page.locator('#app-rail [data-app-view="queue"]').click();
       await list.getByRole('link', {name: stories[0].title, exact: true}).click();
       await page.locator(`#app .comment[data-comment-id="hn:${stories[0].id}01"]`).waitFor();
-      const composer = page.locator('#app-discussion-compose');
-      await composer.locator('.composer-text').fill(texts[i]);
-      return composer.locator('.compose-send-note');
+      return page.locator('#app-discussion-compose .compose-send-note');
     }));
+    if (notes) {
+      for (const [i, page] of pages.entries()) {
+        await page.bringToFront();
+        await fillComposer(page.locator('#app-discussion-compose .composer-text'), texts[i]);
+      }
+    }
     const saved = () => notes
       ? (app.store.get(key)?.notes || []).map(note => note.text)
       : app.store.get(key).map(link => link.url);

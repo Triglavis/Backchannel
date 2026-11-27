@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { fillComposer, launchApp, sidebarComposer, STORIES, waitFor } from "./harness.mjs";
+import { fillComposer, launchApp, showAllFrontPages, sidebarComposer, STORIES, waitFor } from "./harness.mjs";
 import { discussionFixture } from "./fixtures.mjs";
 
 const url = STORIES[0].url;
@@ -370,7 +370,7 @@ test("Reader keeps saved comments available while checking revisited articles", 
   const app = await launchApp({ sharedStore: true, settings: { sources: { hn: true }, frontPageMode: "sources", updateCheck: false } });
   try {
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-rail [data-app-view="all"]').click();
+    await showAllFrontPages(app.page);
     const first = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[0].url}"]`).first();
     const second = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[1].url}"]`).first();
     await first.click();
@@ -521,7 +521,7 @@ test("Reader retains more than twenty saved discussions while rechecking an arti
   });
   try {
     await app.page.goto('https://backchnnl.app/');
-    await app.page.locator('#app-rail [data-app-view="all"]').click();
+    await showAllFrontPages(app.page);
     const first = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[0].url}"]`).first();
     const second = app.page.locator(`#app-list-body .browse-title-link[href="${STORIES[1].url}"]`).first();
     await first.click();

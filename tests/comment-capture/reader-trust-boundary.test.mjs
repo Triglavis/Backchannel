@@ -400,13 +400,18 @@ for (const responsive of [true, false]) test(`the phone Sidebar composer starts 
 });
 
 for (const blocksFrames of [false, true]) test(blocksFrames ?
-	"The Sidebar leaves the discussion open when the publisher blocks both editor frames" :
+	"The Sidebar opens a dedicated private composer when the publisher blocks both editor frames" :
 	"The Sidebar shows an inline private composer under a strict script policy", async (t) => {
 	const source = await readFile(process.env.BC_SCRIPT || new URL("../../HNewhere.user.js", import.meta.url), "utf8");
 	const hash = createHash("sha256").update(source).digest("base64");
 	const editorURL = "https://topics.backchnnl.app/sidebar-composer";
+	const sourceHost = "news.ycombinator.com";
+	const discussionURL = `https://${sourceHost}/item?id=${article.id}`;
+	const { default: topicsWorker } = await import("../../topics/worker.mjs");
+	const response = await topicsWorker.fetch(new Request(editorURL), {}, {});
+	const body = await response.text();
 	const app = await launchApp({
-		source, topHosts: [new URL(article.url).hostname], sharedStore: true, contentFrames: [editorURL],
+		source, topHosts: [new URL(article.url).hostname, new URL(editorURL).hostname, sourceHost], sharedStore: true, contentPages: [editorURL],
 		settings: { autoOpenSidebar: true, updateCheck: false, sources: { hn: true } },
 		pages: { [article.url]: {
 			html: "<title>Article with strict CSP</title><article><p>The publisher applies a script policy.</p></article>",
@@ -417,7 +422,7 @@ for (const blocksFrames of [false, true]) test(blocksFrames ?
 	await app.context.route(editorURL, async (route) => {
 		assert.equal(route.request().headers().referer, undefined);
 		assert.equal(route.request().postData(), null);
-		await route.fulfill({ status: 404, contentType: "text/plain; charset=UTF-8", body: "Not found" });
+		await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body });
 	});
 	const { page } = app;
 	await page.addInitScript(() => {
@@ -427,11 +432,39 @@ for (const blocksFrames of [false, true]) test(blocksFrames ?
 	});
 	await page.goto(article.url);
 	if (blocksFrames) {
+		const posted = "A fixture comment from the separate Backchannel composer";
+		const submissions = [];
+		await app.context.route(discussionURL, (route) => route.fulfill({
+			contentType: "text/html",
+			body: '<form action="/comment" method="post"><textarea name="text"></textarea></form>',
+		}));
+		await app.context.route(`https://${sourceHost}/comment`, (route) => {
+			submissions.push(new URLSearchParams(route.request().postData()).get("text"));
+			return route.fulfill({ contentType: "text/html", body: '<div class="commtext">' + posted + "</div>" });
+		});
 		const bar = page.locator("#sidebar-discussion-compose");
-		await bar.getByRole("status").getByText("The private composer is unavailable on this page.").waitFor({ timeout: 8000 });
-		assert.equal(await bar.getByRole("button").count(), 0);
+		const open = bar.getByRole("button", { name: "Open composer in Backchannel" });
+		await open.waitFor({ timeout: 8000 });
+		assert.deepEqual(app.context.pages(), [page], "the separate composer requires a click");
+		const [editor] = await Promise.all([app.context.waitForEvent("page"), open.click()]);
+		await editor.waitForURL((url) => url.origin + url.pathname === editorURL);
+		const input = editor.getByRole("textbox");
+		await input.waitFor();
+		assert.equal(await editor.evaluate(() => window.opener), null);
+		await fillComposer(input, privateNote);
+		const comment = editor.getByRole("button", { name: "Add a comment" });
+		await comment.waitFor();
+		await editor.getByRole("button", { name: "Keep a note" }).click();
+		await editor.getByRole("status").getByText("Note saved.").waitFor();
+		assert(await waitFor(() => app.store.get(`HNewhere:notes:url:${articleKey}`)?.notes?.some(({ text }) => text === privateNote)));
+		await fillComposer(input, posted);
+		await comment.click();
+		await editor.getByRole("status").getByText("Comment posted.").waitFor();
+		assert.deepEqual(submissions, [posted]);
+		assert.equal(await page.getByText(privateNote).count(), 0);
+		assert.deepEqual(await page.evaluate(() => window.composerKeys), []);
 		assert.equal(page.url(), article.url);
-		assert.deepEqual(app.context.pages(), [page]);
+		assert(await page.locator("#panel").isVisible());
 		return;
 	}
 	const editor = () => page.frames().find((frame) => frame.url().startsWith(editorURL));

@@ -1025,11 +1025,11 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
     if (pathname === "/sidebar-composer" && ["GET", "HEAD"].includes(request.method)) {
-      const body = '<!doctype html><html lang="en"><meta charset="utf-8"><title>Backchannel Composer</title><body></body></html>';
+      const body = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Backchannel Composer</title><body></body></html>';
       return new Response(request.method === "HEAD" ? null : body, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'none'",
+          "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
         },

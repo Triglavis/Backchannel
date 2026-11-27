@@ -33,7 +33,8 @@ use to detect updates, so every release bumps it.
   Queue appears in navigation when it contains a link.
 - The Sidebar header can save the current page to Collection.
 - The Sidebar shows the same inline writing field as Reader. Notes save in
-  place and comments go to the selected discussion.
+  place and comments go to the selected discussion. If the page blocks both
+  private frames, the composer can open in its own Backchannel window.
 - Sidebar Settings includes bookmark import, exports, Front Page filters, and
   disabled sites. Account opens directly in Backchannel Settings.
 - Link titles display characters such as `&` in place of HTML entities.

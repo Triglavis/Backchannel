@@ -98,9 +98,11 @@ Worth stating plainly, because the permissions are broad by necessity:
   window loads the same controls on Backchannel's HTTPS origin. The Sidebar
   composer accepts text in an isolated frame and submits it through a private
   channel. When a publisher blocks the inline script, the Sidebar can load
-  the editor on Backchannel's Topics origin. The frame request uses a fixed
-  URL and suppresses the referrer. Reader keeps notes and drafts in its own
-  document when displaying a publisher page.
+  the editor on Backchannel's Topics origin. If the page blocks both frames,
+  you can open that composer in a separate Backchannel window. The editor's
+  network request uses a fixed path without a referrer. The article and
+  discussion context passes through private userscript storage. Reader keeps
+  notes and drafts in its own document when displaying a publisher page.
 
 - **It checks saved Collection links for new discussion.** A check sends the
   page's address to enabled sources that support checks. Those sources are

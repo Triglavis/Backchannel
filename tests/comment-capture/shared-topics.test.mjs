@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { frontPageHTML, launchApp, waitFor } from "./harness.mjs";
+import { frontPageHTML, launchApp, showAllFrontPages, waitFor } from "./harness.mjs";
 import { reinstatement, otherDevelopments } from "../topics/leadership-fixture.mjs";
 
 const catalogURL = "https://topics.backchnnl.app/api/topics";
@@ -76,12 +76,6 @@ function launchTopics({ status = 200, stored = {}, ...options } = {}) {
 
 function rail(page, view) {
 	return page.locator('#app-rail [data-app-view="' + view + '"]');
-}
-
-async function showAllFrontPages(page, unread = false) {
-	await rail(page, "all").click();
-	const filter = page.getByRole("button", { name: "Unread only", exact: true });
-	if (await filter.getAttribute("aria-pressed") !== String(unread)) await filter.click();
 }
 
 function topic(list, label) {

@@ -231,7 +231,7 @@ function answer({ url, responseType = "" }, stories = STORIES, votable = {}, liv
 	return { status: 404, finalUrl: url, responseHeaders: "", text: "" };
 }
 
-function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts = [], shared = false, version = "check", handler = undefined, injectDelay = 0, tabs = false, contentFrames = [] }, runInContent) {
+function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts = [], shared = false, version = "check", handler = undefined, injectDelay = 0, tabs = false, contentPages = [] }, runInContent) {
 	const inFrame = window.top !== window.self;
 
 	if (!/^https?:$/.test(location.protocol)) {
@@ -304,7 +304,7 @@ function boot({ injectTop, skipFrameHosts, settings, values, appHost, topHosts =
 	};
 
 	const run = () => {
-		if (inFrame && contentFrames.includes(location.origin + location.pathname)) {
+		if (contentPages.includes(location.origin + location.pathname)) {
 			runInContent();
 			return;
 		}
@@ -351,7 +351,7 @@ export async function launchApp({
 	appHeaders = {},
 	launchOptions = {},
 	injectDelay = 0,
-	contentFrames = [],
+	contentPages = [],
 	slowGets = { key: "", ms: 0, armed: false },
 	slowSets = { prefix: "", ms: 0, armed: false },
 } = {}) {
@@ -473,7 +473,7 @@ export async function launchApp({
 	});
 	await context.addInitScript({ content: `window.__bcSource = ${JSON.stringify(source)};` });
 	await context.addInitScript({
-		content: `(${boot.toString()})(${JSON.stringify({ injectTop, skipFrameHosts, values, appHost, topHosts, shared: sharedStore, version, handler, injectDelay, tabs, contentFrames, settings: { sources: { hn: true }, annotations: true, frontPageMode: "sources", ...settings } })}${contentFrames.length ? `, function () {\n${source}\n}` : ""});`,
+		content: `(${boot.toString()})(${JSON.stringify({ injectTop, skipFrameHosts, values, appHost, topHosts, shared: sharedStore, version, handler, injectDelay, tabs, contentPages, settings: { sources: { hn: true }, annotations: true, frontPageMode: "sources", ...settings } })}${contentPages.length ? `, function () {\n${source}\n}` : ""});`,
 	});
 
 	const page = await context.newPage();
@@ -512,6 +512,12 @@ export async function waitFor(fn, timeout = 8000) {
 	}
 
 	return false;
+}
+
+export async function showAllFrontPages(page, unread = false) {
+	await page.locator('#app-rail [data-app-view="all"]').click();
+	const filter = page.getByRole("button", { name: "Unread only", exact: true });
+	if (await filter.getAttribute("aria-pressed") !== String(unread)) await filter.click();
 }
 
 export async function sidebarComposer(page) {
