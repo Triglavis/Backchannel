@@ -32,7 +32,7 @@ test('holding an icon allows a touch reorder without canceling on capture transf
     const expected=['top-stories','source:lemmy','topic:technology','source:hn'];
     assert.deepEqual(await section.locator('.rail-button').evaluateAll(nodes=>nodes.map(node=>node.dataset.appView)),expected);
     assert(await waitFor(()=>app.store.get('HNewhere:app_rail_order')?.[0]==='source:lemmy',3000),'the completed touch reorder is saved');
-    assert.equal(await app.page.locator('#app-rail [data-app-view="unread"]').getAttribute('aria-pressed'),'true','the drop does not activate a source');
+    assert.equal(await app.page.locator('#app-rail [data-app-view="all"]').getAttribute('aria-pressed'),'true','the drop does not activate a source');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
 });
@@ -66,7 +66,7 @@ test('an ordinary touch swipe scrolls an overflowing source rail without reorder
     assert(await waitFor(()=>section.evaluate(node=>node.scrollTop>30),1500),'the native swipe scrolls the rail');
     assert.deepEqual(await section.locator('.rail-button').evaluateAll(nodes=>nodes.map(node=>node.dataset.appView)),before,'scrolling does not rearrange the rail');
     assert.equal(app.store.get('HNewhere:app_rail_order'),undefined,'scrolling does not persist a reordered rail');
-    assert.equal(await app.page.locator('#app-rail [data-app-view="unread"]').getAttribute('aria-pressed'),'true','scrolling does not activate a source');
+    assert.equal(await app.page.locator('#app-rail [data-app-view="all"]').getAttribute('aria-pressed'),'true','scrolling does not activate a source');
     assert.deepEqual(app.errors,[]);
   }finally{await app.browser.close()}
 });

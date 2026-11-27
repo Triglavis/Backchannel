@@ -185,15 +185,15 @@ for (const surface of ['phone Reader', 'desktop Reader', 'Sidebar']) test(`${sur
     else await sync.click();
     await page.waitForFunction(() => typeof window.__releaseFeed === 'function', null, {timeout:5000});
     assert.equal(await sync.getAttribute('aria-busy'), 'true');
-    const all = page.locator(sidebar ? '#browse-tab-all' : '#app-rail [data-app-view="all"]');
-    await all[mobile ? 'tap' : 'click']();
-    const selected = sidebar ? 'aria-selected' : 'aria-pressed';
-    assert(await waitFor(async () => await all.getAttribute(selected) === 'true', 4000));
+    const filter = sidebar ? '#browse-home-unread-filter' : mobile ? '#app-heading-unread-filter' : '#app-unread-filter';
+    const unread = page.locator(filter);
+    await unread[mobile ? 'tap' : 'click']();
+    assert(await waitFor(async () => await unread.getAttribute('aria-pressed') === 'false', 4000));
     await page.evaluate(() => window.__releaseFeed());
     assert.equal(await syncResult(app, sidebar ? '#header-subtitle' : '#toast'), 'Partial sync');
     assert.equal(app.store.get(hnKey).status, 'unavailable');
     assert.equal(app.store.get(hnKey).lastSuccessAt, lastSuccessAt);
-    assert.equal(await readRow.count(), 1, 'the completed Sync preserves the All view');
+    await readRow.waitFor({timeout:5000});
     assert.deepEqual(app.errors, []);
   } finally { await app.browser.close(); }
 });

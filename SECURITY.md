@@ -47,7 +47,7 @@ Worth stating plainly, because the permissions are broad by necessity:
 
   | Source | Hosts contacted | What they are told |
   | --- | --- | --- |
-  | Hacker News | `hn.algolia.com`, `hacker-news.firebaseio.com`, `news.ycombinator.com` | the URL of each page you visit, with no persistent identifier attached |
+  | Hacker News | `hn.algolia.com`, `hacker-news.firebaseio.com`, `news.ycombinator.com` | the URL of each page you visit, with no persistent identifier attached |
   | Reddit | `www.reddit.com` | the URL of each page you visit. Signed in to Reddit, these requests arrive authenticated as your account; signed out, they carry a long-lived device identifier |
   | Reddit (fallback) | `arctic-shift.photon-reddit.com` | the URL of each page you visit, and post or parent-comment identifiers when loading discussions, with no identifier attached. Used automatically when reddit.com declines a request or a response is too large to transfer |
   | Bluesky (discovery) | `constellation.microcosm.blue` | the URL of each page you visit, with no identifier attached |
@@ -58,7 +58,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   | Lemmy | `lemmy.world` | the URL of each page you visit, with no account |
   | Mastodon (discovery) | `www.tootfinder.ch` | the domain of each page you visit -- never the full address. An opt-in index of Mastodon posts, not Mastodon, and it holds only people who chose to be searchable |
   | Mastodon (front page) | `mastodon.social` | what that instance is currently linking to and, when you open one of those links in the reader and the search finds no posts for it, that link's address, to find the posts sharing it |
-  | Front Pages, by topic | `www.reddit.com`, `news.ycombinator.com`, `lemmy.world`, `lobste.rs` and `public.api.bsky.app`, each only while that source is on | nothing about the page you are on, only the topics you picked. Signed in to Reddit or Hacker News, those requests arrive as your account |
+  | Front Pages, by topic | `www.reddit.com`, `news.ycombinator.com`, `lemmy.world`, `lobste.rs` and `public.api.bsky.app`, each only while that source is on | nothing about the page you are on, only the topics you picked. Signed in to Reddit or Hacker News, those requests arrive as your account |
   | Hypothes.is | `api.hypothes.is` | the URL of each page you visit, to find public annotations on it. No account, signed in or out |
   | *no source enabled* | none | nothing -- the script performs no lookup at all. Kind of weird to use it this way, but no judgements. |
 
@@ -69,35 +69,42 @@ Worth stating plainly, because the permissions are broad by necessity:
   | `old.reddit.com` | only when you press vote, reply or submit | the post or comment you are acting on, or the page you submit, in a popup window you can see. Nothing at page load |
   | `backchnnl.app` | when the Reddit connection notice is shown | a fixed illustration image, requested without a referrer. No article URL or Reddit session is sent |
   | `topics.backchnnl.app` or `backchannel-topics.triglavis-llc.workers.dev` | when a view uses the shared topic index | an anonymous request for the public index. Link and topic matching takes place on your device |
-  | `topics.backchnnl.app` | when you open a published Topic Article | the public topic ID for its shared brief |
+  | `topics.backchnnl.app` | when you open a published Topic Article | the public topic ID for its shared brief |
   | `en.wikipedia.org`, `commons.wikimedia.org` | when Reader needs a topic image or its credit | short topic subject names and the names of the resulting Wikimedia files. Anonymous requests omit saved link addresses and article bodies |
   | `backchnnl.app` and `topics.backchnnl.app` | when you confirm a topic report for a link in Reader | the Account service issues a five-minute reporting credential. Topics receives that credential, the link address, displayed topic and optional suggestion. Older Reader and Account versions use a session for this request. Backchannel stores a hashed account identifier and drops the link's query and fragment before saving the report. Reports expire after 90 days and are queued for removal on account deletion |
-  | `upload.wikimedia.org` or `thumb.wikimedia.org` | when a topic with a verified subject image comes into view | the image address without a referrer. The Topics Worker looks up images using subjects from public feeds |
-  | publisher photo hosts | when Reader displays a photo from a Topic Article | the image address without a referrer. The browser may include cookies for that host |
+  | `upload.wikimedia.org` or `thumb.wikimedia.org` | when a topic with a verified subject image comes into view | the image address without a referrer. The Topics Worker looks up images using subjects from public feeds |
+  | publisher photo hosts | when Reader displays a photo from a Topic Article | the image address without a referrer. The browser may include cookies for that host |
   | `cdn.jsdelivr.net` | when your manager fetches the script's declared resources, and again from the page itself if it did not | nothing about you -- it is a file download of a fixed, versioned URL |
   | the page you open in the reader on backchnnl.app | only when that page gives no answer from inside its frame | nothing but the request itself: one `GET` without cookies, to read whether it may be framed, whether it is a picture and, if it may not be framed, its text |
   | the site of each article in the reader's list on backchnnl.app or the Sidebar's Backchannel view | when the list shows the article, since 1.6.15 in Reader and 1.6.18.1 in the Sidebar | nothing but a request for its icon, `/favicon.ico`, sent without a referrer |
   | wherever a page you open in the reader says its preview image is | once that page has loaded in the reader, since 1.6.15.1 | nothing but the request for the image, sent without a referrer |
   | the site of each page in your Collection | when the Collection shows a card that has no picture or colors kept for its page, since 1.6.17: at most six at a time, and each card once until the page reloads | nothing but the request itself: one `GET` without cookies, to read the page's picture, colors, fonts and icon |
-  | wherever a page in your Collection says its picture and icon are | when the Collection shows its card, in the reader or in the Sidebar, since 1.6.17 | nothing but the requests for the images, sent without a referrer |
+  | wherever a page in your Collection says its picture and icon are | when Reader's Collection shows its card | nothing but the requests for the images, sent without a referrer |
   | wherever an image in a comment is hosted | only with *Show images in comments* on, and it is off until you turn it on | nothing but the request for the image, over https and without a referrer |
   | the page you ask the reader to scrape | only when you press *Scrape link content* | what any visit tells it: the page opens in a tab of your own browser, signed in if you are |
   | `api.github.com` | once a day while *Check for new versions automatically* is on, and when you press *Check for updates*, since 1.6.18 | nothing but the request itself: one `GET` without cookies for Backchannel's list of releases |
 
 - **Automatic source refresh follows your Settings choice.** Since 1.6.19,
-  Settings → Sources has one frequency for Front Pages. Automatic feed requests
+  Settings → Sources has one frequency for Front Pages. Automatic feed requests
   run while that view is visible. Manual pauses automatic feed and Collection
   checks; opening an article or pressing Sync can still request source data.
 
-- **Private reading surfaces use a separate document.** The Sidebar composer
-  accepts text in a sandboxed frame and transfers it directly to Reader on
-  Backchannel's HTTPS origin. Existing drafts, notes, queue, Collection and
-  exports open in Reader. Reader also keeps notes and drafts in its own
+- **Private reading surfaces use a separate document.** The Sidebar shows
+  Queue and Collection in sandboxed frames without fetching previews for those
+  links. If a publisher blocks a saved-list frame, that list opens directly
+  on Backchannel's HTTPS origin. Sidebar Settings isolates bookmark import
+  and exports, hidden links and topics, and disabled sites from the publisher
+  in sandboxed frames. If a page blocks those settings, a Backchannel Settings
+  window loads the same controls on Backchannel's HTTPS origin. The Sidebar
+  composer accepts text in an isolated frame and submits it through a private
+  channel. When a publisher blocks the inline script, the Sidebar can load
+  the editor on Backchannel's Topics origin. The frame request uses a fixed
+  URL and suppresses the referrer. Reader keeps notes and drafts in its own
   document when displaying a publisher page.
 
 - **It checks saved Collection links for new discussion.** A check sends the
   page's address to enabled sources that support checks. Those sources are
-  Hacker News search, Bluesky's Constellation and the Reddit archive. Background
+  Hacker News search, Bluesky's Constellation and the Reddit archive. Background
   requests omit fragments, tracking parameters and save dates. Imported
   bookmarks, previously unwatched links and links with other query parameters
   are looked up when you open them. Each automatic check covers up to four
@@ -105,7 +112,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   sources look for matching discussions. Backchannel waits for you to view new
   discussion before checking that link again. Checks stop after five
   unanswered attempts.
-- **Enhanced PDF support downloads a copy of pdf.js.** The reader is
+- **Enhanced PDF support downloads a copy of pdf.js.** The reader is
   [pdf.js](https://mozilla.github.io/pdf.js/), declared as two `@resource` files
   on `cdn.jsdelivr.net` -- 0.49 MiB for the viewer and 1.25 MiB for its worker,
   1.74 MiB in all, pinned to one version rather than tracking latest. Your
@@ -125,7 +132,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   and lets no extension run there, userscript managers included, so on a PDF the
   script never starts: nothing is read, no host is contacted, and no button or
   Sidebar appears. This is a limit of the browser rather than a setting, and it
-  applies whatever Enhanced PDF support is set to.
+  applies whatever Enhanced PDF support is set to.
 - **`@connect` is a ceiling, not a statement of use.** The header is static, so
   it lists every host any source *could* contact, including sources you have
   switched off. A disabled source issues no requests; the entry is a permission
@@ -156,12 +163,12 @@ Worth stating plainly, because the permissions are broad by necessity:
   `GM.deleteValues` and `GM.listValues`, which reach only its own stored
   values. It deletes a value rather than leave an empty one behind, and once
   a day it lists its values and deletes what it no longer reads: what older
-  versions left behind, Front Pages unused for a week, and when you last
+  versions left behind, Front Pages unused for a week, and when you last
   visited a discussion, after 90 days. That pass reads only the values it
   needs to decide, and never deletes your Collection, queue, notes or
   settings. Backchannel sends requests to the hosts documented here.
-- **Account sync is optional.** In Reader the same-origin account API verifies
-  passkeys and issues expiring device sessions. Cloudflare D1 holds public
+- **Account sync is optional.** The same-origin account API verifies passkeys
+  and issues expiring device sessions. The Sidebar opens a Backchannel Settings window for account management and passkeys. Cloudflare D1 holds public
   credential records, hashed session tokens, the current encrypted snapshot,
   and one previous version. Settings, Collection items, notes, and the reading queue
   are encrypted before upload. Uploading requires a live session and a proof
@@ -189,7 +196,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   the credential. Local settings, Collection items, notes, and the reading
   queue remain. Cloudflare D1 backups may retain prior account data for up to
   30 days on the paid plan. [Cloudflare D1 retention](https://developers.cloudflare.com/d1/reference/time-travel/)
-- **It keeps what Hacker News answered about the last pages you looked up**, so
+- **It keeps what Hacker News answered about the last pages you looked up**, so
   a page reopened within the hour is not asked about again. Since 1.6.15.2 that
   is one stored value holding thirty pages at most, by address. A page is used
   for an hour and dropped the next time a lookup is saved, so the value can
@@ -199,7 +206,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   1.6.17.2 the daily pass above deletes them.
 - **The notepad uses your userscript manager's storage.** Notes are keyed by
   page address or by a PDF fingerprint Reader can verify for that document.
-  With Account sync enabled, encrypted notes sync across your devices. The
+  With Account sync enabled, encrypted notes sync across your devices. The
   export option lets you save notes before clearing your manager's storage.
 - **Cloudflare records operational requests.** Backchannel uses these logs
   to run and troubleshoot the site and Account API. The host table above
@@ -225,7 +232,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   that list until 1.6.7; they are read like any other page now, and a PDF on an
   excluded host stays excluded.
 - **Credentials never leave the site they belong to.** Everything that writes --
-  voting, replying, and submitting on Hacker News and on Reddit -- happens in a
+  voting, replying, and submitting on Hacker News and on Reddit -- happens in a
   popup window on that site's own domain, using the session your browser
   already has there. The script never handles either password and never
   posts a session cookie anywhere. Those two are the only sources with write
@@ -274,7 +281,7 @@ Worth stating plainly, because the permissions are broad by necessity:
   for under a one-time code and puts the code in the popup's address. The
   popup acts only when it finds a stored request of the same kind under that
   code, and casts, posts or fills in what was stored, not what the address
-  says. A link to Hacker News or Reddit carrying a code of its own finds
+  says. A link to Hacker News or Reddit carrying a code of its own finds
   nothing and does nothing. A request is used once, and one not used within
   ten minutes is ignored. Since 1.6.17.3 for votes, and since 1.6.17.4 for
   replies and submissions.
@@ -289,7 +296,8 @@ Worth stating plainly, because the permissions are broad by necessity:
   its address and description and loaded lazily without a referrer; any
   other is dropped.
 - **Shadow roots contain UI styles.** The publisher can read the Sidebar's
-  displayed contents. Private views use the Backchannel HTTPS origin.
+  public views. Private lists, settings, and the composer use sandboxed
+  documents.
 - **Publisher frames receive public annotation data.** The script answers
   messages from `https://backchnnl.app` in Reader's `backchannel-article`
   frame. The frame can provide layout data, preview metadata, matching
@@ -331,14 +339,14 @@ with its address as `<page>`.
 | --- | --- | --- | --- |
 | Optional Backchannel account | Same-origin requests under `backchnnl.app/account` from Reader | Passkey public credential or signed proof when authenticating, a session token when syncing, and encrypted settings, Collection, and reading queue snapshots with revision numbers | Yes, as your Backchannel account |
 | Optional diagnostics | `POST backchnnl.app/account/diagnostics` from Reader | Operation, outcome, duration bucket, Backchannel version, and source name where relevant. Cloudflare handles the connection and its operational logs. | The report carries no account or device identifier. |
-| Hacker News | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=20&query=<page>` | `<page>` | No, and no identifier of any kind |
-| Hacker News | `GET hacker-news.firebaseio.com/v0/item/<id>` | story and comment ids it already has | No |
-| Hacker News | `GET news.ycombinator.com/item?id=<id>` | a thread id, to read scores and flags | Yes, if you are signed in there |
-| Hacker News (vote, reply, submit) | popup window on `news.ycombinator.com` | the one story or comment you acted on, or the page you submit, only when you press | Yes, in a window you can see, using the session already in your browser |
+| Hacker News | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=20&query=<page>` | `<page>` | No, and no identifier of any kind |
+| Hacker News | `GET hacker-news.firebaseio.com/v0/item/<id>` | story and comment ids it already has | No |
+| Hacker News | `GET news.ycombinator.com/item?id=<id>` | a thread id, to read scores and flags | Yes, if you are signed in there |
+| Hacker News (vote, reply, submit) | popup window on `news.ycombinator.com` | the one story or comment you acted on, or the page you submit, only when you press | Yes, in a window you can see, using the session already in your browser |
 | Reddit | `GET www.reddit.com/search.json?type=link&limit=25&q=<page>` | `<page>` | May carry Reddit session or device cookies when your browser and userscript manager permit them. A signed-in Reddit tab does not guarantee that these requests share its session |
 | Reddit (fallback) | `GET arctic-shift.photon-reddit.com<path>` | the same lookup, against an archive mirror | No identifier, no session |
 | Reddit (archived comments) | `GET arctic-shift.photon-reddit.com/api/comments/tree?link_id=<post>&...`, optionally with `parent_id=<comment>` | the post identifier and, when expanding a reply branch, its parent comment identifier | No identifier, no session |
-| Reddit (Safari Userscripts reads) | a background tab on `www.reddit.com`, opened and closed by the extension, using `GET /api/me.json` internally, then supported listing, lookup, thread and more-replies endpoints | the topics, article address or thread requested by initial article-list loading, opening an article or Sidebar, Sync, a pull on a phone or loading more replies, after confirming the introduction; no tab for background page discovery | Yes, using the existing Reddit session. Account details stay in the Reddit tab; only allowed public fields and rate-limit metadata return |
+| Reddit (Safari Userscripts reads) | a background tab on `www.reddit.com`, opened and closed by the extension, using `GET /api/me.json` internally, then supported listing, lookup, thread and more-replies endpoints | the topics, article address or thread requested by initial article-list loading, opening an article or Sidebar, Sync, a pull on a phone or loading more replies, after confirming the introduction; no tab for background page discovery | Yes, using the existing Reddit session. Account details stay in the Reddit tab; only allowed public fields and rate-limit metadata return |
 | Reddit (vote, reply, submit) | popup window on `old.reddit.com` | the one post or comment you acted on, or the page you submit, only when you press | Yes, in a window you can see, using the session already in your browser |
 | X (search) | a temporary background tab on `x.com/search` | the page address; only while X is enabled | Yes, using the existing X session |
 | X (verification) | `GET cdn.syndication.twimg.com/tweet-result?id=<post>` and `GET t.co/<link>` | a public post identifier or shortened link; redirects may contact other destinations | Anonymous transport is requested; actual cookie handling depends on the manager |
@@ -352,20 +360,20 @@ with its address as `<page>`.
 | Lemmy | `GET lemmy.world/api/v3/comment/list?post_id=<id>&type_=All&sort=Top&max_depth=8&limit=300` | a post id it already found | No |
 | Mastodon | `GET www.tootfinder.ch/rest/api/search/<domain>` | `<domain>` only, never the full address | No |
 | Mastodon (front page) | `GET mastodon.social/api/v1/trends/links?limit=40` | nothing about you, only what that instance is linking to | No |
-| Front Pages, by topic | `GET www.reddit.com/r/<subreddits>.json?limit=100` | the subreddits for a topic you picked, never `<page>`. Only while Reddit is on | Depends on the browser and userscript manager, as in the Reddit row |
-| Front Pages, by topic | `GET news.ycombinator.com/news` | nothing about you. Only for Technology, and only while Hacker News is on | Yes, if you are signed in there |
-| Front Pages, by topic | `GET lemmy.world/api/v3/post/list?community_name=<community>&sort=Active&type_=All&limit=50` | a community for a topic you picked, never `<page>`. Only while Lemmy is on | No |
-| Front Pages, by topic | `GET lobste.rs/hottest.json` | nothing. Only for Technology, and only while Lobsters is on | No |
-| Front Pages, by topic | `GET public.api.bsky.app/xrpc/app.bsky.feed.getFeed?feed=<feed>&limit=100` | a feed for a topic you picked, never `<page>`. Only while Bluesky is on | No |
+| Front Pages, by topic | `GET www.reddit.com/r/<subreddits>.json?limit=100` | the subreddits for a topic you picked, never `<page>`. Only while Reddit is on | Depends on the browser and userscript manager, as in the Reddit row |
+| Front Pages, by topic | `GET news.ycombinator.com/news` | nothing about you. Only for Technology, and only while Hacker News is on | Yes, if you are signed in there |
+| Front Pages, by topic | `GET lemmy.world/api/v3/post/list?community_name=<community>&sort=Active&type_=All&limit=50` | a community for a topic you picked, never `<page>`. Only while Lemmy is on | No |
+| Front Pages, by topic | `GET lobste.rs/hottest.json` | nothing. Only for Technology, and only while Lobsters is on | No |
+| Front Pages, by topic | `GET public.api.bsky.app/xrpc/app.bsky.feed.getFeed?feed=<feed>&limit=100` | a feed for a topic you picked, never `<page>`. Only while Bluesky is on | No |
 | Hypothes.is | `GET api.hypothes.is/api/search?url=<page>&limit=200` | `<page>` | No |
-| Hacker News (Collection) | `GET hn.algolia.com/api/v1/items/<id>` | the id of a comment you saved without its thread, to find that thread; at most five tries, only while Hacker News is on | No |
+| Hacker News (Collection) | `GET hn.algolia.com/api/v1/items/<id>` | the id of a comment you saved without its thread, to find that thread; at most five tries, only while Hacker News is on | No |
 | Lobsters (Collection) | `GET lobste.rs/c/<id>.json`, then `GET lobste.rs/s/<id>.json` | the id of a comment you saved without its thread, then its story's id, to find the article; at most five tries, only while Lobsters is on | No. Its session cookie, `lobster_trap`, is `SameSite=Lax`, which the browser withholds cross-site |
 | Lemmy (Collection) | `GET lemmy.world/api/v3/comment?id=<id>` | the id of a comment you saved without its thread, to find its post; at most five tries, only while Lemmy is on | No. Its session cookie, `jwt`, is `SameSite=Lax`, which the browser withholds cross-site |
-| Hacker News (Collection checks) | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=<saved page>` | the address of an eligible saved page in two spellings, without fragments, tracking parameters or save dates. Counts matching stories while Hacker News is on | No, and no identifier of any kind |
+| Hacker News (Collection checks) | `GET hn.algolia.com/api/v1/search?tags=story&restrictSearchableAttributes=url&hitsPerPage=0&query=<saved page>` | the address of an eligible saved page in two spellings, without fragments, tracking parameters or save dates. Counts matching stories while Hacker News is on | No, and no identifier of any kind |
 | Bluesky (watching) | `GET constellation.microcosm.blue/links/count?target=<saved page>&collection=app.bsky.feed.post&path=.embed.external.uri` | the address of a page in your Collection, plus a `User-Agent` naming Backchannel and its version; only while Bluesky is on | No |
 | Reddit (watching) | `GET arctic-shift.photon-reddit.com/api/posts/search?limit=25&fields=id&url=<saved page>` | the address of a page in your Collection; only while Reddit is on and answering through the archive mirror | No identifier, no session |
 | Reddit (reader) | `GET www.reddit.com/api/info.json?id=t3_<id>`, or the archive mirror's `/api/posts/ids?ids=<id>` | the id of a post the reader listed, when you open its link and the search by address missed that post; only while Reddit is on | Direct requests depend on the browser and userscript manager, as in the Reddit row. Archive requests carry no Reddit session |
-| Bluesky (reader) | `GET public.api.bsky.app/xrpc/app.bsky.feed.getPosts?uris=<post>` | a post a Front Pages feed listed, when you open its link and the search by address missed it; only while Bluesky is on | No, as in the Bluesky row |
+| Bluesky (reader) | `GET public.api.bsky.app/xrpc/app.bsky.feed.getPosts?uris=<post>` | a post a Front Pages feed listed, when you open its link and the search by address missed it; only while Bluesky is on | No, as in the Bluesky row |
 | Lobsters (reader) | `GET lobste.rs/s/<id>.json` | the id of a story the reader listed, when you open its link and the search by domain missed it; only while Lobsters is on | No. Its session cookie, `lobster_trap`, is `SameSite=Lax`, which the browser withholds cross-site |
 | Mastodon (reader) | `GET mastodon.social/api/v1/timelines/link?url=<link>&limit=40` | a link mastodon.social's trends listed, when you open it and the search finds no posts for it; only while Mastodon is on | No. Its session cookie, `_mastodon_session`, is `SameSite=Lax`, which the browser withholds cross-site |
 | Lemmy (reader) | `GET lemmy.world/api/v3/post?id=<id>` | the id of a post the reader listed, when you open its link and the search by address missed it; only while Lemmy is on | No. Its session cookie, `jwt`, is `SameSite=Lax`, which the browser withholds cross-site |

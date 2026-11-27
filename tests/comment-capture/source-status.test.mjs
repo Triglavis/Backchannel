@@ -54,7 +54,7 @@ test('an entirely unavailable front page still explains why no articles are show
   try {
     await app.page.goto('https://backchnnl.app/');
     const list=app.page.locator('#app-list-body');
-    assert(await waitFor(async()=>/could not load front pages/i.test(await list.innerText()),10000));
+    assert(await waitFor(async()=>/could not load front\s+pages/i.test(await list.innerText()),10000));
     assert.equal(await list.locator('.browse-title-link').count(),0);
     await app.page.locator('#app-rail [data-app-view="source:lemmy"]').click();
     assert(await waitFor(async()=>/lemmy.*unavailable/i.test(await list.innerText()),10000),'the selected source explains its failure');
@@ -123,7 +123,7 @@ test('Reader does not report a complete outage when one source returns a valid e
   try {
     await app.page.goto('https://backchnnl.app/');
     const list=app.page.locator('#app-list-body');
-    assert(await waitFor(async()=>/could not load front pages|nothing here right now/i.test(await list.innerText()),10000));
+    assert(await waitFor(async()=>/could not load front\s+pages|nothing here right now/i.test(await list.innerText()),10000));
     assert.match(await list.innerText(),/nothing here right now/i,'one successful feed is not a complete outage');
     await app.page.locator('#app-rail [data-app-view="source:lemmy"]').click();
     assert(await waitFor(async()=>/lemmy.*unavailable/i.test(await list.innerText()),10000));
@@ -183,7 +183,7 @@ for (const surface of ['Reader', 'Sidebar']) test(`${surface} distinguishes a co
       '#app-rail [data-app-view="topic:business"]').click();
     const empty = list.locator('.browse-empty').filter({hasNotText: 'Loading Front Pages…'});
     await empty.waitFor({timeout:5000});
-    assert.match(await empty.textContent(), /Could not load Front Pages/);
+    assert.match(await empty.textContent(), /Could not load Front\sPages/);
 
     healthy = true;
     await page.clock.fastForward(31_000);
@@ -234,7 +234,7 @@ test('Sidebar explains when every front-page source is unavailable', {timeout:30
     await app.page.locator('#comments-content .comment[data-comment-id^="hn:"]').first().waitFor({timeout:15000});
     await app.page.locator('#browse-toggle .wordmark-root').click();
     const list=app.page.locator('#browse-list');
-    assert(await waitFor(async()=>/could not load front pages/i.test(await list.innerText()),10000));
+    assert(await waitFor(async()=>/could not load front\s+pages/i.test(await list.innerText()),10000));
     assert.equal(await list.locator('.browse-title-link').count(),0);
     assert.deepEqual(app.errors,[]);
   } finally {await app.browser.close()}

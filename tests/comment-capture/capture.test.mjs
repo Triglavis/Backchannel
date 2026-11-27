@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { launchApp, STORIES, waitFor } from "./harness.mjs";
+import { fillComposer, launchApp, sidebarComposer, STORIES, waitFor } from "./harness.mjs";
 import { discussionFixture } from "./fixtures.mjs";
 
 test('Backchannel starts on a page without randomUUID', { timeout: 30000 }, async () => {
@@ -347,18 +347,21 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps existing comm
     assert.equal(await root.locator('.comment[data-comment-id="reddit:newreply"]').count(), 1, 'a new nested reply is added');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:newroot"]').count(), 1, 'a new root comment is added');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:newdiscussioncomment"]').count(), 1, 'a newly discovered discussion is added');
-    assert.match(await app.page.locator('#comments-content .submission-detail[data-discussion-key="reddit:fixture0"] .story-title').textContent(), /Updated discussion title/, 'updated discussion details are reflected');
+    if (!sidebar) {
+      assert.match(await app.page.locator('#comments-content .submission-detail[data-discussion-key="reddit:fixture0"] .story-title').textContent(), /Updated discussion title/, 'updated discussion details are reflected');
+    }
     response.status = 503;
     response.delay = 100;
     await button.click();
     assert(await waitFor(async () => await button.getAttribute('aria-busy') !== 'true', 20000));
     assert.equal(await root.count(), 1, 'a failed refresh keeps previously loaded comments');
     assert.equal(await app.page.locator('#comments-content .comment[data-comment-id="reddit:newroot"]').count(), 1, 'a failed refresh keeps comments from the prior successful sync');
-    const sourceMenu = app.page.locator(sidebar ? '#comments-content .page-header-disclosure' : '#app-discussion-meta .page-header-disclosure');
+    const sourceMenu = app.page.locator(sidebar ? '#sidebar-discussion-meta .page-header-disclosure' : '#app-discussion-meta .page-header-disclosure');
     await sourceMenu.click();
-    const menu = app.page.locator(sidebar ? '#comments-content .source-menu' : '#app-discussion-meta .source-menu');
+    const menu = app.page.locator('#source-menu');
     assert.equal(await menu.locator('[data-discussion-key="reddit:newdiscussion"]').count(), 1, 'the new discussion appears in the Sources menu');
-    const status = app.page.locator(sidebar ? '#comments-content .source-menu-entry' : '#app-discussion-meta .source-menu-entry').filter({ has: app.page.locator('[data-discussion-key="reddit:fixture0"]') });
+    const status = menu.locator('.source-menu-entry').filter({ has: app.page.locator('[data-discussion-key="reddit:fixture0"]') });
+    if (sidebar) assert.match(await status.locator('.discussion-thread-link').textContent(), /Updated discussion title/, 'the refreshed post title is available in Sources');
     assert.equal(await status.locator('.discussion-source-status').count(), 0, 'retaining saved comments does not add a refresh diagnostic');
     await sourceMenu.click();
     await app.page.locator('#comment-sort').click();
@@ -477,9 +480,9 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync preserves the selec
     const source = app.page.locator('#comments-content .comment[data-story-id="fixture1"]').first();
     const other = app.page.locator('#comments-content .comment[data-story-id="fixture0"]').first();
     assert(await waitFor(async () => await source.count() === 1 && await other.count() === 1, 15000));
-    const disclosure = app.page.locator(sidebar ? '#comments-content .page-header-disclosure' : '#app-discussion-meta .page-header-disclosure');
+    const disclosure = app.page.locator(sidebar ? '#sidebar-discussion-meta .page-header-disclosure' : '#app-discussion-meta .page-header-disclosure');
     await disclosure.click();
-    const menu = app.page.locator(sidebar ? '#comments-content .source-menu' : '#app-discussion-meta .source-menu');
+    const menu = app.page.locator('#source-menu');
     await menu.getByRole('checkbox', {name:'All sources',exact:true}).uncheck();
     await menu.getByRole('button', {name:/Reddit discussions/i}).click();
     await menu.locator('[data-discussion-key="reddit:fixture1"] input').check();
@@ -553,12 +556,12 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps its writing c
     if (!sidebar) await app.page.locator('#app-list-body .browse-title-link', { hasText: story.title }).first().click();
     assert(await waitFor(async () => await app.page.locator('#comments-content .top-level-comments').count() === 1 && await app.page.locator('#comments-content .discussion-loading').count() === 0, 15000));
     const composer = app.page.locator('#panel .compose-box');
-    const write = app.page.frameLocator('#sidebar-discussion-compose iframe').getByRole('textbox');
+    const write = sidebar ? (await sidebarComposer(app.page)).getByRole('textbox') : null;
     if (sidebar) {
-      await write.fill('Draft in an empty discussion');
+      await fillComposer(write, 'Draft in an empty discussion');
       assert.equal(await composer.count(), 0);
     } else {
-      await composer.locator('.composer-text').fill('Draft in an empty discussion');
+      await fillComposer(composer.locator('.composer-text'), 'Draft in an empty discussion');
       await composer.evaluate((element) => { window.__emptyDiscussionComposer = element; });
     }
     const button = app.page.locator(sidebar ? '#browse-home-sync' : '#app-list-sync');
@@ -566,10 +569,10 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync keeps its writing c
     assert(await waitFor(async () => await button.getAttribute('aria-busy') !== 'true', 15000));
     if (sidebar) {
       assert.equal(await composer.count(), 0);
-      assert.equal(await write.inputValue(), 'Draft in an empty discussion');
+      assert.equal(await write.innerText(), 'Draft in an empty discussion');
     } else {
       assert(await composer.evaluate((element) => element === window.__emptyDiscussionComposer), 'the composer is not rebuilt');
-      assert.equal(await composer.locator('.composer-text').inputValue(), 'Draft in an empty discussion');
+      assert.equal(await composer.locator('.composer-text').innerText(), 'Draft in an empty discussion');
     }
     assert.deepEqual(app.errors, []);
   } finally {
@@ -599,6 +602,17 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync updates a Bluesky d
     if (!sidebar) await app.page.locator('#app-list-body .browse-title-link', { hasText: story.title }).first().click();
     const root = app.page.locator('#comments-content .comment').filter({ hasText: 'Original Bluesky post' }).first();
     assert(await waitFor(async () => await root.count() === 1, 15000));
+    const sources = app.page.locator('#source-menu');
+    const trigger = app.page.locator(sidebar ? '#sidebar-discussion-meta .page-header-disclosure' : '#app-discussion-meta .page-header-disclosure');
+    await trigger.click();
+    assert.equal(await sources.locator('.source-group-disclosure').count(), 0);
+    const entry = sources.locator('.source-menu-entry').filter({ has: app.page.locator('[data-discussion-key^="bsky:"]') });
+    const choice = entry.getByRole('checkbox');
+    assert(await choice.isVisible(), 'the Bluesky filter is visible directly in Sources');
+    assert.equal(await entry.locator('.choice-label').textContent(), 'Bluesky');
+    const count = entry.locator('.source-menu-count');
+    assert.equal(await count.textContent(), '1');
+    await trigger.click();
     await root.evaluate((element) => { window.__bskySyncOriginal = element; });
     const edited = { ...post, record: { ...post.record, text: 'Edited Bluesky post' }, replyCount: 1 };
     thread.json = { thread: { post: edited, replies: [{ post: reply, replies: [] }] } };
@@ -612,6 +626,8 @@ for (const mode of ['Sidebar', 'Reader']) test(`${mode} Sync updates a Bluesky d
     const updated = app.page.locator('#comments-content .comment').filter({ hasText: 'Edited Bluesky post' }).first();
     assert(await updated.evaluate((element) => element === window.__bskySyncOriginal));
     assert.equal(await updated.locator('.comment').filter({ hasText: 'New Bluesky reply' }).count(), 1);
+    await trigger.click();
+    assert.equal(await count.textContent(), '2', 'the count pill follows the refreshed discussion');
     assert.deepEqual(app.errors, []);
   } finally {
     await app.browser.close();

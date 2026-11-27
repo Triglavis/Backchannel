@@ -6,8 +6,8 @@
 <a href="https://github.com/user-attachments/assets/17f947d5-c66c-4dfb-84a7-ade01ecd3a74"><img width="1280" height="800" alt="Backchannel's Reader showing an article and its discussion, with a second browser window showing the Sidebar on another article." src="https://github.com/user-attachments/assets/17f947d5-c66c-4dfb-84a7-ade01ecd3a74" /></a>
 
 <p align="center">
-  <a href="https://news.ycombinator.com/item?id=49090607"><img src="https://hackergit.org/badge/twalichiewicz/HNewhere.svg?style=rank&amp;rank=day&amp;scope=show" alt="Hacker News: #1 Show HN of the Day" width="250" height="55" /></a>
-  <a href="https://news.ycombinator.com/item?id=49090607"><img src="https://hackergit.org/badge/twalichiewicz/HNewhere.svg?style=rank&amp;rank=month&amp;scope=show" alt="Hacker News: #3 Show HN of the Month" width="250" height="55" /></a>
+  <a href="https://news.ycombinator.com/item?id=49090607"><img src="https://hackergit.org/badge/twalichiewicz/HNewhere.svg?style=rank&amp;rank=day&amp;scope=show" alt="Hacker News: #1 Show HN of the Day" width="250" height="55" /></a>
+  <a href="https://news.ycombinator.com/item?id=49090607"><img src="https://hackergit.org/badge/twalichiewicz/HNewhere.svg?style=rank&amp;rank=month&amp;scope=show" alt="Hacker News: #3 Show HN of the Month" width="250" height="55" /></a>
   <a href="https://trendshift.io/repositories/95983?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-95983"><img src="https://trendshift.io/api/badge/trendshift/repositories/95983/daily?language=JavaScript" alt="Backchannel on Trendshift: JavaScript repository of the day" width="250" height="55" /></a>
 </p>
 
@@ -21,7 +21,7 @@ Skip the two-tab tango. Backchannel checks the pages you visit against your chos
 
 ### Follow the conversation through the article
 
-Quoted passages can be highlighted in the article. Click a highlight to focus the discussion on comments about that passage. Turn on **Annotations** in settings to try it, and enable **Enhanced PDF support** for highlights directly on PDFs (not supported on Firefox).
+Quoted passages can be highlighted in the article. Click a highlight to focus the discussion on comments about that passage. Turn on **Annotations** in settings to try it, and enable **Enhanced PDF support** for highlights directly on PDFs (not supported on Firefox).
 
 <img src="site/src/shot-annotations.webp" width="750" alt="An article with a quoted passage highlighted and the sidebar focused on comments about it." />
 
@@ -29,12 +29,12 @@ Quoted passages can be highlighted in the article. Click a highlight to focus th
 
 Blend the sources you choose into a custom front page at [backchnnl.app](https://backchnnl.app), and open articles in the Reader alongside their discussions.
 
-Choose **Sync schedule** in **Settings → Sources**. Front Pages
+Choose **Sync schedule** in **Settings → Sources**. Front Pages
 refresh while you use that view. Opening an article checks its discussions,
 with saved comments available during the check. **Manual** pauses automatic
 feed and Collection checks; you can still press Sync or open an article.
 
-<img src="site/src/shot-reader.webp" width="750" alt="The Backchannel Reader showing a list of stories with one open beside it." />
+<img src="site/src/shot-reader.webp" width="750" alt="The Backchannel Reader showing a list of stories with one open beside it." />
 
 ### Make it yours
 
@@ -55,7 +55,7 @@ Install a userscript manager for your browser, then select **Install** above:
 ### What exactly is the script doing with my information?
 
 The sources you enable determine where Backchannel looks for discussions.
-Optional Account sync uses Cloudflare to store an encrypted snapshot and
+Optional Account sync uses Cloudflare to store an encrypted snapshot and
 related account metadata.
 
 In Reader, **By link** lists individual links. **By topic** groups links about
@@ -75,8 +75,7 @@ Source links are collected at the end. Select a number beside a passage to
 inspect the supporting text or open the publisher’s page in a new tab.
 Opening a topic marks the topic as read. Each link keeps its own read status.
 
-For a published topic, Reader requests the brief by public topic ID. The Topics
-Worker uses discussion activity to choose which originals to read, draws on
+For a published topic, Reader requests the brief by public topic ID. The Topics Worker uses discussion activity to choose which originals to read, draws on
 distinct publishers for details, and caches the cited brief across readers.
 If the brief is empty, Reader checks the linked publishers for short excerpts
 and can show available shared link previews. Imported bookmarks marked for
@@ -86,12 +85,12 @@ topic by copying the Reader address. Reader also groups
 links using titles, URL paths, and saved page metadata on your device. Articles
 for device-only groups use the sources available there.
 
-The Topics Worker finds credited Wikipedia and Wikimedia Commons images for
+The Topics Worker finds credited Wikipedia and Wikimedia Commons images for
 public subjects. Reader can look up a short subject name directly on Wikipedia
 when it needs a thumbnail, and caches the result on your device. The Commons
 file page gives the image credit and license.
 
-- Hacker News talks to the HN API, Algolia search, and news.ycombinator.com, with
+- Hacker News talks to the HN API, Algolia search, and news.ycombinator.com, with
 no persistent identifier attached.
 - Reddit sends the pages you visit to reddit.com, and if you're
 signed in to Reddit, those requests arrive as your account. Signed out, they carry a long-lived device identifier
@@ -132,7 +131,7 @@ Full detail, including a host-by-host table, in [SECURITY.md](SECURITY.md).
 
 Your settings, notes, Collection and reading queue are saved locally in your userscript manager. Removing the script or clearing the manager's data can delete the local copy.
 
-When Account sync is available, enter your email in **Settings → Account** in
+When Account sync is available, enter your email in **Settings → Account** in
 Reader and verify the code in your inbox. For a new account, create and
 confirm a passkey that supports encrypted sync, customize your birb, choose
 whether to share diagnostics, and save your recovery key. Sync starts

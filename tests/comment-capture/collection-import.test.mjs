@@ -445,12 +445,19 @@ test("Collection settings download portable bookmarks and the existing notes exp
 	}
 });
 
-test("Sidebar Collection settings link to the Reader's export controls", async () => {
+test("Sidebar Collection imports and exports bookmarks and notes in place", async () => {
 	const url = STORIES[0].url;
+	const key = "framed.example.com/post/99";
+	const noteKey = "HNewhere:notes:url:" + key;
 	const app = await launchApp({
 		topHosts: [new URL(url).hostname],
 		sharedStore: true,
 		settings: { autoOpenSidebar: true, updateCheck: false },
+		values: {
+			[migratedKey]: true,
+			"HNewhere:notes_index": [{ key: noteKey, kind: "url", id: key, url, title: "Private export", count: 1 }],
+			[noteKey]: { version: 1, notes: [{ id: "sidebar-export-test", text: "A private Sidebar note", created: 1700000000 }] },
+		},
 	});
 	try {
 		const { page } = app;
@@ -459,13 +466,29 @@ test("Sidebar Collection settings link to the Reader's export controls", async (
 		await page.getByRole("button", { name: "Open Backchannel settings" }).click();
 		const settings = page.getByRole("dialog", { name: "Settings" });
 		await settings.getByRole("button", { name: "Collection", exact: true }).click();
-		assert.equal(await settings.getByRole("button", { name: "Download JSON" }).count(), 0);
-		const [reader] = await Promise.all([
-			app.context.waitForEvent("page"),
-			settings.getByRole("link", { name: "Open Collection settings in Reader" }).click(),
+		assert(await waitFor(() => page.frame("backchannel-sidebar-settings"), 3500));
+		const frame = page.frame("backchannel-sidebar-settings");
+		const [chooser] = await Promise.all([
+			page.waitForEvent("filechooser"),
+			frame.getByRole("button", { name: "Choose file…" }).click(),
 		]);
-		await reader.getByRole("region", { name: "Export", exact: true }).getByRole("button", { name: "Download JSON" }).waitFor();
-		assert.equal(new URL(reader.url()).origin, new URL(readerURL).origin);
+		await chooser.setFiles({ name: "bookmarks.html", mimeType: "text/html",
+			buffer: Buffer.from(bookmarkHTML(bookmark("https://imported.example.com/sidebar", "Imported from the Sidebar"))) });
+		await frame.getByRole("button", { name: "Import 1 link", exact: true }).click();
+		assert(await waitFor(() => page.frame("backchannel-saved-list"), 3500));
+		await page.frame("backchannel-saved-list").getByRole("link", { name: "Imported from the Sidebar", exact: true }).waitFor();
+		await page.getByRole("button", { name: "Open Backchannel settings" }).click();
+		await settings.getByRole("button", { name: "Collection", exact: true }).click();
+		assert(await waitFor(() => page.frame("backchannel-sidebar-settings"), 3500));
+		const exports = page.frame("backchannel-sidebar-settings").getByRole("region", { name: "Export", exact: true });
+		const download = async (name) => {
+			const [file] = await Promise.all([page.waitForEvent("download"), exports.getByRole("button", { name }).click()]);
+			return readFile(await file.path(), "utf8");
+		};
+		assert.match(await download("Download HTML"), /Imported from the Sidebar/);
+		assert.equal(JSON.parse(await download("Download JSON")).documents[0].notes[0].text, "A private Sidebar note");
+		assert.equal(page.url(), url);
+		assert.deepEqual(app.context.pages(), [page]);
 	} finally {
 		await app.browser.close();
 	}

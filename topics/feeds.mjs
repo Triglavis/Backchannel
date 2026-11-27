@@ -22,7 +22,7 @@ const BLUESKY_FEEDS = [
 const FEEDS = [
   {
     id: "hn",
-    name: "Hacker News",
+    name: "Hacker\u00a0News",
     feed: "https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=points%3E5&hitsPerPage=65",
     entries: (data) => data.hits.map((item) => {
       const discussion = "https://news.ycombinator.com/item?id=" + encodeURIComponent(item.objectID);

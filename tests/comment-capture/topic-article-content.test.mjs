@@ -36,7 +36,7 @@ const issue = {
 	],
 };
 
-function openReader({ catalogPages = [], catalogTopics = [], artwork, theme = "auto", responses = [{ match: (url) => url === articleURL, json: issue }], ...options } = {}) {
+function openReader({ catalogPages = [], catalogTopics = [], artwork, theme = "auto", responses = [{ match: (url) => url === articleURL, json: issue }], mapIndex = (index) => index, ...options } = {}) {
 	const now = Date.now();
 	const index = {
 		version: 1, generatedAt: new Date(now).toISOString(), topics: [{ ...topic, image: artwork }, ...catalogTopics],
@@ -50,7 +50,7 @@ function openReader({ catalogPages = [], catalogTopics = [], artwork, theme = "a
 		sharedStore: true,
 		settings: { theme, updateCheck: false, sourceRefreshMinutes: 0, sources: { hn: true }, frontPageMode: "topics", frontPageTopics: ["technology"] },
 		values: { "HNewhere:app_panes": { list: true, discussion: true }, "HNewhere:frontpage_feed:technology/hn/front/": { timestamp: now, stories } },
-		responses: [{ match: (url) => url === catalogURL, json: index }, ...responses],
+		responses: [{ match: (url) => url === catalogURL, get json() { return mapIndex(index); } }, ...responses],
 		...options,
 	});
 }
@@ -134,9 +134,10 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	assert.equal(await style(menu.locator(".choice-label").first(), "fontFamily"), uiFace);
 	assert.equal(await style(menu.locator(".app-discussion-summary"), "color"), secondary);
 	assert.equal(await style(menu.locator(".discussion-thread-link").first(), "color"), accent);
-	const group = menu.getByRole("button", { name: /Hacker News discussions/ });
-	assert.equal(await style(group, "fontFamily"), uiFace);
-	assert.equal(await style(group, "borderRightColor", "::after"), secondary);
+	const pill = menu.locator(".source-menu-count").first();
+	assert.equal(await style(pill, "fontFamily"), uiFace);
+	assert.equal(await style(pill, "fontSize"), "10px");
+	assert.equal(await style(pill, "borderTopRightRadius"), "999px");
 	assert.equal(await style(all, "backgroundColor"), accent);
 	assert.equal(await style(all, "borderLeftColor", "::after"), background);
 	assert.equal(await style(all, "outlineColor"), accent);
@@ -147,7 +148,7 @@ for (const [theme, system, paper, scheme, background, buttonBackground] of [
 	assert.equal(await style(all, "backgroundColor", "::after"), background);
 	await thread.press("Space");
 	await all.press("Space");
-	const sync = menu.getByRole("button", { name: "Sync" });
+	const sync = menu.locator(".app-sources-sync");
 	assert(await sync.isDisabled());
 	assert.equal(await style(sync, "color"), secondary);
 	assert(await waitFor(async () => await style(all, "borderTopColor") === rule));
@@ -685,6 +686,74 @@ test("background synthesis keeps keyboard focus on the same source and action", 
 	} finally {
 		await app.browser.close();
 	}
+});
+
+test("an open brief keeps supported paragraphs while a newer topic index refreshes it", async (t) => {
+	const raw = await readFile(new URL("../../HNewhere.user.js", import.meta.url), "utf8");
+	const seam = "\tfunction appTopicVisitIds(";
+	assert(raw.includes(seam));
+	const source = raw.replace(seam, "\twindow.__renderTopicReader = renderAppList;\n" + seam);
+	const kept = "The signal crew measured the interlocking at each terminus.";
+	const removedChange = "Crews completed the evening tests on 17 November.";
+	const previous = { ...issue, sections: [{ heading: "Interlocking tests", paragraphs: [
+		{ text: kept, sourceIds: ["s1"], citations: [{ sourceId: "s1", excerpt: issue.sources[0].excerpt }] },
+		issue.sections[0].paragraphs[0],
+	] }], changes: [{ text: removedChange, sourceIds: ["s2"], citations: [{ sourceId: "s2", excerpt: issue.sources[1].excerpt }] }] };
+	const updated = "Crews signed off the newly installed relay.";
+	const next = { ...previous, sections: [{ heading: "Sign-off", paragraphs: [{ text: updated, sourceIds: ["s1"] }] }] };
+	let edition = 0, ready = false;
+	const { browser, page, requests } = await openReader({ source,
+		mapIndex(index) {
+			if (!edition) return index;
+			return { ...index, generatedAt: new Date(Date.parse(index.generatedAt) + 1000).toISOString(), pages: [
+				index.pages[0], { ...index.pages[1], topicIds: [], reviewed: true },
+			] };
+		},
+		responses: [
+			{ match: (url) => url === articleURL && edition && !ready, status: 202, headers: "Retry-After: 1" },
+			{ match: (url) => url === articleURL, get json() { return edition ? next : previous; } },
+		],
+	});
+	t.after(() => browser.close());
+	await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const article = page.locator(".app-topic-article");
+	await article.getByText(kept).waitFor();
+	await article.getByText(issue.sections[0].paragraphs[0].text).waitFor();
+	await article.getByText(removedChange).waitFor();
+	const reads = requests.filter(({ url }) => url === articleURL).length;
+	edition++;
+	await page.clock.setFixedTime(new Date(Date.now() + 4 * 60 * 60 * 1000));
+	await page.evaluate(() => window.__renderTopicReader());
+	assert(await waitFor(() => requests.filter(({ url }) => url === articleURL).length > reads), "the new index requests a new brief");
+	assert(await article.getByText(kept).isVisible(), "the still-published paragraph stays readable while the brief refreshes");
+	assert.equal(await article.getByText(issue.sections[0].paragraphs[0].text).count(), 0, "a claim citing withdrawn coverage disappears immediately");
+	assert.equal(await article.getByText(removedChange).count(), 0, "a change citing withdrawn coverage disappears immediately");
+
+	ready = true;
+	await article.getByText(updated).waitFor();
+	assert.equal(await article.getByText(kept).count(), 0, "the new brief replaces the old one");
+});
+
+test("a Topic Article shows only cited public developments in What changed", async (t) => {
+	const latest = { text: "Crews switched the new signals on Friday.", sourceIds: ["s1"],
+		citations: [{ sourceId: "s1", excerpt: "The signals went live on Friday." }] };
+	const { browser, page } = await openReader({ responses: [
+		{ match: (url) => url === articleURL, json: { ...issue, changes: [latest,
+			{ text: "A claim with no passage citation", sourceIds: ["s1"] },
+			{ text: "A claim from an unknown source", sourceIds: ["s9"], citations: [{ sourceId: "s9", excerpt: "An invalid passage" }] },
+		] } },
+	] });
+	t.after(() => browser.close());
+	await page.goto("https://backchnnl.app/?topic=" + encodeURIComponent(topic.id));
+	const article = page.locator(".app-topic-article");
+	await article.getByRole("heading", { name: "Commissioning the line" }).waitFor();
+	const heading = article.getByRole("heading", { name: "What changed", exact: true });
+	assert(await heading.isVisible());
+	const changes = heading.locator("..");
+	assert.match(await changes.locator("p").first().textContent(), /Crews switched the new signals on Friday\./);
+	assert.equal(await changes.locator("p").count(), 1);
+	await changes.getByRole("button", { name: "Source 1, Signal Journal" }).click();
+	await page.getByRole("dialog").getByText(latest.citations[0].excerpt, { exact: true }).waitFor();
 });
 
 test("malformed citations and unsupported origins cannot replace local coverage or send private identifiers", async () => {
